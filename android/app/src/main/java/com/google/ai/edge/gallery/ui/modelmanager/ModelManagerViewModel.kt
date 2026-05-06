@@ -1235,7 +1235,10 @@ constructor(
         configs = configs,
         sizeInBytes = info.fileSize,
         downloadFileName = "$IMPORTS_DIR/${info.fileName}",
-        showBenchmarkButton = false,
+        // Upstream gallery hardcoded this to false, hiding the perfectly-good
+        // LiteRT-LM benchmark API from any sideloaded model. Re-enable so we
+        // can measure prefill/decode tok/s without leaving the app.
+        showBenchmarkButton = true,
         showRunAgainButton = false,
         imported = true,
         llmSupportImage = llmSupportImage,
