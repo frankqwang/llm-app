@@ -122,8 +122,9 @@ object LlmChatModelHelper : LlmModelHelper {
           else null,
       )
 
-    // Check if the model file supports speculative decoding.
-    var supportsSpeculativeDecoding = false
+    // Upstream gallery left this as a hardcoded `false` stub, which silently disables MTP for every model. Derive from model capabilities so the runtime honors the user toggle.
+    val supportsSpeculativeDecoding =
+      model.capabilityToTaskTypes.containsKey(ModelCapability.SPECULATIVE_DECODING)
     // Create an instance of LiteRT LM engine and conversation.
     try {
       var speculativeDecoding = false

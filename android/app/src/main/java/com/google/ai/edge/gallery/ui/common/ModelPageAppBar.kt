@@ -217,7 +217,9 @@ fun ModelPageAppBar(
     if (!task.allowCapability(ModelCapability.LLM_THINKING, model)) {
       modelConfigs.removeIf { it.key == ConfigKeys.ENABLE_THINKING }
     }
-    var supportsSpeculativeDecoding = false
+    // Upstream gallery hardcoded this to false, which always strips the MTP toggle from the chat config dialog. Derive from model capabilities instead.
+    val supportsSpeculativeDecoding =
+      model.capabilityToTaskTypes.containsKey(ModelCapability.SPECULATIVE_DECODING)
     if (
       !supportsSpeculativeDecoding ||
         !task.allowCapability(ModelCapability.SPECULATIVE_DECODING, model)
