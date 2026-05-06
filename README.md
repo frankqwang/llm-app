@@ -33,14 +33,21 @@ This skips HuggingFace OAuth entirely. We build the app with placeholders untouc
 The model is gated, so you must be logged in with an HF account that's accepted the Gemma 4 terms first.
 
 ```powershell
-# PowerShell, after `pip install -U huggingface_hub` and `huggingface-cli login`
-huggingface-cli download `
-  litert-community/gemma-4-E2B-it-litert-lm `
+# PowerShell, after `pip install -U huggingface_hub` and `hf auth login`.
+# Note: `huggingface-cli` is deprecated — the binary is now `hf`.
+hf download litert-community/gemma-4-E2B-it-litert-lm `
   gemma-4-E2B-it.litertlm `
   --local-dir C:\dev\llm-app\models
 ```
 
-This writes `C:\dev\llm-app\models\gemma-4-E2B-it.litertlm` (~2.4 GB). The `models/` folder is gitignored.
+This writes `C:\dev\llm-app\models\gemma-4-E2B-it.litertlm` (~2.6 GB). The `models/` folder is gitignored.
+
+The HF repo has 4 files (10.9 GB total) — only download the generic `.litertlm`. Skip:
+- `gemma-4-E2B-it-web.task` — MediaPipe runtime, not LiteRT-LM
+- `gemma-4-E2B-it_qualcomm_qcs8275.litertlm` — Qualcomm QCS8275 NPU build
+- `gemma-4-E2B-it_qualcomm_sm8750.litertlm` — Snapdragon 8 Elite NPU build
+
+Qualcomm-specific NPU builds won't run on MediaTek (Dimensity) or Tensor SoCs.
 
 ### Step 2 — build & install the APK
 
