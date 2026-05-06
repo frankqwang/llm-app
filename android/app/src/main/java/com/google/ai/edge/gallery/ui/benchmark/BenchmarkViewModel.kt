@@ -22,6 +22,7 @@ import androidx.lifecycle.viewModelScope
 import com.google.ai.edge.gallery.BuildConfig
 import com.google.ai.edge.gallery.data.DataStoreRepository
 import com.google.ai.edge.gallery.data.Model
+import com.google.ai.edge.gallery.data.ModelCapability
 import com.google.ai.edge.gallery.proto.BenchmarkResult
 import com.google.ai.edge.gallery.proto.LlmBenchmarkBasicInfo
 import com.google.ai.edge.gallery.proto.LlmBenchmarkResult
@@ -29,6 +30,7 @@ import com.google.ai.edge.gallery.proto.LlmBenchmarkStats
 import com.google.ai.edge.gallery.proto.ValueSeries
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.ExperimentalApi
+import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.benchmark
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -140,6 +142,13 @@ constructor(
           else -> Backend.CPU()
         }
       val modelPath = model.getPath(context = appContext)
+      // Mirror what LlmChatModelHelper does: enable speculative decoding (MTP)
+      // for the duration of the benchmark when the model declares the capability.
+      // Without this, benchmark numbers under-report Gemma 4 GPU performance by ~2x.
+      val supportsSpeculativeDecoding =
+        model.capabilityToTaskTypes.containsKey(ModelCapability.SPECULATIVE_DECODING)
+      ExperimentalFlags.enableSpeculativeDecoding = supportsSpeculativeDecoding
+      Log.d(TAG, "Benchmark speculative decoding (MTP): $supportsSpeculativeDecoding")
       for (i in 0 until runCount) {
         Log.d(TAG, "Start running #$i...")
         val benchmarkInfo =
@@ -166,6 +175,8 @@ constructor(
         setRunProgress(completedRunCount = i + 1)
       }
       val endMs = System.currentTimeMillis()
+      // Reset the global flag so subsequent chat sessions get to set it themselves.
+      ExperimentalFlags.enableSpeculativeDecoding = false
       if (needCleanUpCacheDir) {
         benchmarkCacheDir.deleteRecursively()
         Log.d(TAG, "Cleaned up benchmark cache dir: ${benchmarkCacheDir.absolutePath}")
