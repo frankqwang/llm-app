@@ -20,8 +20,11 @@ llm-app/
 ## Prerequisites
 
 - Android Studio Ladybug+ (or Hedgehog with AGP 8.7+)
-- JDK 17
-- Android SDK Platform 35 + Build-Tools 35
+- **JDK 21 from Adoptium / Temurin** — required because LiteRT-LM 0.11.0 ships Java 21 class files. The project uses Gradle Daemon Toolchain (`android/gradle/gradle-daemon-jvm.properties`), so on first build Gradle will auto-discover an installed Temurin 21 or auto-download one. Install manually on each machine:
+  - Windows: `winget install EclipseAdoptium.Temurin.21.JDK` (or download `.msi` from https://adoptium.net/temurin/releases/?version=21)
+  - macOS: `brew install --cask temurin@21`
+  - Linux: distro package or Adoptium tarball
+- Android SDK Platform 35 + Build-Tools 35 (Android Studio installs these)
 - Test device: Android 12+ (minSdk 31), 8 GB RAM minimum for Gemma 4 E2B-IT
 - A Hugging Face account that has accepted the Gemma 4 license at https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm
 
