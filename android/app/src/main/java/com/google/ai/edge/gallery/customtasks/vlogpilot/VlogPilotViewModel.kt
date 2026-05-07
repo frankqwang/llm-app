@@ -186,7 +186,15 @@ class VlogPilotViewModel @Inject constructor(
       else -> _state.value = PipelineState.Running(snapshot.headline)
     }
     _progress.value = progressWithRecent(snapshot)
-    scheduleDecisionRefresh()
+    if (shouldRefreshDecisions(p)) scheduleDecisionRefresh()
+  }
+
+  private fun shouldRefreshDecisions(p: PipelineProgress): Boolean = when (p) {
+    is PipelineProgress.DownloadingModels,
+    PipelineProgress.Ingesting,
+    is PipelineProgress.Perceiving,
+    is PipelineProgress.Annotating -> false
+    else -> true
   }
 
   private fun snapshotFor(p: PipelineProgress): ProgressSnapshot = when (p) {
@@ -198,6 +206,13 @@ class VlogPilotViewModel @Inject constructor(
       total = 100,
     )
     PipelineProgress.Ingesting -> ProgressSnapshot("扫描相册", "读取 MediaStore，过滤非相机目录和过大文件", "ingest")
+    is PipelineProgress.SelectingEvents -> ProgressSnapshot(
+      headline = "筛选高价值事件 ${p.selectedCount}/${p.candidateCount}",
+      detail = p.detail,
+      stage = "event_select",
+      current = p.selectedCount,
+      total = p.candidateCount,
+    )
     is PipelineProgress.IngestDone -> ProgressSnapshot(
       headline = "相册扫描完成",
       detail = "已收集 ${p.assetCount} 个输入素材，切出 ${p.eventCount} 个事件；接下来做本地视觉感知",
@@ -221,7 +236,7 @@ class VlogPilotViewModel @Inject constructor(
         else -> "语义标注完成"
       }
       val why = if (p.mediaType.contains("video") || p.mediaType.contains("live")) {
-        "视频会抽 6 帧拼成网格，让 VLM 判断动作变化和 best moment"
+        "视频会按时长和切点自适应抽帧，让 VLM 判断动作变化和 best moment"
       } else {
         "图片会送 512px 缩略图，让 VLM 输出 scene/subjects/action/mood"
       }
@@ -303,7 +318,7 @@ class VlogPilotViewModel @Inject constructor(
   private fun scheduleDecisionRefresh() {
     if (decisionRefreshJob?.isActive == true) return
     decisionRefreshJob = viewModelScope.launch {
-      delay(250)
+      delay(750)
       _decisions.value = withContext(Dispatchers.IO) { DecisionStore.loadAll(appContext) }
     }
   }

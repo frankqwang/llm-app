@@ -27,7 +27,7 @@ object PhotoIngest {
     /** Additional substring matches against RELATIVE_PATH (case-insensitive).
      *  Useful for "include this device-specific folder too", e.g. "Pictures/Pocket3/". */
     val extraIncludePaths: List<String> = emptyList(),
-    val maxVideoSizeBytes: Long = 100L * 1024 * 1024,   // 100 MB videos skipped
+    val maxVideoSizeBytes: Long = 512L * 1024 * 1024,   // keep normal travel clips; still skip huge raw files
     val maxImageSizeBytes: Long = 50L * 1024 * 1024,    // 50 MB images skipped
     val minImageSizeBytes: Long = 50L * 1024,           // <50 KB = thumbnail/junk, skip
   )

@@ -26,7 +26,7 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.MediaLoader
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.PerceptionCache
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.PerceptionEngine
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventSegmenter
-import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.TravelSceneScorer
+import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventSelector
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.VideoFrameSheetBuilder
 import com.google.ai.edge.gallery.customtasks.vlogpilot.render.VideoRenderer
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
@@ -73,12 +73,12 @@ class PipelineOrchestrator(
       progress(PipelineProgress.DownloadingModels(pct, label))
     }
 
-    // 2. Ingest + segment + cap. Two-tier event list:
+    // 2. Ingest + segment + value-rank. Two-tier event list:
     //    - "resume": events from past runs that already have a cached
     //      timeline_final.json but no MP4 (render failed last time, e.g. font
     //      missing). These are basically free to finish — just need to call
     //      ffmpeg again.
-    //    - "new": top-maxEvents most-recent events that have no cached work.
+    //    - "new": top-maxEvents high-value events that have no cached work.
     //
     //    Resume events bypass the maxEvents cap because they're cheap.
     progress(PipelineProgress.Ingesting)
@@ -88,10 +88,7 @@ class PipelineOrchestrator(
     val selectionPerceptions = HashMap<String, Perception?>()
     fun selectionPerception(assetId: String): Perception? =
       selectionPerceptions.getOrPut(assetId) { PerceptionCache.get(context, assetId) }
-    val travelScores = allEvents.associate { event ->
-      val eventAssets = event.assetIds.mapNotNull { assetMap[it] }
-      event.eventId to TravelSceneScorer.eventScore(event, eventAssets, ::selectionPerception)
-    }
+    val rankedCandidates = EventSelector.rank(allEvents, assetMap, ::selectionPerception)
     val sortedDesc = allEvents.sortedByDescending { it.endEpochMs }
     val candidatesDir = java.io.File(context.filesDir, "candidates")
     val decisionsRoot = java.io.File(context.filesDir, "decisions")
@@ -101,22 +98,27 @@ class PipelineOrchestrator(
       return tlf.isFile && !mp4.isFile
     }
     val resumeEvents = sortedDesc.filter { isResumable(it.eventId) }
-    val newEvents = sortedDesc
-      .filter { !isResumable(it.eventId) }
-      .sortedWith(
-        compareByDescending<Event> { travelScores[it.eventId] ?: 0f }
-          .thenByDescending { it.endEpochMs },
-      )
+    val resumeEventIds = resumeEvents.map { it.eventId }.toSet()
+    val newCandidates = rankedCandidates
+      .filter { it.eventId !in resumeEventIds }
       .take(maxEvents)
+    val newEvents = newCandidates.map { it.event }
     // Resume first (cheap render-only), then new (expensive full pipeline).
     val events = resumeEvents + newEvents
     val keptAssetIds = events.flatMap { it.assetIds }.toSet()
-    Log.d(TAG, "events: ${resumeEvents.size} resumable (${resumeEvents.map { it.eventId }}) + ${newEvents.size} new (cap=$maxEvents)")
+    val candidateSummary = rankedCandidates.take(8).joinToString(" | ") { it.compactSummary() }
+    val selectedSummary = (
+      resumeEvents.map { "${it.eventId}:resume" } +
+        newCandidates.map { it.compactSummary() }
+      ).joinToString(" | ")
+    Log.d(TAG, "events: ${resumeEvents.size} resumable (${resumeEvents.map { it.eventId }}) + ${newEvents.size} selected by value (cap=$maxEvents)")
+    StateBreadcrumb.mark(context, "event_candidates", candidateSummary.ifBlank { "none" })
     StateBreadcrumb.mark(
       context,
       "event_select",
-      events.joinToString { "${it.eventId}:travel=${((travelScores[it.eventId] ?: 0f) * 100).toInt()}" },
+      selectedSummary.ifBlank { "none" },
     )
+    progress(PipelineProgress.SelectingEvents(rankedCandidates.size, events.size, selectedSummary.ifBlank { "none" }))
     if (events.isEmpty()) {
       progress(PipelineProgress.AllDone)
       return Result(emptyMap())
@@ -282,7 +284,7 @@ class PipelineOrchestrator(
       )
       val assetAnnotateStart = System.nanoTime()
       val annotation = try {
-        annotateAsset(annotator, asset)
+        annotateAsset(annotator, asset, perc.sceneCuts)
       } catch (t: CancellationException) {
         throw t
       } catch (t: Throwable) {
@@ -317,6 +319,7 @@ class PipelineOrchestrator(
   private suspend fun annotateAsset(
     annotator: VlmAnnotator,
     asset: Asset,
+    sceneCutsSec: List<Float> = emptyList(),
   ): VlmAnnotator.Annotation? =
     if (asset.mediaType == MediaType.IMAGE) {
       val thumb = MediaLoader.loadImage(context, asset, maxSide = 512) ?: return null
@@ -326,7 +329,7 @@ class PipelineOrchestrator(
         runCatching { thumb.recycle() }
       }
     } else {
-      val sheet = VideoFrameSheetBuilder.build(context, asset)
+      val sheet = VideoFrameSheetBuilder.build(context, asset, sceneCutsSec)
       if (sheet != null) {
         try {
           annotator.annotateVideo(sheet.bitmap, sheet.frameTimestampsSec, asset.mediaType.name.lowercase())
@@ -388,8 +391,8 @@ class PipelineOrchestrator(
         }
       }
 
-      if (eventAssets.size < 3) {
-        progress(PipelineProgress.EventFailed(event.eventId, "too few assets"))
+      if (!isProcessableEvent(eventAssets)) {
+        progress(PipelineProgress.EventFailed(event.eventId, "too few usable assets"))
         return
       }
 
@@ -493,6 +496,9 @@ class PipelineOrchestrator(
     return Timeline(eventId = event.eventId, directorBriefRef = "", shots = shots)
   }
 
+  private fun isProcessableEvent(assets: List<Asset>): Boolean =
+    assets.size >= 3 || assets.any { it.mediaType == MediaType.VIDEO && it.durationMs >= 15_000L }
+
   private suspend fun applyRevisions(
     base: Timeline,
     revisions: List<RevisedRequest>,
@@ -530,7 +536,9 @@ class PipelineOrchestrator(
 
   private fun needsVlmAnnotation(perception: Perception, asset: Asset): Boolean {
     if (perception.vlmTags.scene.isBlank()) return true
-    return asset.mediaType != MediaType.IMAGE && perception.videoInsight.frameTimestampsSec.isEmpty()
+    if (asset.mediaType == MediaType.IMAGE) return false
+    val expectedFrames = VideoFrameSheetBuilder.targetFrameCount(asset)
+    return perception.videoInsight.frameTimestampsSec.size < expectedFrames
   }
 
   /**
@@ -564,7 +572,7 @@ class PipelineOrchestrator(
         ),
       )
       val assetStart = System.nanoTime()
-      val annotation = annotateAsset(asset, annotator)
+      val annotation = annotateAsset(asset, annotator, perc.sceneCuts)
       if (annotation != null && annotation.hasSignal()) {
         val updated = perc.copy(vlmTags = annotation.tags, videoInsight = annotation.videoInsight)
         perceptions[perc.assetId] = updated
@@ -588,13 +596,17 @@ class PipelineOrchestrator(
   }
 
   /** Annotate a single asset; returns null if loading failed or annotator threw. */
-  private suspend fun annotateAsset(asset: Asset, annotator: VlmAnnotator): VlmAnnotator.Annotation? {
+  private suspend fun annotateAsset(
+    asset: Asset,
+    annotator: VlmAnnotator,
+    sceneCutsSec: List<Float> = emptyList(),
+  ): VlmAnnotator.Annotation? {
     return try {
       if (asset.mediaType == MediaType.IMAGE) {
         val thumb = MediaLoader.loadImage(context, asset, maxSide = 512) ?: return null
         try { annotator.annotate(thumb, asset.mediaType.name.lowercase()) } finally { runCatching { thumb.recycle() } }
       } else {
-        val sheet = VideoFrameSheetBuilder.build(context, asset)
+        val sheet = VideoFrameSheetBuilder.build(context, asset, sceneCutsSec)
         if (sheet != null) {
           try { annotator.annotateVideo(sheet.bitmap, sheet.frameTimestampsSec, asset.mediaType.name.lowercase()) }
           finally { runCatching { sheet.bitmap.recycle() } }
@@ -663,8 +675,8 @@ class PipelineOrchestrator(
         }
       }
 
-      if (eventAssets.size < 3) {
-        progress(PipelineProgress.EventFailed(event.eventId, "too few assets"))
+      if (!isProcessableEvent(eventAssets)) {
+        progress(PipelineProgress.EventFailed(event.eventId, "too few usable assets"))
         return
       }
 

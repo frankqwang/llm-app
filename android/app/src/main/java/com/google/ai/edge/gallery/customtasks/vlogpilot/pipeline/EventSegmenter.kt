@@ -10,6 +10,7 @@ package com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline
 
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
+import java.security.MessageDigest
 
 object EventSegmenter {
 
@@ -71,9 +72,9 @@ object EventSegmenter {
       groups.removeAll { it.isEmpty() }
     }
 
-    return groups.mapIndexed { idx, g ->
+    return groups.map { g ->
       Event(
-        eventId = "evt_%03d".format(idx + 1),
+        eventId = stableEventId(g),
         assetIds = g.map { it.id },
         startEpochMs = g.first().takenEpochMs,
         endEpochMs = g.last().takenEpochMs,
@@ -84,4 +85,14 @@ object EventSegmenter {
 
   private fun spanMs(group: List<Asset>): Long =
     (group.maxOfOrNull { it.takenEpochMs } ?: 0L) - (group.minOfOrNull { it.takenEpochMs } ?: 0L)
+
+  private fun stableEventId(group: List<Asset>): String {
+    val start = group.first().takenEpochMs.toString(36)
+    val end = group.last().takenEpochMs.toString(36)
+    val digest = MessageDigest.getInstance("SHA-1")
+      .digest(group.joinToString("|") { it.id }.toByteArray())
+      .take(4)
+      .joinToString("") { "%02x".format(it) }
+    return "evt_${start}_${end}_$digest"
+  }
 }

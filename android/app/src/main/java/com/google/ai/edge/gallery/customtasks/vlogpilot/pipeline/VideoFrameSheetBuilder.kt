@@ -16,29 +16,32 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.MediaLoader
+import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.SceneCutDetector
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
 import java.util.Locale
 import kotlin.math.ceil
-import kotlin.math.min
+import kotlin.math.max
 
 object VideoFrameSheetBuilder {
 
-  private const val FRAME_COUNT = 6
-  private const val CELL_W = 360
-  private const val CELL_H = 480
+  private const val CELL_W = 320
+  private const val CELL_H = 426
+  private const val MAX_FRAME_COUNT = 16
 
   data class Sheet(
     val bitmap: Bitmap,
     val frameTimestampsSec: List<Float>,
   )
 
-  fun build(context: Context, asset: Asset): Sheet? {
+  fun build(context: Context, asset: Asset, sceneCutsSec: List<Float> = emptyList()): Sheet? {
     if (asset.mediaType == MediaType.IMAGE) return null
-    val frames = MediaLoader.sampleVideoFrames(context, asset, FRAME_COUNT, maxSide = maxOf(CELL_W, CELL_H))
+    val timestamps = sampleTimestamps(asset, sceneCutsSec)
+    if (timestamps.isEmpty()) return null
+    val frames = MediaLoader.sampleVideoFramesAt(context, asset, timestamps, maxSide = maxOf(CELL_W, CELL_H))
     if (frames.isEmpty()) return null
 
-    val cols = min(3, frames.size).coerceAtLeast(1)
+    val cols = sheetColumns(frames.size)
     val rows = ceil(frames.size.toDouble() / cols.toDouble()).toInt()
     val sheet = Bitmap.createBitmap(cols * CELL_W, rows * CELL_H, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(sheet).apply { drawColor(Color.BLACK) }
@@ -53,6 +56,74 @@ object VideoFrameSheetBuilder {
       bitmap.recycle()
     }
     return Sheet(sheet, frames.map { it.first })
+  }
+
+  fun targetFrameCount(asset: Asset): Int {
+    val durSec = asset.durationMs / 1000f
+    if (durSec <= 0f) return 0
+    return when {
+      asset.mediaType == MediaType.LIVE_PHOTO && durSec <= 4f -> 4
+      asset.mediaType == MediaType.LIVE_PHOTO -> 6
+      durSec <= 6f -> 4
+      durSec <= 15f -> 6
+      durSec <= 30f -> 8
+      durSec <= 60f -> 10
+      durSec <= 180f -> 12
+      else -> MAX_FRAME_COUNT
+    }
+  }
+
+  private fun sampleTimestamps(asset: Asset, sceneCutsSec: List<Float>): List<Float> {
+    val durSec = asset.durationMs / 1000f
+    val target = targetFrameCount(asset)
+    if (durSec <= 0f || target <= 0) return emptyList()
+    if (durSec <= 0.5f) return listOf(durSec / 2f)
+
+    val even = (0 until target).map { i -> durSec * (i + 0.5f) / target }
+    val sceneCenters = sceneCenters(durSec, sceneCutsSec, limit = max(2, target * 2 / 3))
+    val anchors = listOf(durSec * 0.12f, durSec * 0.50f, durSec * 0.88f)
+    val minGapSec = (durSec / (target * 1.8f)).coerceIn(0.45f, 5f)
+
+    val picked = mutableListOf<Float>()
+    fun addIfUseful(tSec: Float, minGap: Float) {
+      val t = tSec.coerceIn(0.05f, (durSec - 0.05f).coerceAtLeast(0.05f))
+      if (picked.none { kotlin.math.abs(it - t) < minGap }) picked += t
+    }
+
+    (sceneCenters + even + anchors).forEach { addIfUseful(it, minGapSec) }
+    if (picked.size < target) even.forEach { addIfUseful(it, minGapSec / 2f) }
+    if (picked.size < target) anchors.forEach { addIfUseful(it, minGapSec / 3f) }
+
+    return picked
+      .sorted()
+      .take(target)
+  }
+
+  private fun sceneCenters(durSec: Float, sceneCutsSec: List<Float>, limit: Int): List<Float> {
+    val cuts = sceneCutsSec
+      .filter { it > 0.3f && it < durSec - 0.3f }
+      .distinct()
+      .sorted()
+    if (cuts.isEmpty() || limit <= 0) return emptyList()
+    val centers = SceneCutDetector.boundaries(durSec, cuts)
+      .filter { (start, end) -> end - start >= 0.6f }
+      .map { (start, end) -> (start + end) / 2f }
+    return selectSpread(centers, limit)
+  }
+
+  private fun selectSpread(values: List<Float>, limit: Int): List<Float> {
+    if (values.size <= limit) return values
+    return (0 until limit).map { i ->
+      val idx = ((i + 0.5f) * values.size / limit).toInt().coerceIn(0, values.lastIndex)
+      values[idx]
+    }.distinct()
+  }
+
+  private fun sheetColumns(count: Int): Int = when {
+    count <= 1 -> 1
+    count <= 4 -> 2
+    count <= 9 -> 3
+    else -> 4
   }
 
   private fun drawFrame(canvas: Canvas, bitmap: Bitmap, x: Int, y: Int) {

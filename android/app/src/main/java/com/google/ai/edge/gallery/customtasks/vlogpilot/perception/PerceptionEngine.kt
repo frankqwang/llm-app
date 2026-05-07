@@ -18,6 +18,7 @@ package com.google.ai.edge.gallery.customtasks.vlogpilot.perception
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.PowerPacer
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.FaceBox
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
@@ -41,7 +42,8 @@ class PerceptionEngine(
    * the VLM annotation pass fills it in after Gemma 4 boots.
    */
   fun analyze(asset: Asset): Perception {
-    val cover: Bitmap = MediaLoader.loadImage(context, asset, maxSide = 1024)
+    PowerPacer.applyBackgroundThreadPriority()
+    val cover: Bitmap = MediaLoader.loadImage(context, asset, maxSide = 768)
       ?: run {
         Log.w(TAG, "loadImage failed: ${asset.contentUri}")
         return Perception(assetId = asset.id, isJunk = true, junkReason = "decode_failed")

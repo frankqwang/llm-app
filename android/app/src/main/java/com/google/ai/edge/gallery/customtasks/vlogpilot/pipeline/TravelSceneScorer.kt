@@ -27,9 +27,11 @@ object TravelSceneScorer {
     "山路", "登山", "徒步", "露营", "街道", "街景", "城市", "古镇", "广场",
     "桥", "公园", "寺", "庙", "博物馆", "展览", "建筑", "机场", "车站",
     "火车", "高铁", "飞机", "酒店", "民宿", "餐厅", "咖啡", "行李", "路牌",
+    "动物园", "野生动物", "熊猫", "长颈鹿", "大象", "猴子", "海洋馆", "水族馆",
     "码头", "游船", "beach", "mountain", "street", "city", "hotel", "airport",
     "station", "train", "flight", "landmark", "museum", "restaurant", "travel",
-    "scenery", "landscape", "sunset", "outdoor",
+    "scenery", "landscape", "sunset", "outdoor", "zoo", "safari", "animal",
+    "wildlife", "aquarium", "panda", "elephant", "giraffe", "monkey",
   )
 
   private val negativeKeywords = listOf(
@@ -50,8 +52,15 @@ object TravelSceneScorer {
     val routeScore = (routeKm(gpsAssets) / 3f).coerceIn(0f, 1f)
     val spanHours = ((event.endEpochMs - event.startEpochMs).coerceAtLeast(0L) / 3_600_000f)
     val spanScore = ((spanHours - 1f) / 12f).coerceIn(0f, 1f)
-    val videoRatio = assets.count { it.mediaType != MediaType.IMAGE }.toFloat() / assets.size
-    val videoScore = (videoRatio / 0.35f).coerceIn(0f, 1f)
+    val realVideos = assets.filter { it.mediaType == MediaType.VIDEO }
+    val realVideoSeconds = realVideos.sumOf { it.durationMs.coerceAtLeast(0L) }.toFloat() / 1000f
+    val meaningfulVideos = realVideos.count { it.durationMs >= 5_000L }
+    val livePhotoRatio = assets.count { it.mediaType == MediaType.LIVE_PHOTO }.toFloat() / assets.size
+    val videoScore = if (realVideos.isNotEmpty()) {
+      ((realVideoSeconds / 90f) * 0.65f + (meaningfulVideos / 3f) * 0.35f).coerceIn(0f, 1f)
+    } else {
+      (livePhotoRatio * 0.25f).coerceIn(0f, 0.25f)
+    }
     val volumeScore = (assets.size / 12f).coerceIn(0f, 1f)
 
     return (assetPrior * 0.48f +
@@ -68,7 +77,11 @@ object TravelSceneScorer {
     val negativeHits = negativeKeywords.count { it in text }
     var score = 0f
     if (asset.latitude != null && asset.longitude != null) score += 0.18f
-    if (asset.mediaType != MediaType.IMAGE) score += 0.08f
+    when (asset.mediaType) {
+      MediaType.VIDEO -> score += if (asset.durationMs >= 5_000L) 0.12f else 0.02f
+      MediaType.LIVE_PHOTO -> score += 0.03f
+      MediaType.IMAGE -> Unit
+    }
     if (asset.widthPx > asset.heightPx && asset.widthPx > 0) score += 0.04f
     if (positiveHits > 0) score += (0.22f + min(positiveHits, 4) * 0.05f).coerceAtMost(0.45f)
     if (positiveHits == 0 && negativeHits > 0) score -= min(negativeHits, 3) * 0.12f

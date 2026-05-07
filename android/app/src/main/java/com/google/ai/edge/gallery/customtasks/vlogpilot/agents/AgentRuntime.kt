@@ -21,6 +21,7 @@ package com.google.ai.edge.gallery.customtasks.vlogpilot.agents
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.PowerPacer
 import com.google.ai.edge.gallery.data.Model
 import com.google.ai.edge.gallery.ui.llmchat.LlmChatModelHelper
 import com.google.ai.edge.gallery.ui.llmchat.LlmModelInstance
@@ -54,6 +55,7 @@ class AgentRuntime(
    * success in the UI, which is a worse failure mode than an explicit error.
    */
   suspend fun ensureInitialized() {
+    PowerPacer.applyBackgroundThreadPriority()
     val t0 = System.nanoTime()
     try {
       suspendCancellableCoroutine<Unit> { cont ->
@@ -105,6 +107,7 @@ class AgentRuntime(
     images: List<Bitmap> = emptyList(),
     label: String = "ask",
   ): String {
+    PowerPacer.applyBackgroundThreadPriority()
     if (gemmaModel.instance !is LlmModelInstance) {
       logEvent(label, 0, "no_engine", null)
       return ""
@@ -156,6 +159,7 @@ class AgentRuntime(
     }
     val ms = (System.nanoTime() - t0) / 1_000_000
     logEvent(label, ms, outcome, "chars=${sb.length} images=${images.size}")
+    PowerPacer.afterAgentCall()
     return sb.toString()
   }
 

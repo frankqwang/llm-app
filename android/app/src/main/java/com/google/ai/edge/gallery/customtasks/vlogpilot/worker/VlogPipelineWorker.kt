@@ -16,6 +16,7 @@ import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.PowerPacer
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotModelRegistry
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -40,6 +41,7 @@ class VlogPipelineWorker(
       return androidx.work.ListenableWorker.Result.success()
     }
     StateBreadcrumb.mark(applicationContext, "worker_start", "run=$runId id=$id attempt=$runAttemptCount")
+    PowerPacer.applyBackgroundThreadPriority()
     setForeground(initialForegroundInfo())
     return try {
       val gemma = VlogPilotModelRegistry.resolve(applicationContext) ?: run {
@@ -91,6 +93,7 @@ class VlogPipelineWorker(
     val text = when (p) {
       is PipelineProgress.DownloadingModels -> "download ${p.percent}% ${p.label}"
       PipelineProgress.Ingesting -> "scanning album"
+      is PipelineProgress.SelectingEvents -> "selecting events ${p.selectedCount}/${p.candidateCount}"
       is PipelineProgress.IngestDone -> "${p.assetCount} assets / ${p.eventCount} events"
       is PipelineProgress.Perceiving -> "perceive ${p.current}/${p.total} ${p.assetName.ifBlank { p.mediaType }}"
       is PipelineProgress.Annotating -> "${if (p.phase == "start") "annotating" else "annotated"} ${p.current}/${p.total} ${p.assetName.ifBlank { p.mediaType }}"

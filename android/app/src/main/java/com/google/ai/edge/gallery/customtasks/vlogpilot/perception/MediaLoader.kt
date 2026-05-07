@@ -13,6 +13,7 @@ import android.graphics.Matrix
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import androidx.exifinterface.media.ExifInterface
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.PowerPacer
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
 import kotlin.math.max
@@ -54,16 +55,14 @@ object MediaLoader {
 
   /** Extract a single frame from a video / live-photo at the given second. */
   fun loadVideoFrame(context: Context, asset: Asset, atSec: Float, maxSide: Int = 1024): Bitmap? {
-    val uri = when {
-      asset.mediaType == MediaType.LIVE_PHOTO -> asset.livePhotoVideoUri?.let(Uri::parse)
-      else -> Uri.parse(asset.contentUri)
-    } ?: return null
+    val uri = videoUri(asset) ?: return null
     val mmr = MediaMetadataRetriever()
     return try {
+      PowerPacer.applyBackgroundThreadPriority()
       mmr.setDataSource(context, uri)
       val timeUs = (atSec * 1_000_000).toLong()
       val raw = mmr.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return null
-      if (max(raw.width, raw.height) <= maxSide) raw else scaleLongSide(raw, maxSide)
+      scaleLongSideOrOriginal(raw, maxSide)
     } catch (_: Throwable) {
       null
     } finally {
@@ -74,16 +73,56 @@ object MediaLoader {
   /** Sample N evenly spaced frames from a video, returns (timestampSec, bitmap) pairs. */
   fun sampleVideoFrames(context: Context, asset: Asset, n: Int, maxSide: Int = 1024): List<Pair<Float, Bitmap>> {
     val durMs = asset.durationMs.takeIf { it > 0 } ?: return emptyList()
-    val out = mutableListOf<Pair<Float, Bitmap>>()
-    for (i in 0 until n) {
-      val tSec = durMs / 1000f * (i + 0.5f) / n
-      val bmp = loadVideoFrame(context, asset, tSec, maxSide)
-      if (bmp != null) out += tSec to bmp
+    val durSec = durMs / 1000f
+    val timestamps = (0 until n.coerceAtLeast(1)).map { i -> durSec * (i + 0.5f) / n.coerceAtLeast(1) }
+    return sampleVideoFramesAt(context, asset, timestamps, maxSide)
+  }
+
+  /** Sample frames at explicit timestamps using one retriever session. */
+  fun sampleVideoFramesAt(
+    context: Context,
+    asset: Asset,
+    timestampsSec: List<Float>,
+    maxSide: Int = 1024,
+  ): List<Pair<Float, Bitmap>> {
+    val uri = videoUri(asset) ?: return emptyList()
+    val durSec = asset.durationMs.takeIf { it > 0 }?.let { it / 1000f } ?: return emptyList()
+    val safeTimestamps = timestampsSec
+      .asSequence()
+      .map { it.coerceIn(0f, durSec) }
+      .map { ((it * 10f).toInt() / 10f).coerceIn(0f, durSec) }
+      .distinct()
+      .sorted()
+      .toList()
+    if (safeTimestamps.isEmpty()) return emptyList()
+
+    val mmr = MediaMetadataRetriever()
+    return try {
+      PowerPacer.applyBackgroundThreadPriority()
+      mmr.setDataSource(context, uri)
+      val out = mutableListOf<Pair<Float, Bitmap>>()
+      for ((index, tSec) in safeTimestamps.withIndex()) {
+        val raw = mmr.getFrameAtTime((tSec * 1_000_000).toLong(), MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+          ?: continue
+        out += tSec to scaleLongSideOrOriginal(raw, maxSide)
+        PowerPacer.afterFrameDecode(index, safeTimestamps.size)
+      }
+      out
+    } catch (_: Throwable) {
+      emptyList()
+    } finally {
+      try { mmr.release() } catch (_: Throwable) {}
     }
-    return out
   }
 
   // ----- helpers -----
+
+  private fun videoUri(asset: Asset): Uri? =
+    when {
+      asset.mediaType == MediaType.LIVE_PHOTO -> asset.livePhotoVideoUri?.let(Uri::parse)
+      asset.mediaType == MediaType.VIDEO -> Uri.parse(asset.contentUri)
+      else -> null
+    }
 
   private fun computeSampleSize(w: Int, h: Int, maxSide: Int): Int {
     var s = 1
@@ -114,5 +153,12 @@ object MediaLoader {
     val w = (bmp.width * scale).toInt().coerceAtLeast(1)
     val h = (bmp.height * scale).toInt().coerceAtLeast(1)
     return Bitmap.createScaledBitmap(bmp, w, h, true)
+  }
+
+  private fun scaleLongSideOrOriginal(bmp: Bitmap, maxSide: Int): Bitmap {
+    if (max(bmp.width, bmp.height) <= maxSide) return bmp
+    val scaled = scaleLongSide(bmp, maxSide)
+    if (scaled !== bmp) runCatching { bmp.recycle() }
+    return scaled
   }
 }

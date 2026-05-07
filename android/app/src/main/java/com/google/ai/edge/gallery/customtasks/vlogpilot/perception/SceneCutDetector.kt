@@ -23,18 +23,39 @@ object SceneCutDetector {
     threshold: Float = 0.6f,
   ): List<Float> {
     val durSec = asset.durationMs / 1000f
-    if (durSec <= 0f) return emptyList()
-    val n = (durSec * sampleHz).toInt().coerceAtLeast(2).coerceAtMost(120)
+    if (durSec < 8f) return emptyList()
+    val effectiveHz = minOf(sampleHz, adaptiveSampleHz(durSec))
+    val n = (durSec * effectiveHz).toInt()
+      .coerceAtLeast(2)
+      .coerceAtMost(maxFrames(durSec))
     val frames = MediaLoader.sampleVideoFrames(context, asset, n, maxSide = 256)
     if (frames.size < 2) return emptyList()
 
-    val hists = frames.map { (_, bmp) -> grayHistogram(bmp, bins = 64) }
+    val hists = frames.map { (_, bmp) ->
+      try {
+        grayHistogram(bmp, bins = 64)
+      } finally {
+        runCatching { bmp.recycle() }
+      }
+    }
     val cuts = mutableListOf<Float>()
     for (i in 1 until hists.size) {
       val dist = chiSquare(hists[i - 1], hists[i])
       if (dist > threshold) cuts += frames[i].first
     }
     return cuts
+  }
+
+  private fun adaptiveSampleHz(durSec: Float): Float = when {
+    durSec <= 30f -> 2f
+    durSec <= 120f -> 1f
+    else -> 0.5f
+  }
+
+  private fun maxFrames(durSec: Float): Int = when {
+    durSec <= 30f -> 32
+    durSec <= 120f -> 48
+    else -> 60
   }
 
   private fun grayHistogram(bmp: Bitmap, bins: Int): FloatArray {
