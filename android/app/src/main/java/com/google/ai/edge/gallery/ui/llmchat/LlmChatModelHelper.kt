@@ -141,32 +141,42 @@ object LlmChatModelHelper : LlmModelHelper {
             defaultValue = false,
           )
       }
-      ExperimentalFlags.enableSpeculativeDecoding = speculativeDecoding
-      Log.d(TAG, "Speculative decoding enabled: $speculativeDecoding")
-      val engine = Engine(engineConfig)
-      engine.initialize()
-      ExperimentalFlags.enableSpeculativeDecoding = false
+      val previousSpeculativeDecoding = ExperimentalFlags.enableSpeculativeDecoding
+      val engine =
+        try {
+          ExperimentalFlags.enableSpeculativeDecoding = speculativeDecoding
+          Log.d(TAG, "Speculative decoding enabled: $speculativeDecoding")
+          Engine(engineConfig).also { it.initialize() }
+        } finally {
+          ExperimentalFlags.enableSpeculativeDecoding = previousSpeculativeDecoding
+        }
 
-      ExperimentalFlags.enableConversationConstrainedDecoding =
-        enableConversationConstrainedDecoding
+      val previousConversationConstrainedDecoding =
+        ExperimentalFlags.enableConversationConstrainedDecoding
       val conversation =
-        engine.createConversation(
-          ConversationConfig(
-            samplerConfig =
-              if (preferredBackend is Backend.NPU) {
-                null
-              } else {
-                SamplerConfig(
-                  topK = topK,
-                  topP = topP.toDouble(),
-                  temperature = temperature.toDouble(),
-                )
-              },
-            systemInstruction = systemInstruction,
-            tools = tools,
+        try {
+          ExperimentalFlags.enableConversationConstrainedDecoding =
+            enableConversationConstrainedDecoding
+          engine.createConversation(
+            ConversationConfig(
+              samplerConfig =
+                if (preferredBackend is Backend.NPU) {
+                  null
+                } else {
+                  SamplerConfig(
+                    topK = topK,
+                    topP = topP.toDouble(),
+                    temperature = temperature.toDouble(),
+                  )
+                },
+              systemInstruction = systemInstruction,
+              tools = tools,
+            )
           )
-        )
-      ExperimentalFlags.enableConversationConstrainedDecoding = false
+        } finally {
+          ExperimentalFlags.enableConversationConstrainedDecoding =
+            previousConversationConstrainedDecoding
+        }
       model.instance = LlmModelInstance(engine = engine, conversation = conversation)
     } catch (e: Exception) {
       onDone(cleanUpMediapipeTaskErrorMessage(e.message ?: "Unknown error"))
@@ -204,26 +214,32 @@ object LlmChatModelHelper : LlmModelHelper {
           key = ConfigKeys.ACCELERATOR,
           defaultValue = Accelerator.GPU.label,
         )
-      ExperimentalFlags.enableConversationConstrainedDecoding =
-        enableConversationConstrainedDecoding
+      val previousConversationConstrainedDecoding =
+        ExperimentalFlags.enableConversationConstrainedDecoding
       val newConversation =
-        engine.createConversation(
-          ConversationConfig(
-            samplerConfig =
-              if (accelerator == Accelerator.NPU.label || accelerator == Accelerator.TPU.label) {
-                null
-              } else {
-                SamplerConfig(
-                  topK = topK,
-                  topP = topP.toDouble(),
-                  temperature = temperature.toDouble(),
-                )
-              },
-            systemInstruction = systemInstruction,
-            tools = tools,
+        try {
+          ExperimentalFlags.enableConversationConstrainedDecoding =
+            enableConversationConstrainedDecoding
+          engine.createConversation(
+            ConversationConfig(
+              samplerConfig =
+                if (accelerator == Accelerator.NPU.label || accelerator == Accelerator.TPU.label) {
+                  null
+                } else {
+                  SamplerConfig(
+                    topK = topK,
+                    topP = topP.toDouble(),
+                    temperature = temperature.toDouble(),
+                  )
+                },
+              systemInstruction = systemInstruction,
+              tools = tools,
+            )
           )
-        )
-      ExperimentalFlags.enableConversationConstrainedDecoding = false
+        } finally {
+          ExperimentalFlags.enableConversationConstrainedDecoding =
+            previousConversationConstrainedDecoding
+        }
       instance.conversation = newConversation
 
       Log.d(TAG, "Resetting done")

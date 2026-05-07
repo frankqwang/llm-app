@@ -29,8 +29,14 @@ import com.google.ai.edge.gallery.proto.LlmBenchmarkResult
 import com.google.ai.edge.gallery.proto.LlmBenchmarkStats
 import com.google.ai.edge.gallery.proto.ValueSeries
 import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.BenchmarkInfo
+import com.google.ai.edge.litertlm.Capabilities
+import com.google.ai.edge.litertlm.Engine
+import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ExperimentalFlags
+import com.google.ai.edge.litertlm.InputData
+import com.google.ai.edge.litertlm.SessionConfig
 import com.google.ai.edge.litertlm.benchmark
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -116,110 +122,219 @@ constructor(
         )
       Log.d(TAG, "Running benchmark: ${parts.joinToString("\n")}")
 
-      // TODO: handle error.
-      val startMs = System.currentTimeMillis()
-      val prefillSpeeds = mutableListOf<Double>()
-      val decodeSpeeds = mutableListOf<Double>()
-      val timesToFirstToken = mutableListOf<Double>()
-      var firstInitTime = 0.0
-      val nonFirstInitTimes = mutableListOf<Double>()
-      // Create a temporary cache dir to run benchmark in.
       val timestamp = System.currentTimeMillis()
-      var needCleanUpCacheDir = true
       val benchmarkCacheDir = File(appContext.cacheDir, "benchmark_$timestamp")
-      var cacheDirPath = benchmarkCacheDir.absolutePath
-      if (!benchmarkCacheDir.mkdirs()) {
-        Log.e(TAG, "Failed to create benchmark cache directory: ${benchmarkCacheDir.absolutePath}")
-        cacheDirPath = appContext.cacheDir.absolutePath
-        needCleanUpCacheDir = false
-      }
-      Log.d(TAG, "Using benchmark cache dir: $cacheDirPath")
-      val backend: Backend =
-        when (accelerator.lowercase()) {
-          "gpu" -> Backend.GPU()
-          "npu",
-          "tpu" -> Backend.NPU(nativeLibraryDir = appContext.applicationInfo.nativeLibraryDir)
-          else -> Backend.CPU()
-        }
-      val modelPath = model.getPath(context = appContext)
-      // Mirror what LlmChatModelHelper does: enable speculative decoding (MTP)
-      // for the duration of the benchmark when the model declares the capability.
-      // Without this, benchmark numbers under-report Gemma 4 GPU performance by ~2x.
-      val supportsSpeculativeDecoding =
-        model.capabilityToTaskTypes.containsKey(ModelCapability.SPECULATIVE_DECODING)
-      ExperimentalFlags.enableSpeculativeDecoding = supportsSpeculativeDecoding
-      Log.d(TAG, "Benchmark speculative decoding (MTP): $supportsSpeculativeDecoding")
-      for (i in 0 until runCount) {
-        Log.d(TAG, "Start running #$i...")
-        val benchmarkInfo =
-          benchmark(
-            modelPath = modelPath,
-            backend = backend,
-            prefillTokens = prefillTokens,
-            decodeTokens = decodeTokens,
-            cacheDir = cacheDirPath,
-          )
-        Log.d(TAG, "Done #$i")
-
-        val initTimeMs = benchmarkInfo.initTimeInSecond * 1000.0
-        if (i == 0) {
-          firstInitTime = initTimeMs
+      var needCleanUpCacheDir = false
+      val previousSpeculativeDecoding = ExperimentalFlags.enableSpeculativeDecoding
+      try {
+        val startMs = System.currentTimeMillis()
+        val prefillSpeeds = mutableListOf<Double>()
+        val decodeSpeeds = mutableListOf<Double>()
+        val timesToFirstToken = mutableListOf<Double>()
+        var firstInitTime = 0.0
+        val nonFirstInitTimes = mutableListOf<Double>()
+        // Create a temporary cache dir to run benchmark in.
+        var cacheDirPath = benchmarkCacheDir.absolutePath
+        if (benchmarkCacheDir.mkdirs()) {
+          needCleanUpCacheDir = true
         } else {
-          nonFirstInitTimes.add(initTimeMs)
-        }
-        prefillSpeeds.add(benchmarkInfo.lastPrefillTokensPerSecond)
-        decodeSpeeds.add(benchmarkInfo.lastDecodeTokensPerSecond)
-        timesToFirstToken.add(benchmarkInfo.timeToFirstTokenInSecond)
-
-        // Mark finish for this run.
-        setRunProgress(completedRunCount = i + 1)
-      }
-      val endMs = System.currentTimeMillis()
-      // Reset the global flag so subsequent chat sessions get to set it themselves.
-      ExperimentalFlags.enableSpeculativeDecoding = false
-      if (needCleanUpCacheDir) {
-        benchmarkCacheDir.deleteRecursively()
-        Log.d(TAG, "Cleaned up benchmark cache dir: ${benchmarkCacheDir.absolutePath}")
-      }
-
-      // Create and add benchmark result.
-      val basicInfo =
-        LlmBenchmarkBasicInfo.newBuilder()
-          .setStartMs(startMs)
-          .setEndMs(endMs)
-          .setModelName(model.name)
-          .setAccelerator(accelerator)
-          .setPrefillTokens(prefillTokens)
-          .setDecodeTokens(decodeTokens)
-          .setNumberOfRuns(runCount)
-          .setAppVersion(BuildConfig.VERSION_NAME)
-          .build()
-      val stats =
-        LlmBenchmarkStats.newBuilder()
-          .setPrefillSpeed(calculateValueSeries(prefillSpeeds))
-          .setDecodeSpeed(calculateValueSeries(decodeSpeeds))
-          .setTimeToFirstToken(calculateValueSeries(timesToFirstToken))
-          .setFirstInitTimeMs(firstInitTime)
-          .setNonFirstInitTimeMs(calculateValueSeries(nonFirstInitTimes))
-          .build()
-
-      val result =
-        BenchmarkResult.newBuilder()
-          .setLlmResult(
-            LlmBenchmarkResult.newBuilder().setBaiscInfo(basicInfo).setStats(stats).build()
+          Log.e(
+            TAG,
+            "Failed to create benchmark cache directory: ${benchmarkCacheDir.absolutePath}",
           )
-          .build()
-      val newId = addBenchmarkResult(result = result)
-      collapseAll()
-      setExpanded(id = newId, expanded = true)
+          cacheDirPath = appContext.cacheDir.absolutePath
+        }
+        Log.d(TAG, "Using benchmark cache dir: $cacheDirPath")
+        val backend: Backend =
+          when (accelerator.lowercase()) {
+            "gpu" -> Backend.GPU()
+            "npu",
+            "tpu" -> Backend.NPU(nativeLibraryDir = appContext.applicationInfo.nativeLibraryDir)
+            else -> Backend.CPU()
+          }
+        val modelPath = model.getPath(context = appContext)
+        val declaresSpeculativeDecoding =
+          model.capabilityToTaskTypes.containsKey(ModelCapability.SPECULATIVE_DECODING)
+        val fileSupportsSpeculativeDecoding = supportsSpeculativeDecoding(modelPath = modelPath)
+        val supportsSpeculativeDecoding =
+          declaresSpeculativeDecoding && fileSupportsSpeculativeDecoding
+        Log.d(TAG, "Benchmark model declares MTP: $declaresSpeculativeDecoding")
+        Log.d(TAG, "Benchmark model file supports MTP: $fileSupportsSpeculativeDecoding")
+        Log.d(TAG, "Benchmark speculative decoding (MTP): $supportsSpeculativeDecoding")
+        var actualPrefillTokens = prefillTokens
+        var actualDecodeTokens = decodeTokens
+        for (i in 0 until runCount) {
+          Log.d(TAG, "Start running #$i...")
+          val benchmarkInfo =
+            if (supportsSpeculativeDecoding) {
+              benchmarkWithEngine(
+                modelPath = modelPath,
+                backend = backend,
+                prefillTokens = prefillTokens,
+                decodeTokens = decodeTokens,
+                cacheDirPath = cacheDirPath,
+              )
+            } else {
+              benchmark(
+                modelPath = modelPath,
+                backend = backend,
+                prefillTokens = prefillTokens,
+                decodeTokens = decodeTokens,
+                cacheDir = cacheDirPath,
+              )
+            }
+          Log.d(TAG, "Done #$i")
 
-      setRunning(running = false)
+          val initTimeMs = benchmarkInfo.initTimeInSecond * 1000.0
+          if (i == 0) {
+            firstInitTime = initTimeMs
+          } else {
+            nonFirstInitTimes.add(initTimeMs)
+          }
+          if (benchmarkInfo.lastPrefillTokenCount > 0) {
+            actualPrefillTokens = benchmarkInfo.lastPrefillTokenCount
+          }
+          if (benchmarkInfo.lastDecodeTokenCount > 0) {
+            actualDecodeTokens = benchmarkInfo.lastDecodeTokenCount
+          }
+          prefillSpeeds.add(benchmarkInfo.lastPrefillTokensPerSecond)
+          decodeSpeeds.add(benchmarkInfo.lastDecodeTokensPerSecond)
+          timesToFirstToken.add(benchmarkInfo.timeToFirstTokenInSecond)
+          Log.d(
+            TAG,
+            "Benchmark #$i metrics: prefillTokens=${benchmarkInfo.lastPrefillTokenCount}, " +
+              "decodeTokens=${benchmarkInfo.lastDecodeTokenCount}, " +
+              "decodeTokPerSec=${benchmarkInfo.lastDecodeTokensPerSecond}",
+          )
+
+          // Mark finish for this run.
+          setRunProgress(completedRunCount = i + 1)
+        }
+        val endMs = System.currentTimeMillis()
+
+        // Create and add benchmark result.
+        val basicInfo =
+          LlmBenchmarkBasicInfo.newBuilder()
+            .setStartMs(startMs)
+            .setEndMs(endMs)
+            .setModelName(model.name)
+            .setAccelerator(accelerator)
+            .setPrefillTokens(actualPrefillTokens)
+            .setDecodeTokens(actualDecodeTokens)
+            .setNumberOfRuns(runCount)
+            .setAppVersion(BuildConfig.VERSION_NAME)
+            .build()
+        val stats =
+          LlmBenchmarkStats.newBuilder()
+            .setPrefillSpeed(calculateValueSeries(prefillSpeeds))
+            .setDecodeSpeed(calculateValueSeries(decodeSpeeds))
+            .setTimeToFirstToken(calculateValueSeries(timesToFirstToken))
+            .setFirstInitTimeMs(firstInitTime)
+            .setNonFirstInitTimeMs(calculateValueSeries(nonFirstInitTimes))
+            .build()
+
+        val result =
+          BenchmarkResult.newBuilder()
+            .setLlmResult(
+              LlmBenchmarkResult.newBuilder().setBaiscInfo(basicInfo).setStats(stats).build()
+            )
+            .build()
+        val newId = addBenchmarkResult(result = result)
+        collapseAll()
+        setExpanded(id = newId, expanded = true)
+      } catch (e: Exception) {
+        Log.e(TAG, "Benchmark failed", e)
+      } finally {
+        ExperimentalFlags.enableSpeculativeDecoding = previousSpeculativeDecoding
+        if (needCleanUpCacheDir) {
+          benchmarkCacheDir.deleteRecursively()
+          Log.d(TAG, "Cleaned up benchmark cache dir: ${benchmarkCacheDir.absolutePath}")
+        }
+        setRunning(running = false)
+      }
     }
   }
 
   fun setShowResultsViewer(showResultsViewer: Boolean) {
     _uiState.update { _uiState.value.copy(showResultsViewer = showResultsViewer) }
   }
+
+  @OptIn(ExperimentalApi::class)
+  private fun supportsSpeculativeDecoding(modelPath: String): Boolean {
+    return try {
+      Capabilities(modelPath).use { it.hasSpeculativeDecodingSupport() }
+    } catch (e: Exception) {
+      Log.w(TAG, "Failed to read LiteRT-LM capabilities for $modelPath", e)
+      false
+    }
+  }
+
+  @OptIn(ExperimentalApi::class)
+  private fun benchmarkWithEngine(
+    modelPath: String,
+    backend: Backend,
+    prefillTokens: Int,
+    decodeTokens: Int,
+    cacheDirPath: String,
+  ): BenchmarkInfo {
+    val previousSpeculativeDecoding = ExperimentalFlags.enableSpeculativeDecoding
+    val initStartNs = System.nanoTime()
+    val engine =
+      try {
+        ExperimentalFlags.enableSpeculativeDecoding = true
+        Log.d(TAG, "Using manual Session benchmark path with MTP enabled")
+        Engine(
+            EngineConfig(
+              modelPath = modelPath,
+              backend = backend,
+              maxNumTokens = prefillTokens + decodeTokens + 64,
+              cacheDir = cacheDirPath,
+            )
+          )
+          .also { it.initialize() }
+      } finally {
+        ExperimentalFlags.enableSpeculativeDecoding = previousSpeculativeDecoding
+      }
+    val initTimeInSecond = nanosToSeconds(System.nanoTime() - initStartNs)
+
+    try {
+      engine.createSession(SessionConfig()).use { session ->
+        val prompt = generateBenchmarkPrompt(prefillTokens = prefillTokens)
+
+        val prefillStartNs = System.nanoTime()
+        session.runPrefill(listOf(InputData.Text(prompt)))
+        val prefillTimeInSecond = nanosToSeconds(System.nanoTime() - prefillStartNs)
+
+        var timeToFirstTokenInSecond = 0.0
+        val decodeStartNs = System.nanoTime()
+        for (i in 0 until decodeTokens) {
+          val tokenStartNs = System.nanoTime()
+          session.runDecode()
+          if (i == 0) {
+            timeToFirstTokenInSecond = nanosToSeconds(System.nanoTime() - tokenStartNs)
+          }
+        }
+        val decodeTimeInSecond = nanosToSeconds(System.nanoTime() - decodeStartNs)
+
+        return BenchmarkInfo(
+          initTimeInSecond,
+          timeToFirstTokenInSecond,
+          prefillTokens,
+          decodeTokens,
+          prefillTokens / prefillTimeInSecond,
+          decodeTokens / decodeTimeInSecond,
+        )
+      }
+    } finally {
+      engine.close()
+    }
+  }
+
+  private fun generateBenchmarkPrompt(prefillTokens: Int): String {
+    return List(prefillTokens) { "benchmark" }.joinToString(separator = " ")
+  }
+
+  private fun nanosToSeconds(nanos: Long): Double = nanos / 1_000_000_000.0
 
   fun setRunning(running: Boolean) {
     _uiState.update { _uiState.value.copy(running = running) }

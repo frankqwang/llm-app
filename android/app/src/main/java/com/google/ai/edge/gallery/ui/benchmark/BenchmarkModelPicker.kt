@@ -50,7 +50,10 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.google.ai.edge.gallery.R
+import com.google.ai.edge.gallery.ui.theme.GalleryTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -137,5 +140,18 @@ fun BenchmarkModelPicker(
         }
       }
     }
+  }
+}
+
+@Preview(showBackground = true)
+@Composable
+private fun BenchmarkModelPickerPreview() {
+  GalleryTheme {
+    BenchmarkModelPicker(
+      selectedModelName = "Gemma 2b",
+      modelNames = listOf("Gemma 2b", "Gemma 7b", "Gemma 27b"),
+      titleResId = R.string.select_model,
+      onSelected = {},
+    )
   }
 }
