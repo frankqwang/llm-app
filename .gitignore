@@ -7,9 +7,10 @@
 .DS_Store
 Thumbs.db
 
-# Local model files (don't commit large .litertlm/.task)
+# Local model files (don't commit large .litertlm/.task/.pt — auto-downloaded on first run)
 *.litertlm
 *.task
+*.pt
 models/
 
 # Third-party repos cloned at root (not part of this project, see pc-pilot/README.md)
