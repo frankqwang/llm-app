@@ -70,6 +70,13 @@ $timelineSummary
   }
 
   private fun looksGoodEnough(timeline: Timeline, director: DirectorBrief): Boolean {
+    if (timeline.shots.size < minOf(4, director.shotBlueprint.size)) return false
+    val requiredOrders = director.shotBlueprint
+      .filter { it.role == ShotRole.OPENING || it.role == ShotRole.CLIMAX || it.role == ShotRole.CLOSING }
+      .map { it.position }
+      .toSet()
+    val filledOrders = timeline.shots.map { it.order }.toSet()
+    if (!filledOrders.containsAll(requiredOrders)) return false
     val captions = timeline.shots.count { it.caption.isNotBlank() }
     if (captions < 3) return false
     val total = timeline.shots.sumOf { it.durationSec.toDouble() }.toFloat()

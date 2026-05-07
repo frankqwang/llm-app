@@ -82,10 +82,10 @@ class VlogPilotViewModel @Inject constructor(
 
   fun scanAlbum(windowDays: Int = 30) {
     viewModelScope.launch {
-      _state.value = PipelineState.Scanning("MediaStore query…")
+      _state.value = PipelineState.Scanning("正在读取相册")
       try {
         val assets = PhotoIngest.loadRecent(appContext, windowDays)
-        _state.value = PipelineState.Scanning("Segmenting ${assets.size} assets…")
+        _state.value = PipelineState.Scanning("正在把 ${assets.size} 个素材切分成事件")
         val events = EventSegmenter.segment(assets)
         _state.value = PipelineState.Ready(assets, events)
       } catch (t: Throwable) {
@@ -112,7 +112,7 @@ class VlogPilotViewModel @Inject constructor(
     val req = OneTimeWorkRequestBuilder<VlogPipelineWorker>().build()
     WorkManager.getInstance(appContext)
       .enqueueUniqueWork(VlogPipelineWorker.WORK_NAME, ExistingWorkPolicy.KEEP, req)
-    _state.value = PipelineState.Running("Worker enqueued…")
+    _state.value = PipelineState.Running("任务已加入后台队列")
   }
 
   private val collectedOutputs = mutableMapOf<String, String>()
@@ -120,16 +120,16 @@ class VlogPilotViewModel @Inject constructor(
   private fun handleProgress(p: PipelineProgress) {
     when (p) {
       is PipelineProgress.DownloadingModels -> _state.value = PipelineState.Running("下载模型 ${p.percent}% (${p.label})")
-      PipelineProgress.Ingesting -> _state.value = PipelineState.Running("扫描相册…")
-      is PipelineProgress.IngestDone -> _state.value = PipelineState.Running("素材 ${p.assetCount}, 事件 ${p.eventCount}")
-      is PipelineProgress.Perceiving -> _state.value = PipelineState.Running("感知 ${p.current}/${p.total}")
-      is PipelineProgress.EventStart -> _state.value = PipelineState.Running("事件 ${p.index}/${p.total} (${p.eventId})")
+      PipelineProgress.Ingesting -> _state.value = PipelineState.Running("正在扫描相册")
+      is PipelineProgress.IngestDone -> _state.value = PipelineState.Running("已收集 ${p.assetCount} 个素材，切出 ${p.eventCount} 个事件")
+      is PipelineProgress.Perceiving -> _state.value = PipelineState.Running("视觉感知 ${p.current}/${p.total}")
+      is PipelineProgress.EventStart -> _state.value = PipelineState.Running("处理事件 ${p.index}/${p.total} (${p.eventId})")
       is PipelineProgress.EventStage -> _state.value = PipelineState.Running("${p.eventId}: ${p.stage}")
       is PipelineProgress.EventDone -> {
         collectedOutputs[p.eventId] = p.outputPath
-        _state.value = PipelineState.Running("${p.eventId} ✓")
+        _state.value = PipelineState.Running("${p.eventId} 已生成")
       }
-      is PipelineProgress.EventFailed -> _state.value = PipelineState.Running("${p.eventId} ✗ ${p.message}")
+      is PipelineProgress.EventFailed -> _state.value = PipelineState.Running("${p.eventId} 失败：${p.message}")
       PipelineProgress.AllDone -> {
         val all = collectedOutputs.toList()
           .ifEmpty { listExistingCandidates() }

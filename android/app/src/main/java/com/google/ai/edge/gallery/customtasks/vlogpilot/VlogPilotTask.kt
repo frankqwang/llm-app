@@ -31,7 +31,7 @@ class VlogPilotTask @Inject constructor() : CustomTask {
       icon = Icons.Outlined.Movie,
       description =
         "Turn the last 30 days of your photo album into AI-curated vlog candidates. " +
-          "Browser → Director → Editor → Critic agents run fully on-device with Gemma 3n.",
+          "Browser → Director → Editor → Critic agents run fully on-device with Gemma 4 E2B-IT.",
       shortDescription = "AI vlog from your album",
       models = mutableListOf(),
       experimental = true,
@@ -59,10 +59,16 @@ class VlogPilotTask @Inject constructor() : CustomTask {
 
   @Composable
   override fun MainScreen(data: Any) {
+    // Real entry is GalleryNavGraph's dedicated ROUTE_VLOGPILOT branch which hosts
+    // VlogPilotRootScreen with the Apps button + top bar. This MainScreen exists
+    // only because the CustomTask interface requires it; route it through the
+    // same RootScreen (sans gallery-link, since the host can't be reached from
+    // here without a NavController) so any unexpected fallback path stays
+    // consistent with the c-end UX.
     val customTaskData = data as CustomTaskData
-    VlogPilotScreen(
-      bottomPadding = customTaskData.bottomPadding,
+    VlogPilotRootScreen(
       modelManagerViewModel = customTaskData.modelManagerViewModel,
+      onOpenGallery = {},
     )
   }
 

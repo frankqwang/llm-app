@@ -36,7 +36,7 @@ object JsonExtractor {
           '{' -> depth++
           '}' -> {
             depth--
-            if (depth == 0) return cleaned.substring(start, i + 1)
+            if (depth == 0) return stripTrailingCommas(cleaned.substring(start, i + 1))
           }
         }
       }
@@ -65,7 +65,7 @@ object JsonExtractor {
           '[' -> depth++
           ']' -> {
             depth--
-            if (depth == 0) return cleaned.substring(start, i + 1)
+            if (depth == 0) return stripTrailingCommas(cleaned.substring(start, i + 1))
           }
         }
       }
@@ -83,15 +83,30 @@ object JsonExtractor {
   }
 
   private fun stripCodeFence(s: String): String {
+    if (!s.contains("```")) return s
     val lines = s.split("\n")
-    val out = StringBuilder()
+    // Two-pass strategy: if the response is "prose ```json\n{...}\n``` more prose",
+    // we want only the fenced content. If there's no fence, fall through to original.
+    val fenced = StringBuilder()
     var inFence = false
     for (line in lines) {
       val t = line.trimStart()
-      if (t.startsWith("```")) { inFence = !inFence; continue }
-      if (inFence) out.append(line).append('\n')
-      else out.append(line).append('\n')
+      if (t.startsWith("```")) {
+        inFence = !inFence
+        continue
+      }
+      if (inFence) fenced.append(line).append('\n')
     }
-    return if (out.contains('{') || out.contains('[')) out.toString() else s
+    val fencedStr = fenced.toString()
+    // Prefer the fenced block when it actually contains JSON-shape; otherwise
+    // (e.g. fence wraps something else) drop the fence markers and return the rest.
+    return if (fencedStr.contains('{') || fencedStr.contains('[')) {
+      fencedStr
+    } else {
+      s.replace(Regex("```[a-zA-Z]*\\s*"), "").replace("```", "")
+    }
   }
+
+  private fun stripTrailingCommas(s: String): String =
+    s.replace(Regex(",\\s*([}\\]])"), "$1")
 }

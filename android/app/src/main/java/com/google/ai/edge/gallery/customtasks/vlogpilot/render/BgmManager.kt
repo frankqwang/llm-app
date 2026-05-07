@@ -27,7 +27,7 @@ object BgmManager {
 
   /** Returns absolute path to a BGM file under filesDir, or null if no BGM bundled. */
   fun pickFor(context: Context, tone: String): String? {
-    val toneKey = tone.lowercase().split(Regex("[^a-z]+")).firstOrNull { it.isNotEmpty() }.orEmpty()
+    val toneKey = toneKey(tone)
     val candidate = TONE_TO_FILE[toneKey] ?: FALLBACK
     val cached = File(context.filesDir, "bgm/$candidate")
     if (cached.isFile) return cached.absolutePath
@@ -40,6 +40,19 @@ object BgmManager {
     } catch (e: Throwable) {
       Log.w(TAG, "BGM not found: bgm/$candidate (${e.message})")
       null
+    }
+  }
+
+  private fun toneKey(tone: String): String {
+    val lc = tone.lowercase()
+    return when {
+      listOf("温馨", "温暖", "夕阳", "黄昏", "亲情", "治愈", "warm", "tender").any { lc.contains(it) } -> "warm"
+      listOf("夜", "城市", "冷静", "雨", "蓝调", "cool", "calm").any { lc.contains(it) } -> "cool"
+      listOf("活力", "鲜艳", "童年", "派对", "playful", "vibrant", "energetic").any { lc.contains(it) } -> "vibrant"
+      listOf("文艺", "宁静", "留白", "muted", "wistful").any { lc.contains(it) } -> "muted"
+      listOf("电影", "氛围", "戏剧", "cinematic", "epic").any { lc.contains(it) } -> "cinematic"
+      listOf("复古", "胶片", "怀旧", "vintage", "nostalgic").any { lc.contains(it) } -> "vintage"
+      else -> lc.split(Regex("[^a-z]+")).firstOrNull { it.isNotEmpty() }.orEmpty()
     }
   }
 }

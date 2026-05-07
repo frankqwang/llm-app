@@ -51,13 +51,16 @@ object EventSegmenter {
         if (groups[i].size >= MIN_ASSETS_PER_EVENT) continue
         val left = if (i > 0) groups[i - 1] else null
         val right = if (i < groups.size - 1) groups[i + 1] else null
+        val canMergeLeft = left != null && spanMs(left + groups[i]) <= maxSpanMs
+        val canMergeRight = right != null && spanMs(groups[i] + right) <= maxSpanMs
         when {
           left == null && right == null -> Unit // single tiny event, keep
-          left == null -> { right!!.addAll(0, groups[i]); groups[i].clear() }
-          right == null -> { left.addAll(groups[i]); groups[i].clear() }
+          !canMergeLeft && !canMergeRight -> continue
+          !canMergeLeft -> { right!!.addAll(0, groups[i]); groups[i].clear() }
+          !canMergeRight -> { left!!.addAll(groups[i]); groups[i].clear() }
           else -> {
-            val gapLeft = groups[i].first().takenEpochMs - left.last().takenEpochMs
-            val gapRight = right.first().takenEpochMs - groups[i].last().takenEpochMs
+            val gapLeft = groups[i].first().takenEpochMs - left!!.last().takenEpochMs
+            val gapRight = right!!.first().takenEpochMs - groups[i].last().takenEpochMs
             if (gapLeft <= gapRight) left.addAll(groups[i]) else right.addAll(0, groups[i])
             groups[i].clear()
           }
@@ -78,4 +81,7 @@ object EventSegmenter {
       )
     }
   }
+
+  private fun spanMs(group: List<Asset>): Long =
+    (group.maxOfOrNull { it.takenEpochMs } ?: 0L) - (group.minOfOrNull { it.takenEpochMs } ?: 0L)
 }

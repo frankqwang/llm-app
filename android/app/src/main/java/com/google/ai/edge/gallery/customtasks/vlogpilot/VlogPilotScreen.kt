@@ -1,54 +1,105 @@
 /*
  * Copyright 2026 The pc-pilot v3 authors
  *
- * One-button VlogPilot screen. Tap Generate → permissions → pipeline. The
- * orchestrator does its own ingest+segment internally; no separate preview
- * pass on the UI side. No model-picker UI either: we grab whatever LLM the
- * user has imported, prefer Gemma 4. Everything else is progress + results.
+ * Process viewer for the on-device VlogPilot pipeline. The screen is built as
+ * a compact editing console: input assets, agent outputs, timeline decisions,
+ * critique notes, and the rendered candidate stay in one inspectable flow.
  */
 package com.google.ai.edge.gallery.customtasks.vlogpilot
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.os.Build
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import android.widget.MediaController
 import android.widget.VideoView
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Card
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Star
+import androidx.compose.material.icons.outlined.Timer
+import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.Button
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.foundation.clickable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import androidx.hilt.navigation.compose.hiltViewModel
-import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventDecisions
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.MediaLoader
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotSpec
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Timeline
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventDecisions
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.StagePerf
 import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
 fun VlogPilotScreen(
@@ -74,7 +125,7 @@ fun VlogPilotScreen(
     val model = downloaded.firstOrNull { it.name.contains("gemma-4", ignoreCase = true) }
       ?: downloaded.firstOrNull()
     if (model == null) {
-      viewModel.reportError("No LLM imported. Use Models → + → From local model file.")
+      viewModel.reportError("没有找到已导入的 LLM。请先在 Models 中导入本地模型文件。")
       return
     }
     viewModel.runFullPipeline(model)
@@ -83,47 +134,175 @@ fun VlogPilotScreen(
   val permLauncher =
     rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
       if (grants.values.all { it }) launchPipeline()
-      else viewModel.reportError("Album permission denied.")
+      else viewModel.reportError("没有相册权限，无法扫描素材。")
     }
 
-  Column(
+  val running = state is PipelineState.Running || state is PipelineState.Scanning
+  LazyColumn(
     modifier = modifier
       .fillMaxSize()
-      .padding(16.dp)
+      .padding(horizontal = 16.dp)
       .padding(bottom = bottomPadding),
+    contentPadding = PaddingValues(top = 12.dp, bottom = 20.dp),
     verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
-    Text("VlogPilot", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-    Text(
-      "Turns the last 30 days of your album into AI-curated vlog candidates, fully on-device.",
-      style = MaterialTheme.typography.bodyMedium,
-    )
-
-    val running = state is PipelineState.Running || state is PipelineState.Scanning
-    Button(
-      onClick = {
-        if (running) {
-          viewModel.cancelPipeline()
-        } else {
-          val ungranted = perms.filter {
-            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+    item {
+      StudioStatusCard(
+        state = state,
+        decisions = decisions,
+        running = running,
+        onRunClick = {
+          if (running) {
+            viewModel.cancelPipeline()
+          } else {
+            val ungranted = perms.filter {
+              ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+            }
+            if (ungranted.isEmpty()) launchPipeline() else permLauncher.launch(ungranted.toTypedArray())
           }
-          if (ungranted.isEmpty()) launchPipeline() else permLauncher.launch(ungranted.toTypedArray())
-        }
-      },
-      modifier = Modifier.fillMaxWidth(),
-    ) {
-      Text(if (running) "Cancel" else "Generate")
+        },
+      )
     }
 
-    StatusLine(state)
-    if (state is PipelineState.Running || state is PipelineState.Scanning) {
-      LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+    if (running) {
+      item {
+        LinearProgressIndicator(
+          modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(999.dp)),
+        )
+      }
     }
-    // Decision-chain viewer: each event shows the AI's progressive output as
-    // each agent finishes (browse → audience → director → editor → critic).
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-      items(decisions) { d -> EventDecisionCard(d) }
+
+    val ready = state as? PipelineState.Ready
+    if (ready != null) {
+      item {
+        AlbumPreviewCard(assets = ready.assets, events = ready.events)
+      }
+    }
+
+    if (decisions.isEmpty()) {
+      item { EmptyProcessCard(state) }
+    } else {
+      items(decisions, key = { it.eventId }) { decision ->
+        EventDecisionCard(decision)
+      }
+    }
+  }
+}
+
+@Composable
+private fun StudioStatusCard(
+  state: PipelineState,
+  decisions: List<EventDecisions>,
+  running: Boolean,
+  onRunClick: () -> Unit,
+) {
+  val rendered = decisions.count { it.mp4Path != null }
+  val totalShots = decisions.sumOf { (it.timelineFinal ?: it.timelineV1)?.shots?.size ?: 0 }
+  val scannedAssets = decisions.sumOf { it.inputAssets.size }
+
+  ElevatedCard(
+    modifier = Modifier.fillMaxWidth(),
+    colors = CardDefaults.elevatedCardColors(
+      containerColor = MaterialTheme.colorScheme.surface,
+    ),
+  ) {
+    Column(
+      modifier = Modifier.padding(16.dp),
+      verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Surface(
+          shape = RoundedCornerShape(14.dp),
+          color = MaterialTheme.colorScheme.primaryContainer,
+          contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        ) {
+          Icon(Icons.Outlined.Movie, contentDescription = null, modifier = Modifier.padding(10.dp))
+        }
+        Column(modifier = Modifier.weight(1f)) {
+          Text("过程透视", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+          Text(
+            statusText(state),
+            style = MaterialTheme.typography.bodySmall,
+            color = if (state is PipelineState.Error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
+        if (running) {
+          FilledTonalButton(onClick = onRunClick) { Text("取消") }
+        } else {
+          Button(onClick = onRunClick) { Text("生成") }
+        }
+      }
+
+      LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        item { InfoPill("事件 ${decisions.size}", Icons.Outlined.Visibility) }
+        item { InfoPill("扫描 $scannedAssets", Icons.Outlined.PhotoLibrary) }
+        item { InfoPill("镜头 $totalShots", Icons.Outlined.Edit) }
+        item {
+          InfoPill(
+            text = "成片 $rendered",
+            icon = if (rendered > 0) Icons.Outlined.CheckCircle else Icons.Outlined.Movie,
+            accent = rendered > 0,
+          )
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun AlbumPreviewCard(assets: List<Asset>, events: List<Event>) {
+  ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+    Column(
+      modifier = Modifier.padding(14.dp),
+      verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+      SectionHeader(
+        icon = Icons.Outlined.PhotoLibrary,
+        title = "相册预扫",
+        subtitle = "${assets.size} 个素材，${events.size} 个事件",
+      )
+      AssetStrip(assets = assets.take(18), totalCount = assets.size)
+    }
+  }
+}
+
+@Composable
+private fun EmptyProcessCard(state: PipelineState) {
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(18.dp),
+    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+  ) {
+    Row(
+      modifier = Modifier.padding(16.dp),
+      horizontalArrangement = Arrangement.spacedBy(12.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Icon(
+        imageVector = if (state is PipelineState.Error) Icons.Outlined.ErrorOutline else Icons.Outlined.PhotoLibrary,
+        contentDescription = null,
+        tint = if (state is PipelineState.Error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+      )
+      Column {
+        Text(
+          if (state is PipelineState.Error) "任务中断" else "还没有过程数据",
+          style = MaterialTheme.typography.titleSmall,
+          fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+          if (state is PipelineState.Error) state.message else "开始生成后，这里会逐步出现输入素材、Agent 输出和渲染结果。",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
     }
   }
 }
@@ -131,81 +310,546 @@ fun VlogPilotScreen(
 @Composable
 private fun EventDecisionCard(d: EventDecisions) {
   var expanded by remember { mutableStateOf(false) }
-  val tlFinal = d.timelineFinal ?: d.timelineV1
-  val stages = listOfNotNull(
-    "Browser".takeIf { d.memory != null },
-    "Audience".takeIf { d.audience != null },
-    "Director".takeIf { d.director != null },
-    "Editor".takeIf { tlFinal != null },
-    "Critic".takeIf { d.critique != null },
-    "Render".takeIf { d.mp4Path != null },
-  )
-  Card(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }) {
-    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-      Text(d.eventId, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-      Text(
-        stages.joinToString(" › ") + if (d.mp4Path != null) "  ✓" else "  …",
-        style = MaterialTheme.typography.bodySmall,
-        color = if (d.mp4Path != null) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant,
-      )
-      if (expanded) {
-        HorizontalDivider()
-        d.memory?.let { m ->
-          SectionLabel("📖 Browser — 故事概括")
-          Text(m.storylineSummary, style = MaterialTheme.typography.bodySmall)
-          if (m.charactersObserved.isNotEmpty()) Text("人物: ${m.charactersObserved.joinToString(", ")}", style = MaterialTheme.typography.labelSmall)
-          if (m.emotionalArc.isNotEmpty()) Text("情绪弧: ${m.emotionalArc}", style = MaterialTheme.typography.labelSmall)
-        }
-        d.audience?.let { a ->
-          SectionLabel("👥 Audience — 情绪诉求")
-          if (a.emotionalPayoff.isNotEmpty()) Text(a.emotionalPayoff, style = MaterialTheme.typography.bodySmall)
-          if (a.pacingGuidance.isNotEmpty()) Text("节奏: ${a.pacingGuidance}", style = MaterialTheme.typography.labelSmall)
-        }
-        d.director?.let { dir ->
-          SectionLabel("🎬 Director — 导演脚本")
-          if (dir.title.isNotEmpty()) Text(dir.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-          Text("基调: ${dir.tone}", style = MaterialTheme.typography.labelSmall)
-          if (dir.narrativeArc.isNotEmpty()) Text(dir.narrativeArc.joinToString(" → "), style = MaterialTheme.typography.labelSmall)
-        }
-        tlFinal?.let { t ->
-          SectionLabel("✂️ Editor — Timeline (${t.shots.size} shots)")
-          for (s in t.shots) ShotRow(s)
-        }
-        d.critique?.let { c ->
-          if (c.issues.isNotEmpty() || c.revisedRequests.isNotEmpty()) {
-            SectionLabel("🔍 Critic — 审片")
-            for (issue in c.issues) Text("• $issue", style = MaterialTheme.typography.labelSmall)
-            if (c.revisedRequests.isNotEmpty()) {
-              Text("修订: ${c.revisedRequests.size} shot 重选", style = MaterialTheme.typography.labelSmall)
-            }
-          }
-        }
-        d.mp4Path?.let { path ->
-          SectionLabel("🎞 Render — 成片预览")
-          MiniVideoPlayer(mp4Path = path)
-          Text(path, style = MaterialTheme.typography.labelSmall, color = Color(0xFF2E7D32))
-        }
-        d.perf?.let { p ->
-          SectionLabel("⏱ 耗时")
+  val timeline = d.timelineFinal ?: d.timelineV1
+  val assetMap = remember(d.inputAssets) { d.inputAssets.associateBy { it.id } }
+  val title = d.director?.title?.takeIf { it.isNotBlank() }
+    ?: d.memory?.storylineSummary?.takeIf { it.isNotBlank() }?.let { it.take(34) }
+    ?: "事件 ${shortId(d.eventId)}"
+  val shotCount = timeline?.shots?.size ?: 0
+  val durationSec = timeline?.shots?.sumOf { it.durationSec.toDouble() } ?: 0.0
+
+  ElevatedCard(
+    modifier = Modifier
+      .fillMaxWidth()
+      .clickable { expanded = !expanded },
+    colors = CardDefaults.elevatedCardColors(
+      containerColor = MaterialTheme.colorScheme.surface,
+    ),
+  ) {
+    Column(
+      modifier = Modifier.padding(14.dp),
+      verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+      ) {
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
           Text(
-            "总 ${formatMs(p.totalMs)}  ·  感知 ${formatMs(p.perceptionMs)} (${p.perceptionAssetCount} 张, 缓存 ${p.perceptionCacheHits})  ·  " +
-              "browse ${formatMs(p.browseMs)}  audience ${formatMs(p.audienceMs)}  director ${formatMs(p.directorMs)}  " +
-              "editor ${formatMs(p.editorMs)}  critic ${formatMs(p.criticMs)}  render ${formatMs(p.renderMs)}",
-            style = MaterialTheme.typography.labelSmall,
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+          )
+          Text(
+            eventSubtitle(d),
+            style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
           )
         }
-      } else if (stages.isNotEmpty()) {
-        Text("点击展开 AI 决策细节", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+        IconButton(onClick = { expanded = !expanded }) {
+          Icon(
+            imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+            contentDescription = if (expanded) "收起" else "展开",
+          )
+        }
+      }
+
+      LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        item { InfoPill("素材 ${d.inputAssets.size}", Icons.Outlined.PhotoLibrary) }
+        item { InfoPill("镜头 $shotCount", Icons.Outlined.Edit) }
+        item { InfoPill(formatSec(durationSec), Icons.Outlined.Timer) }
+        item {
+          InfoPill(
+            text = if (d.mp4Path != null) "已渲染" else "未渲染",
+            icon = if (d.mp4Path != null) Icons.Outlined.CheckCircle else Icons.Outlined.Movie,
+            accent = d.mp4Path != null,
+          )
+        }
+      }
+
+      StageRail(d)
+
+      if (d.inputAssets.isNotEmpty()) {
+        SectionHeader(
+          icon = Icons.Outlined.Search,
+          title = "本事件扫描素材",
+          subtitle = "${d.inputAssets.size} 个输入，按时间线参与 browse / recall",
+        )
+        AssetStrip(assets = d.inputAssets.take(24), totalCount = d.inputAssets.size)
+      }
+
+      if (expanded) {
+        HorizontalDivider()
+        d.mp4Path?.let { path ->
+          DecisionSection(icon = Icons.Outlined.PlayArrow, title = "Render", subtitle = "成片预览") {
+            VideoPreview(mp4Path = path)
+            Text(
+              File(path).name,
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+          }
+        }
+        ProcessOutputs(d = d, timeline = timeline, assetMap = assetMap)
+      } else {
+        CollapsedSummary(d = d, timeline = timeline)
       }
     }
   }
 }
 
 @Composable
-private fun SectionLabel(text: String) {
-  Text(text, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold,
-    modifier = Modifier.padding(top = 6.dp))
+private fun StageRail(d: EventDecisions) {
+  val timeline = d.timelineFinal ?: d.timelineV1
+  val stages = listOf(
+    StageUi("扫描", d.inputAssets.isNotEmpty()),
+    StageUi("浏览", d.memory != null),
+    StageUi("观众", d.audience != null),
+    StageUi("导演", d.director != null),
+    StageUi("剪辑", timeline != null),
+    StageUi("审片", d.critique != null || timeline?.critiqueHistory?.isNotEmpty() == true),
+    StageUi("渲染", d.mp4Path != null),
+  )
+  LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    items(stages) { stage ->
+      StagePill(stage)
+    }
+  }
+}
+
+@Composable
+private fun StagePill(stage: StageUi) {
+  val container = if (stage.done) {
+    MaterialTheme.colorScheme.primaryContainer
+  } else {
+    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+  }
+  val content = if (stage.done) {
+    MaterialTheme.colorScheme.onPrimaryContainer
+  } else {
+    MaterialTheme.colorScheme.onSurfaceVariant
+  }
+  Surface(shape = RoundedCornerShape(999.dp), color = container, contentColor = content) {
+    Row(
+      modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+      horizontalArrangement = Arrangement.spacedBy(5.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Icon(
+        imageVector = if (stage.done) Icons.Outlined.CheckCircle else Icons.Outlined.Star,
+        contentDescription = null,
+        modifier = Modifier.size(14.dp),
+      )
+      Text(stage.label, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium)
+    }
+  }
+}
+
+@Composable
+private fun CollapsedSummary(d: EventDecisions, timeline: Timeline?) {
+  val text = when {
+    d.memory?.storylineSummary?.isNotBlank() == true -> d.memory.storylineSummary
+    d.director?.narrativeArc?.isNotEmpty() == true -> d.director.narrativeArc.joinToString(" / ")
+    timeline != null -> "已生成 ${timeline.shots.size} 个镜头，展开查看选片和理由。"
+    d.inputAssets.isNotEmpty() -> "已记录输入素材，等待 Agent 输出。"
+    else -> "等待事件输入。"
+  }
+  Text(
+    text,
+    style = MaterialTheme.typography.bodySmall,
+    color = MaterialTheme.colorScheme.onSurfaceVariant,
+    maxLines = 2,
+    overflow = TextOverflow.Ellipsis,
+  )
+}
+
+@Composable
+private fun ProcessOutputs(
+  d: EventDecisions,
+  timeline: Timeline?,
+  assetMap: Map<String, Asset>,
+) {
+  d.memory?.let { memory ->
+    DecisionSection(icon = Icons.Outlined.Visibility, title = "Browse", subtitle = "事件记忆") {
+      Text(memory.storylineSummary, style = MaterialTheme.typography.bodySmall)
+      if (memory.emotionalArc.isNotBlank()) KeyValue("情绪弧线", memory.emotionalArc)
+      if (memory.charactersObserved.isNotEmpty()) KeyValue("人物", memory.charactersObserved.joinToString(", "))
+      if (memory.visualStyleSignals.isNotBlank()) KeyValue("视觉信号", memory.visualStyleSignals)
+      memory.keyMoments.take(4).forEach { moment ->
+        Text(
+          "#${moment.imageIndex} ${shortId(moment.assetId)} · ${moment.why}",
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+    }
+  }
+
+  d.audience?.let { audience ->
+    DecisionSection(icon = Icons.Outlined.Person, title = "Audience", subtitle = "观看诉求") {
+      if (audience.emotionalPayoff.isNotBlank()) KeyValue("情绪回报", audience.emotionalPayoff)
+      if (audience.hookStrategy.isNotBlank()) KeyValue("开头钩子", audience.hookStrategy)
+      if (audience.povVoice.isNotBlank()) KeyValue("视角", audience.povVoice)
+      if (audience.pacingGuidance.isNotBlank()) KeyValue("节奏", audience.pacingGuidance)
+      if (audience.avoidList.isNotEmpty()) KeyValue("避免", audience.avoidList.joinToString(", "))
+    }
+  }
+
+  d.director?.let { director ->
+    DecisionSection(icon = Icons.Outlined.Movie, title = "Director", subtitle = "叙事脚本") {
+      if (director.title.isNotBlank()) {
+        Text(director.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+      }
+      KeyValue("基调", director.tone)
+      KeyValue("目标时长", formatSec(director.targetDurationSec.toDouble()))
+      if (director.narrativeArc.isNotEmpty()) KeyValue("叙事弧线", director.narrativeArc.joinToString(" -> "))
+      director.shotBlueprint.take(8).forEach { req ->
+        Text(
+          "${req.position}. ${req.role.name.lowercase()} · ${"%.1f".format(Locale.US, req.durationSec)}s · ${req.visualRequirements}",
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          maxLines = 2,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
+    }
+  }
+
+  timeline?.let { tl ->
+    DecisionSection(icon = Icons.Outlined.Edit, title = "Editor", subtitle = "最终时间线 ${tl.shots.size} shots") {
+      tl.shots.forEach { shot ->
+        ShotRow(shot = shot, asset = assetMap[shot.assetId])
+      }
+    }
+  }
+
+  val critiqueHistory = timeline?.critiqueHistory.orEmpty()
+  if (d.critique != null || critiqueHistory.isNotEmpty()) {
+    DecisionSection(icon = Icons.Outlined.Search, title = "Critic", subtitle = "审片反馈") {
+      val critique = d.critique ?: critiqueHistory.lastOrNull()
+      if (critique == null || (critique.issues.isEmpty() && critique.revisedRequests.isEmpty())) {
+        Text("没有发现需要修改的问题。", style = MaterialTheme.typography.bodySmall)
+      } else {
+        critique.issues.forEach { issue ->
+          Text(
+            "• $issue",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        }
+        if (critique.revisedRequests.isNotEmpty()) {
+          KeyValue("重选镜头", "${critique.revisedRequests.size} 个")
+        }
+      }
+      if (critiqueHistory.size > 1) {
+        KeyValue("迭代次数", critiqueHistory.size.toString())
+      }
+    }
+  }
+
+  d.perf?.let { perf ->
+    DecisionSection(icon = Icons.Outlined.Timer, title = "Timing", subtitle = "阶段耗时") {
+      PerfGrid(perf)
+    }
+  }
+}
+
+@Composable
+private fun ShotRow(shot: ShotSpec, asset: Asset?) {
+  Row(
+    modifier = Modifier
+      .fillMaxWidth()
+      .padding(vertical = 6.dp),
+    horizontalArrangement = Arrangement.spacedBy(10.dp),
+    verticalAlignment = Alignment.Top,
+  ) {
+    if (asset != null) {
+      AssetThumb(
+        asset = asset,
+        modifier = Modifier
+          .width(48.dp)
+          .height(64.dp),
+        showType = false,
+      )
+    } else {
+      Box(
+        modifier = Modifier
+          .width(48.dp)
+          .height(64.dp)
+          .clip(RoundedCornerShape(10.dp))
+          .background(MaterialTheme.colorScheme.surfaceVariant),
+        contentAlignment = Alignment.Center,
+      ) {
+        Icon(Icons.Outlined.PhotoLibrary, contentDescription = null, modifier = Modifier.size(20.dp))
+      }
+    }
+    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+      Text(
+        "#${shot.order} · ${shot.mediaType.name.lowercase()} · ${"%.1f".format(Locale.US, shot.durationSec)}s · ${shot.transitionIn.name.lowercase()}",
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+      )
+      if (shot.caption.isNotBlank()) {
+        Text(shot.caption, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+      }
+      Text(
+        "${shortId(shot.assetId)} · ${shot.rationale.ifBlank { "已选入时间线" }}",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 3,
+        overflow = TextOverflow.Ellipsis,
+      )
+    }
+  }
+}
+
+@Composable
+private fun AssetStrip(assets: List<Asset>, totalCount: Int) {
+  LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    items(assets, key = { it.id }) { asset ->
+      AssetThumb(asset = asset)
+    }
+    if (totalCount > assets.size) {
+      item {
+        Surface(
+          modifier = Modifier
+            .width(68.dp)
+            .height(88.dp),
+          shape = RoundedCornerShape(12.dp),
+          color = MaterialTheme.colorScheme.surfaceVariant,
+          contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        ) {
+          Box(contentAlignment = Alignment.Center) {
+            Text("+${totalCount - assets.size}", style = MaterialTheme.typography.titleSmall)
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun AssetThumb(
+  asset: Asset,
+  modifier: Modifier = Modifier
+    .width(68.dp)
+    .height(88.dp),
+  showType: Boolean = true,
+) {
+  val context = LocalContext.current
+  val bitmap by produceState<Bitmap?>(initialValue = null, asset.id, asset.contentUri) {
+    value = withContext(Dispatchers.IO) {
+      MediaLoader.loadImage(context, asset, maxSide = 180)
+    }
+  }
+
+  Box(
+    modifier = modifier
+      .clip(RoundedCornerShape(12.dp))
+      .background(MaterialTheme.colorScheme.surfaceVariant)
+      .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f), RoundedCornerShape(12.dp)),
+    contentAlignment = Alignment.Center,
+  ) {
+    val bmp = bitmap
+    if (bmp != null) {
+      Image(
+        bitmap = bmp.asImageBitmap(),
+        contentDescription = asset.displayName,
+        modifier = Modifier.fillMaxSize(),
+        contentScale = ContentScale.Crop,
+      )
+    } else {
+      Icon(
+        Icons.Outlined.PhotoLibrary,
+        contentDescription = null,
+        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.size(22.dp),
+      )
+    }
+    if (showType) {
+      Surface(
+        modifier = Modifier
+          .align(Alignment.BottomStart)
+          .padding(5.dp),
+        shape = RoundedCornerShape(999.dp),
+        color = Color.Black.copy(alpha = 0.58f),
+        contentColor = Color.White,
+      ) {
+        Text(
+          if (asset.mediaType == MediaType.VIDEO) "VID" else "IMG",
+          modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+          fontSize = 9.sp,
+          fontWeight = FontWeight.Bold,
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun VideoPreview(mp4Path: String) {
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(18.dp),
+    color = Color.Black,
+  ) {
+    Box(
+      modifier = Modifier
+        .fillMaxWidth()
+        .background(Color.Black)
+        .padding(vertical = 10.dp),
+      contentAlignment = Alignment.Center,
+    ) {
+      AndroidView(
+        factory = { ctx ->
+          VideoView(ctx).apply {
+            tag = mp4Path
+            setVideoPath(mp4Path)
+            setMediaController(MediaController(ctx).also { it.setAnchorView(this) })
+            setOnPreparedListener { player ->
+              player.isLooping = true
+              seekTo(1)
+            }
+            seekTo(1)
+          }
+        },
+        update = { view ->
+          if (view.tag != mp4Path) {
+            view.tag = mp4Path
+            view.setVideoPath(mp4Path)
+            view.seekTo(1)
+          }
+        },
+        modifier = Modifier
+          .fillMaxWidth(0.72f)
+          .widthIn(max = 360.dp)
+          .aspectRatio(9f / 16f)
+          .clip(RoundedCornerShape(14.dp)),
+      )
+    }
+  }
+}
+
+@Composable
+private fun DecisionSection(
+  icon: ImageVector,
+  title: String,
+  subtitle: String? = null,
+  content: @Composable ColumnScope.() -> Unit,
+) {
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(16.dp),
+    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
+  ) {
+    Column(
+      modifier = Modifier.padding(12.dp),
+      verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      SectionHeader(icon = icon, title = title, subtitle = subtitle)
+      content()
+    }
+  }
+}
+
+@Composable
+private fun SectionHeader(icon: ImageVector, title: String, subtitle: String? = null) {
+  Row(
+    horizontalArrangement = Arrangement.spacedBy(8.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+    Column {
+      Text(title, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+      if (!subtitle.isNullOrBlank()) {
+        Text(
+          subtitle,
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun KeyValue(label: String, value: String) {
+  if (value.isBlank()) return
+  Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+    Text(
+      label,
+      modifier = Modifier.width(64.dp),
+      style = MaterialTheme.typography.labelSmall,
+      color = MaterialTheme.colorScheme.outline,
+    )
+    Text(
+      value,
+      modifier = Modifier.weight(1f),
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+  }
+}
+
+@Composable
+private fun PerfGrid(perf: StagePerf) {
+  val rows = listOf(
+    "总耗时" to formatMs(perf.totalMs),
+    "感知" to "${formatMs(perf.perceptionMs)} / ${perf.perceptionAssetCount} 张 / 缓存 ${perf.perceptionCacheHits}",
+    "browse" to formatMs(perf.browseMs),
+    "audience" to formatMs(perf.audienceMs),
+    "director" to formatMs(perf.directorMs),
+    "editor" to formatMs(perf.editorMs),
+    "critic" to formatMs(perf.criticMs),
+    "render" to formatMs(perf.renderMs),
+  )
+  rows.forEach { (label, value) -> KeyValue(label, value) }
+}
+
+@Composable
+private fun InfoPill(text: String, icon: ImageVector, accent: Boolean = false) {
+  val container = if (accent) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant
+  val content = if (accent) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+  Surface(shape = RoundedCornerShape(999.dp), color = container, contentColor = content) {
+    Row(
+      modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+      horizontalArrangement = Arrangement.spacedBy(6.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Icon(icon, contentDescription = null, modifier = Modifier.size(14.dp))
+      Text(text, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium)
+    }
+  }
+}
+
+private data class StageUi(val label: String, val done: Boolean)
+
+private fun eventSubtitle(d: EventDecisions): String {
+  val range = d.event?.let { formatEventRange(it.startEpochMs, it.endEpochMs) }
+  val place = d.event?.placeHint?.takeIf { it.isNotBlank() }
+  return listOfNotNull(range, place, d.eventId).joinToString(" · ")
+}
+
+private fun statusText(state: PipelineState): String = when (state) {
+  is PipelineState.Idle -> "等待开始"
+  is PipelineState.Scanning -> state.phase
+  is PipelineState.Ready -> "${state.assets.size} 个素材，${state.events.size} 个事件，可开始生成"
+  is PipelineState.Running -> state.message
+  is PipelineState.Done -> "完成，生成 ${state.outputs.size} 个候选视频"
+  is PipelineState.Error -> "错误：${state.message}"
+}
+
+private fun formatEventRange(startMs: Long, endMs: Long): String {
+  val fmt = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault())
+  if (startMs <= 0L || endMs <= 0L) return ""
+  return "${fmt.format(Date(startMs))} - ${fmt.format(Date(endMs))}"
 }
 
 private fun formatMs(ms: Long): String = when {
@@ -214,48 +858,11 @@ private fun formatMs(ms: Long): String = when {
   else -> "${ms / 60_000}m${(ms % 60_000) / 1000}s"
 }
 
-@Composable
-private fun MiniVideoPlayer(mp4Path: String) {
-  // VideoView wrapped in AndroidView. Cheap, no extra dep. Uses Android's
-  // built-in MediaPlayer under the hood, which can play whatever MediaCodec
-  // can decode (H.264 / mpeg4 — both of our possible encoder outputs).
-  AndroidView(
-    factory = { ctx ->
-      VideoView(ctx).apply {
-        setVideoPath(mp4Path)
-        setMediaController(MediaController(ctx).also { it.setAnchorView(this) })
-        seekTo(1)  // show first frame as preview
-      }
-    },
-    modifier = Modifier
-      .fillMaxWidth()
-      .aspectRatio(9f / 16f)
-      .padding(top = 4.dp),
-  )
+private fun formatSec(sec: Double): String = when {
+  sec <= 0.0 -> "0s"
+  sec < 60.0 -> "${"%.1f".format(Locale.US, sec)}s"
+  else -> "${(sec / 60).toInt()}m${(sec % 60).toInt()}s"
 }
 
-@Composable
-private fun ShotRow(s: ShotSpec) {
-  Column(modifier = Modifier.fillMaxWidth().padding(start = 6.dp)) {
-    Text("#${s.order} · ${s.mediaType.name.lowercase()} · ${"%.1f".format(s.durationSec)}s",
-      style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
-    if (s.caption.isNotEmpty()) Text("「${s.caption}」", style = MaterialTheme.typography.bodySmall)
-    if (s.rationale.isNotEmpty()) Text(s.rationale, style = MaterialTheme.typography.labelSmall,
-      color = MaterialTheme.colorScheme.onSurfaceVariant)
-  }
-}
-
-@Composable
-private fun StatusLine(state: PipelineState) {
-  val text = when (state) {
-    is PipelineState.Idle -> ""
-    is PipelineState.Scanning -> state.phase
-    is PipelineState.Ready -> "${state.assets.size} assets, ${state.events.size} events"
-    is PipelineState.Running -> state.message
-    is PipelineState.Done -> "Done — ${state.outputs.size} candidate(s)"
-    is PipelineState.Error -> "Error: ${state.message}"
-  }
-  if (text.isNotEmpty()) {
-    Text(text, style = MaterialTheme.typography.bodySmall)
-  }
-}
+private fun shortId(id: String): String =
+  if (id.length <= 8) id else id.take(6) + "…" + id.takeLast(4)

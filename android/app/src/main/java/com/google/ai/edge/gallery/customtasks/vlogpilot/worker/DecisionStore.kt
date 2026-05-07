@@ -10,17 +10,28 @@ package com.google.ai.edge.gallery.customtasks.vlogpilot.worker
 import android.content.Context
 import android.util.Log
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.AudienceBrief
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Critique
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.DirectorBrief
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.EventMemory
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Timeline
 import java.io.File
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
+@Serializable
+data class EventInputManifest(
+  val event: Event,
+  val assets: List<Asset>,
+)
+
 data class EventDecisions(
   val eventId: String,
+  val event: Event? = null,
+  val inputAssets: List<Asset> = emptyList(),
   val memory: EventMemory? = null,
   val audience: AudienceBrief? = null,
   val director: DirectorBrief? = null,
@@ -38,6 +49,9 @@ object DecisionStore {
 
   fun dirFor(context: Context, eventId: String): File =
     File(context.filesDir, "decisions/$eventId").apply { mkdirs() }
+
+  fun writeEventInputs(context: Context, event: Event, assets: List<Asset>) =
+    write(context, event.eventId, "event_inputs.json", json.encodeToString(EventInputManifest(event, assets)))
 
   fun writeMemory(context: Context, eventId: String, m: EventMemory) =
     write(context, eventId, "event_memory.json", json.encodeToString(m))
@@ -74,8 +88,11 @@ object DecisionStore {
     return root.listFiles()?.filter { it.isDirectory }?.map { dir ->
       val eid = dir.name
       val mp4 = File(candidatesDir, "$eid.mp4").takeIf { it.isFile }?.absolutePath
+      val inputs = readJson<EventInputManifest>(dir, "event_inputs.json")
       EventDecisions(
         eventId = eid,
+        event = inputs?.event,
+        inputAssets = inputs?.assets.orEmpty(),
         memory = readJson(dir, "event_memory.json"),
         audience = readJson(dir, "audience.json"),
         director = readJson(dir, "director.json"),
@@ -85,7 +102,10 @@ object DecisionStore {
         mp4Path = mp4,
         perf = readJson(dir, "perf.json"),
       )
-    }.orEmpty().sortedBy { it.eventId }
+    }.orEmpty().sortedWith(
+      compareByDescending<EventDecisions> { it.event?.endEpochMs ?: Long.MIN_VALUE }
+        .thenByDescending { it.eventId },
+    )
   }
 
   private inline fun <reified T> readJson(dir: File, name: String): T? {

@@ -17,6 +17,7 @@ import com.google.ai.edge.gallery.ui.llmchat.LlmModelInstance
 import com.google.ai.edge.litertlm.Contents
 import java.io.Closeable
 import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
 
 class AgentRuntime(
@@ -30,7 +31,9 @@ class AgentRuntime(
    * If the gallery already initialized this Model (e.g. user opened it from
    * LLM Ask Image first), reuse the existing engine. Otherwise call
    * [LlmChatModelHelper.initialize] ourselves and remember to clean it up in
-   * [close]. Idempotent.
+   * [close]. Throws when init fails — silently letting the pipeline run with
+   * an uninitialized engine produces a 100%-stubbed video that looks like
+   * success in the UI, which is a worse failure mode than an explicit error.
    */
   suspend fun ensureInitialized() = suspendCancellableCoroutine<Unit> { cont ->
     if (gemmaModel.instance is LlmModelInstance) {
@@ -51,7 +54,9 @@ class AgentRuntime(
           if (cont.isActive) cont.resume(Unit)
         } else {
           Log.e(TAG, "Engine init failed: $error")
-          if (cont.isActive) cont.resume(Unit) // allow caller to fall back to stub responses
+          if (cont.isActive) cont.resumeWithException(
+            IllegalStateException("LLM engine init failed for '${gemmaModel.name}': $error"),
+          )
         }
       },
     )

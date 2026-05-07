@@ -164,7 +164,13 @@ enum class ColorGrade {
 enum class TransitionKind {
   @SerialName("cut") CUT,
   @SerialName("fade") FADE,
+  @SerialName("crossfade") CROSSFADE,
+  @SerialName("fadeblack") FADEBLACK,
   @SerialName("fadewhite") FADEWHITE,
+  @SerialName("slideleft") SLIDELEFT,
+  @SerialName("slideright") SLIDERIGHT,
+  @SerialName("circleopen") CIRCLEOPEN,
+  @SerialName("circleclose") CIRCLECLOSE,
   @SerialName("zoomin") ZOOMIN,
   @SerialName("smoothleft") SMOOTHLEFT,
   @SerialName("smoothright") SMOOTHRIGHT,
@@ -178,7 +184,7 @@ data class ShotSpec(
   val order: Int,
   val assetId: String,
   val mediaType: MediaType,
-  var durationSec: Float,                 // mutated by render to match actual mp4
+  val durationSec: Float,                 // overwritten via .copy() by VideoRenderer with the probed mp4 duration
   val kenBurns: String = "",
   val colorGrade: ColorGrade = ColorGrade.NEUTRAL,
   val caption: String = "",

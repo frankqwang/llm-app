@@ -37,15 +37,20 @@ class VideoRenderer(private val context: Context) {
 
     // Render each shot
     val intermediates = mutableListOf<CompositeRenderer.ShotInput>()
-    val updatedShots = timeline.shots.map { spec ->
-      val asset = assets[spec.assetId] ?: run {
-        Log.w(TAG, "asset missing for shot ${spec.order}"); return@map spec
+    val updatedShots = mutableListOf<com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotSpec>()
+    for (spec in timeline.shots) {
+      val asset = assets[spec.assetId]
+      if (asset == null) {
+        Log.w(TAG, "asset missing for shot ${spec.order}")
+        continue
       }
-      val r = ShotRenderer.render(context, asset, spec, fontPath, workDir) ?: run {
-        Log.w(TAG, "shot ${spec.order} render failed"); return@map spec
+      val r = ShotRenderer.render(context, asset, spec, fontPath, workDir)
+      if (r == null) {
+        Log.w(TAG, "shot ${spec.order} render failed")
+        continue
       }
       intermediates += CompositeRenderer.ShotInput(r.path, r.actualDurationSec, spec.transitionIn)
-      spec.copy(durationSec = r.actualDurationSec)
+      updatedShots += spec.copy(durationSec = r.actualDurationSec)
     }
     if (intermediates.isEmpty()) return null
 

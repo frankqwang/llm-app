@@ -18,6 +18,7 @@ object Recall {
 
   fun topK(
     request: ShotRequest,
+    nBlueprint: Int,                            // total shots in DirectorBrief.shotBlueprint
     eventAssets: List<Asset>,
     perceptions: Map<String, Perception>,
     queryEmbedding: FloatArray,                 // CLIP text-encoded visual_requirements
@@ -27,36 +28,73 @@ object Recall {
     val sorted = eventAssets.sortedBy { it.takenEpochMs }
     if (sorted.isEmpty()) return emptyList()
 
-    // Position-derived time window: shot at position p of N → middle of (p-0.5)/N..(p+0.5)/N range,
-    // expanded ±25% to allow flexibility.
+    // Position-derived time window: shot at position p of N → centered at (p-0.5)/N along the
+    // event's time axis. Earlier ports divided by `request.position` instead of `nBlueprint`,
+    // collapsing every shot toward the end of the event.
     val tStart = sorted.first().takenEpochMs
     val tEnd = sorted.last().takenEpochMs
     val span = (tEnd - tStart).coerceAtLeast(1L)
-    val pNorm = ((request.position - 0.5f) / kotlin.math.max(1, request.position).toFloat()).coerceIn(0f, 1f)
+    val pNorm = ((request.position - 0.5f) / kotlin.math.max(1, nBlueprint).toFloat()).coerceIn(0f, 1f)
     val targetMs = tStart + (span * pNorm).toLong()
     val windowMs = (span * 0.4f).toLong().coerceAtLeast(60_000L) // ≥1 min flex window
+    val personConstraint = normalizePersonConstraint(request.personConstraint)
+    val wantsNoPerson = request.personConstraint?.trim() == "无人物"
+
+    // Score weights: when CLIP is available the dominant signal is text-image cosine, otherwise
+    // (model not yet OTA-shipped) we fall back to a quality + duration-fit blend so callers still
+    // get something better than random.
+    val clipAvailable = queryEmbedding.isNotEmpty()
 
     return sorted
       .asSequence()
       .filter { it.id !in excludedAssetIds }
       .filter { perceptions[it.id]?.isJunk != true }
-      .filter { kotlin.math.abs(it.takenEpochMs - targetMs) <= windowMs }
       .filter { asset ->
-        val pc = request.personConstraint ?: return@filter true
+        if (!wantsNoPerson) return@filter true
         val faces = perceptions[asset.id]?.faces ?: return@filter false
-        faces.any { it.personId == pc }
+        faces.none { !it.personId.isNullOrBlank() }
       }
       .map { asset ->
         val perc = perceptions[asset.id] ?: return@map Candidate(asset, blank(asset.id), 0f)
-        val clipScore = if (queryEmbedding.isNotEmpty() && perc.clipEmbedding.isNotEmpty()) {
+        val timeDelta = kotlin.math.abs(asset.takenEpochMs - targetMs)
+        val timeFit = (1f - (timeDelta.toFloat() / windowMs.coerceAtLeast(1L).toFloat())).coerceIn(0f, 1f)
+        val personFit = personFit(perc, personConstraint)
+        val clipScore = if (clipAvailable && perc.clipEmbedding.isNotEmpty()) {
           cosine(queryEmbedding, perc.clipEmbedding.toFloatArray())
         } else 0f
         val durationFit = durationCompat(asset, request.durationSec)
-        Candidate(asset, perc, clipScore * 0.7f + perc.sharpness * 0.15f + durationFit * 0.15f)
+        val score = if (clipAvailable) {
+          clipScore * 0.58f + timeFit * 0.12f + personFit * 0.12f + perc.sharpness * 0.08f + durationFit * 0.10f
+        } else {
+          perc.sharpness * 0.35f + durationFit * 0.25f + timeFit * 0.15f + personFit * 0.15f +
+            roleBonus(asset, perc, request.role) * 0.10f
+        }
+        Candidate(asset, perc, score)
       }
       .sortedByDescending { it.score }
       .take(k)
       .toList()
+      .ifEmpty {
+        relaxedFallback(request, eventAssets, perceptions, excludedAssetIds, k)
+      }
+  }
+
+  /** Soft role-aware bonus used when CLIP isn't available. Mirrors pc-pilot's recall heuristics:
+   *  portrait roles favor frames with detected faces; action/climax favor video clips. */
+  private fun roleBonus(
+    asset: Asset,
+    perception: Perception,
+    role: com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRole,
+  ): Float {
+    val isVideo = asset.mediaType != com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType.IMAGE
+    return when (role) {
+      com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRole.PORTRAIT ->
+        if (perception.faces.isNotEmpty()) 0.8f else 0.1f
+      com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRole.ACTION,
+      com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRole.CLIMAX -> if (isVideo) 0.7f else 0.2f
+      com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRole.CLOSING -> 0.4f
+      else -> 0.3f
+    }
   }
 
   /** A 1.0 when the source can stretch to the requested duration without freezing,
@@ -75,6 +113,40 @@ object Recall {
   }
 
   private fun blank(id: String) = Perception(assetId = id, isJunk = true, junkReason = "missing_perception")
+
+  private fun personFit(perception: Perception, constraint: String?): Float {
+    if (constraint.isNullOrBlank()) return 0.5f
+    val ids = perception.faces.mapNotNull { it.personId?.uppercase() }.toSet()
+    return if (constraint in ids) 1.0f else 0.0f
+  }
+
+  private fun normalizePersonConstraint(raw: String?): String? {
+    val s = raw?.trim().orEmpty()
+    if (s.isBlank() || s.equals("null", ignoreCase = true) || s == "无人物") return null
+    val token = Regex("[A-Za-z]+\\s*$").find(s)?.value?.trim()?.uppercase() ?: return null
+    return token.removePrefix("PERSON").trim('_', '-', ' ').takeIf { it.isNotBlank() }
+  }
+
+  private fun relaxedFallback(
+    request: ShotRequest,
+    eventAssets: List<Asset>,
+    perceptions: Map<String, Perception>,
+    excludedAssetIds: Set<String>,
+    k: Int,
+  ): List<Candidate> =
+    eventAssets
+      .asSequence()
+      .filter { it.id !in excludedAssetIds }
+      .mapNotNull { asset ->
+        val perc = perceptions[asset.id] ?: return@mapNotNull null
+        if (perc.isJunk) return@mapNotNull null
+        val score = perc.sharpness * 0.45f + durationCompat(asset, request.durationSec) * 0.35f +
+          roleBonus(asset, perc, request.role) * 0.20f
+        Candidate(asset, perc, score)
+      }
+      .sortedByDescending { it.score }
+      .take(k)
+      .toList()
 
   private fun cosine(a: FloatArray, b: FloatArray): Float {
     if (a.size != b.size || a.isEmpty()) return 0f

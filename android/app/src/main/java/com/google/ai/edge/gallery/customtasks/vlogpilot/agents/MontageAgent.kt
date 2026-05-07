@@ -33,14 +33,18 @@ class MontageAgent(private val context: Context, private val agent: AgentRuntime
     // Then merge per-sheet EventMemories so large events keep all their context.
     val partials = mutableListOf<EventMemory>()
     for ((i, sheet) in sheets.withIndex()) {
-      val raw = agent.ask(
-        systemPrompt = PromptStrings.MONTAGE_SYSTEM,
-        userText = "事件 $eventId 第 ${i + 1}/${sheets.size} 页，本页 ${sheet.assetIds.size} 张。" +
-          "image_index 为本页内 1..${sheet.assetIds.size} 编号。请输出 EventMemory JSON。",
-        images = listOf(sheet.bitmap),
-      )
-      val obj = try { JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject } catch (_: Throwable) { null } ?: continue
-      partials += parseEventMemory(eventId, obj, sheet.assetIds)
+      try {
+        val raw = agent.ask(
+          systemPrompt = PromptStrings.MONTAGE_SYSTEM,
+          userText = "事件 $eventId 第 ${i + 1}/${sheets.size} 页，本页 ${sheet.assetIds.size} 张。" +
+            "image_index 为本页内 1..${sheet.assetIds.size} 编号。请输出 EventMemory JSON。",
+          images = listOf(sheet.bitmap),
+        )
+        val obj = try { JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject } catch (_: Throwable) { null } ?: continue
+        partials += parseEventMemory(eventId, obj, sheet.assetIds)
+      } finally {
+        runCatching { sheet.bitmap.recycle() }
+      }
     }
     return if (partials.isEmpty()) empty(eventId) else merge(eventId, partials)
   }

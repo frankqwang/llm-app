@@ -99,7 +99,6 @@ object ShotRenderer {
 
     val trim = spec.videoTrim
     val ssArg = trim?.let { "-ss ${"%.3f".format(it.startSec)}" }.orEmpty()
-    val toArg = trim?.let { "-to ${"%.3f".format(it.endSec)}" }.orEmpty()
     val srcWindow = trim?.let { (it.endSec - it.startSec).coerceAtLeast(0.4f) } ?: srcDur
 
     val want = spec.durationSec
@@ -121,7 +120,7 @@ object ShotRenderer {
     val caption = CaptionFilter.build(spec.caption, effectiveDur, fontPath).let { if (it.isEmpty()) "" else ",$it" }
 
     val vf = "[0:v]$setpts,$blurredCompose${grade}${polish}${caption}[v]"
-    return "-y $ssArg -i \"$input\" $toArg -filter_complex \"$vf\" -map \"[v]\" -an " +
+    return "-y $ssArg -i \"$input\" -filter_complex \"$vf\" -map \"[v]\" -an " +
       "-t $effectiveDur $VIDEO_ENCODER -pix_fmt yuv420p -r $FPS \"$output\""
   }
 

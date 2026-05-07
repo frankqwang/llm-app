@@ -19,7 +19,13 @@ object CompositeRenderer {
   private val XFADE_MAP = mapOf(
     TransitionKind.CUT to "fade",  // very short fade approximates a cut without strobing
     TransitionKind.FADE to "fade",
+    TransitionKind.CROSSFADE to "fade",
+    TransitionKind.FADEBLACK to "fadeblack",
     TransitionKind.FADEWHITE to "fadewhite",
+    TransitionKind.SLIDELEFT to "slideleft",
+    TransitionKind.SLIDERIGHT to "slideright",
+    TransitionKind.CIRCLEOPEN to "circleopen",
+    TransitionKind.CIRCLECLOSE to "circleclose",
     TransitionKind.ZOOMIN to "zoomin",
     TransitionKind.SMOOTHLEFT to "smoothleft",
     TransitionKind.SMOOTHRIGHT to "smoothright",
@@ -27,7 +33,13 @@ object CompositeRenderer {
   private val XFADE_DUR = mapOf(
     TransitionKind.CUT to 0.10f,
     TransitionKind.FADE to 0.45f,
+    TransitionKind.CROSSFADE to 0.45f,
+    TransitionKind.FADEBLACK to 0.65f,
     TransitionKind.FADEWHITE to 0.55f,
+    TransitionKind.SLIDELEFT to 0.45f,
+    TransitionKind.SLIDERIGHT to 0.45f,
+    TransitionKind.CIRCLEOPEN to 0.50f,
+    TransitionKind.CIRCLECLOSE to 0.50f,
     TransitionKind.ZOOMIN to 0.50f,
     TransitionKind.SMOOTHLEFT to 0.50f,
     TransitionKind.SMOOTHRIGHT to 0.50f,
@@ -48,8 +60,9 @@ object CompositeRenderer {
         "-y -i \"${shots[0].path}\" -c copy \"${outFile.absolutePath}\""
       } else {
         val dur = shots[0].durationSec
+        val fadeStart = (dur - 0.6f).coerceAtLeast(0.1f)
         "-y -i \"${shots[0].path}\" -i \"$bgmPath\" -filter_complex " +
-          "\"[1:a]aloop=loop=-1:size=2e9,atrim=0:$dur,afade=t=out:st=${dur - 0.6f}:d=0.6[a]\" " +
+          "\"[1:a]aloop=loop=-1:size=2e9,atrim=0:$dur,afade=t=out:st=$fadeStart:d=0.6[a]\" " +
           "-map 0:v -map \"[a]\" -c:v copy -c:a aac -b:a 192k -shortest \"${outFile.absolutePath}\""
       }
       return runCmd(cmd, outFile)
@@ -66,7 +79,11 @@ object CompositeRenderer {
     for (i in 1 until shots.size) {
       val curr = shots[i]
       val transName = XFADE_MAP[curr.transition] ?: "fade"
-      val transDur = XFADE_DUR[curr.transition] ?: 0.45f
+      val requestedDur = XFADE_DUR[curr.transition] ?: 0.45f
+      val transDur = requestedDur
+        .coerceAtMost(cumDuration - 0.05f)
+        .coerceAtMost(curr.durationSec - 0.05f)
+        .coerceAtLeast(0.05f)
       val offset = (cumDuration - transDur).coerceAtLeast(0f)
       val out = "[v$i]"
       sb.append("$lastLabel[${i}:v]xfade=transition=$transName:duration=$transDur:offset=$offset$out;")

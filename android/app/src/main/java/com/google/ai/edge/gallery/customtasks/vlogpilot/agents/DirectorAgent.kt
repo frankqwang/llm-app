@@ -69,7 +69,7 @@ AudienceBrief:
   private fun parseShot(obj: JsonObject): ShotRequest? {
     val pos = obj["position"]?.jsonPrimitive?.intOrNull ?: return null
     val roleStr = obj["role"]?.jsonPrimitive?.contentOrNull ?: "establishing"
-    val role = ROLE_MAP[roleStr] ?: ShotRole.ESTABLISHING
+    val role = ROLE_MAP[roleStr.trim().lowercase()] ?: ShotRole.ESTABLISHING
     return ShotRequest(
       position = pos,
       role = role,

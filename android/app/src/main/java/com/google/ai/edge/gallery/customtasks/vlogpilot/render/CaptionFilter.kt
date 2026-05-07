@@ -42,7 +42,8 @@ object CaptionFilter {
   private fun escape(s: String): String =
     s.replace("\\", "\\\\")
      .replace(":", "\\:")
-     .replace("'", "’")
-     .replace(",", ",")
+     .replace("'", "’")              // ASCII apostrophe → typographic, sidesteps the inner-quote bug
+     .replace("%", "\\%")            // drawtext treats %{...} as expansion
+     .replace(",", "\\,")            // commas separate filters in filter_complex; must be escaped
      .replace("\n", " ")
 }

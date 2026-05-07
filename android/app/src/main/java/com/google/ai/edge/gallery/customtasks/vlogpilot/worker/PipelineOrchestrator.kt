@@ -21,6 +21,7 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.DirectorAgent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.EditorAgent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.MontageAgent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.ingest.PhotoIngest
+import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.ClipEmbedder
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.PerceptionCache
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.PerceptionEngine
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventSegmenter
@@ -126,17 +127,19 @@ class PipelineOrchestrator(
       val editor = EditorAgent(context, agent)
       val critic = CriticAgent(agent)
       val renderer = VideoRenderer(context)
-      val embedderForRecall = PerceptionEngine(context) // re-open just for embedText (cheap)
+      // Just the CLIP text encoder — was previously a full PerceptionEngine, which
+      // dragged in YOLO + face landmarker + face embedder + NSFW just to call embedText.
+      // Five extra TFLite/MediaPipe interpreters loaded during the Gemma 4 phase
+      // pushed peak memory toward the foreground-service OOM cliff. Use ClipEmbedder
+      // directly so only the text tower lives alongside the LLM.
+      val embedderForRecall = ClipEmbedder(context)
       val resumeIds = resumeEvents.map { it.eventId }.toSet()
       val cachedDecisions = DecisionStore.loadAll(context).associateBy { it.eventId }
 
       for ((eventIdx, event) in events.withIndex()) {
         onProgress(PipelineProgress.EventStart(event.eventId, eventIdx + 1, events.size))
         val eventAssets = event.assetIds.mapNotNull { assetMap[it] }
-        if (eventAssets.size < 3) {
-          onProgress(PipelineProgress.EventFailed(event.eventId, "too few assets"))
-          continue
-        }
+        DecisionStore.writeEventInputs(context, event, eventAssets)
         val timer = PerfTimer(event.eventId)
         try {
           // Resume support: this event has a cached timeline_final but no
@@ -152,6 +155,7 @@ class PipelineOrchestrator(
               val out = timer.render { renderer.render(cachedFinal, assetMap, cachedTone) }
               timer.finalize(context, perceptionCount, perceptionMs, cacheHits)
               if (out != null) {
+                DecisionStore.writeTimelineFinal(context, event.eventId, out.timeline)
                 outputs[event.eventId] = out.outputPath
                 onProgress(PipelineProgress.EventDone(event.eventId, out.outputPath))
               } else {
@@ -159,6 +163,11 @@ class PipelineOrchestrator(
               }
               continue
             }
+          }
+
+          if (eventAssets.size < 3) {
+            onProgress(PipelineProgress.EventFailed(event.eventId, "too few assets"))
+            continue
           }
 
           onProgress(PipelineProgress.EventStage(event.eventId, "browse"))
@@ -174,15 +183,28 @@ class PipelineOrchestrator(
           DecisionStore.writeDirector(context, event.eventId, plan)
 
           onProgress(PipelineProgress.EventStage(event.eventId, "editor"))
-          val v1 = timer.editor { buildTimeline(plan.shotBlueprint, event, eventAssets, perceptions, embedderForRecall, editor) }
+          val v1 = timer.editor { buildTimeline(plan.shotBlueprint, plan.tone, event, eventAssets, perceptions, embedderForRecall, editor) }
           DecisionStore.writeTimelineV1(context, event.eventId, v1)
 
+          // Up-to-2 critic iterations, mirroring pc-pilot/step6_critic.py MAX_ITER=2.
+          // Stop early if a round returns no revisions; persist the full history on the
+          // final timeline so the UI viewer can show what changed.
           onProgress(PipelineProgress.EventStage(event.eventId, "critic"))
-          val critique = timer.critic { critic.review(1, v1, plan, memory) }
-          DecisionStore.writeCritique(context, event.eventId, critique)
-          val finalTl = if (critique.revisedRequests.isEmpty()) v1.copy(critiqueHistory = listOf(critique))
-                        else applyRevisions(v1, critique.revisedRequests, event, eventAssets, perceptions, embedderForRecall, editor)
-                          .copy(critiqueHistory = listOf(critique))
+          val critiques = mutableListOf<com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Critique>()
+          var working = v1
+          var lastCritique: com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Critique? = null
+          for (it in 1..MAX_CRITIC_ITER) {
+            val crit = timer.critic { critic.review(it, working, plan, memory) }
+            critiques += crit
+            lastCritique = crit
+            if (crit.revisedRequests.isEmpty()) break
+            working = applyRevisions(working, crit.revisedRequests, plan.tone, event, eventAssets, perceptions, embedderForRecall, editor)
+          }
+          // Keep a separate critique.json for the LATEST iteration so existing
+          // DecisionStore consumers (UI) keep working unchanged; the full history
+          // is also baked into the final Timeline.
+          lastCritique?.let { DecisionStore.writeCritique(context, event.eventId, it) }
+          val finalTl = working.copy(critiqueHistory = critiques.toList())
           DecisionStore.writeTimelineFinal(context, event.eventId, finalTl)
 
           onProgress(PipelineProgress.EventStage(event.eventId, "render"))
@@ -190,6 +212,7 @@ class PipelineOrchestrator(
           val perf = timer.finalize(context, perceptionCount, perceptionMs, cacheHits)
           Log.d(TAG, "perf ${event.eventId}: encoder=${com.google.ai.edge.gallery.customtasks.vlogpilot.render.EncoderProbe.selectedEncoderName()} total=${perf.totalMs}ms browse=${perf.browseMs} audience=${perf.audienceMs} director=${perf.directorMs} editor=${perf.editorMs} critic=${perf.criticMs} render=${perf.renderMs}")
           if (out != null) {
+            DecisionStore.writeTimelineFinal(context, event.eventId, out.timeline)
             outputs[event.eventId] = out.outputPath
             onProgress(PipelineProgress.EventDone(event.eventId, out.outputPath))
           } else {
@@ -200,7 +223,7 @@ class PipelineOrchestrator(
           onProgress(PipelineProgress.EventFailed(event.eventId, t.message ?: t::class.java.simpleName))
         }
       }
-      embedderForRecall.close()
+      runCatching { embedderForRecall.close() }
     } finally {
       agent.close()
     }
@@ -213,26 +236,50 @@ class PipelineOrchestrator(
 
   private suspend fun buildTimeline(
     blueprint: List<ShotRequest>,
+    directorTone: String,
     event: Event,
     eventAssets: List<Asset>,
     perceptions: Map<String, Perception>,
-    embedder: PerceptionEngine,
+    embedder: ClipEmbedder,
     editor: EditorAgent,
   ): Timeline {
     val used = mutableSetOf<String>()
     val shots = mutableListOf<ShotSpec>()
     var prevSummary = ""
+    val nBlueprint = blueprint.size
     for ((order, req) in blueprint.withIndex()) {
       val q = embedder.embedText(req.visualRequirements)
-      val spec = editor.pickShot(
+      var spec = editor.pickShot(
         order = order + 1,
         request = req,
+        nBlueprint = nBlueprint,
         eventAssets = eventAssets,
         perceptions = perceptions,
         queryEmbedding = q,
         excludedAssetIds = used,
         previousShot = prevSummary,
-      ) ?: continue
+        directorTone = directorTone,
+      )
+      if (spec == null && used.isNotEmpty()) {
+        // Last-resort fill: allow reuse rather than silently dropping a required
+        // director slot. A repeated shot is visible and critic/render can handle it;
+        // a missing slot collapses the whole narrative without explanation.
+        spec = editor.pickShot(
+          order = order + 1,
+          request = req,
+          nBlueprint = nBlueprint,
+          eventAssets = eventAssets,
+          perceptions = perceptions,
+          queryEmbedding = q,
+          excludedAssetIds = emptySet(),
+          previousShot = prevSummary,
+          directorTone = directorTone,
+        )
+      }
+      if (spec == null) {
+        Log.w(TAG, "slot ${order + 1}/${nBlueprint} could not be filled for ${event.eventId}")
+        continue
+      }
       shots += spec
       used += spec.assetId
       prevSummary = "[${spec.mediaType.name.lowercase()}] ${req.role.name.lowercase()} dur=${spec.durationSec}s caption=${spec.caption}"
@@ -243,32 +290,42 @@ class PipelineOrchestrator(
   private suspend fun applyRevisions(
     base: Timeline,
     revisions: List<RevisedRequest>,
+    directorTone: String,
     event: Event,
     eventAssets: List<Asset>,
     perceptions: Map<String, Perception>,
-    embedder: PerceptionEngine,
+    embedder: ClipEmbedder,
     editor: EditorAgent,
   ): Timeline {
     val byOrder = base.shots.associateBy { it.order }.toMutableMap()
+    // Keep ALL current picks in `used` so revised recall is forced to find a DIFFERENT asset;
+    // pc-pilot/step6_critic.py:175 made the same call. Removing the original from `used` first
+    // would let the editor re-pick the asset critic just flagged.
     val used = base.shots.map { it.assetId }.toMutableSet()
+    val nBlueprint = base.shots.size
     for (rev in revisions) {
       val original = byOrder[rev.shotOrder] ?: continue
-      used.remove(original.assetId)
-      val q = embedder.embedText(rev.newRequest.visualRequirements)
       val replaced = editor.pickShot(
         order = rev.shotOrder,
         request = rev.newRequest,
+        nBlueprint = nBlueprint,
         eventAssets = eventAssets,
         perceptions = perceptions,
-        queryEmbedding = q,
+        queryEmbedding = embedder.embedText(rev.newRequest.visualRequirements),
         excludedAssetIds = used,
         previousShot = "(revised slot)",
-      ) ?: original
-      byOrder[rev.shotOrder] = replaced
+        directorTone = directorTone,
+      )
+      if (replaced == null || replaced.assetId == original.assetId) continue  // no different candidate, keep original
+      used.remove(original.assetId)
       used += replaced.assetId
+      byOrder[rev.shotOrder] = replaced
     }
     return base.copy(shots = byOrder.values.sortedBy { it.order })
   }
 
-  companion object { private const val TAG = "PipelineOrchestrator" }
+  companion object {
+    private const val TAG = "PipelineOrchestrator"
+    private const val MAX_CRITIC_ITER = 2
+  }
 }

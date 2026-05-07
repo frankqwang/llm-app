@@ -13,6 +13,7 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.MediaLoader
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.Recall
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ColorGrade
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Perception
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRequest
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotSpec
@@ -38,39 +39,54 @@ class EditorAgent(
   suspend fun pickShot(
     order: Int,
     request: ShotRequest,
+    nBlueprint: Int,
     eventAssets: List<Asset>,
     perceptions: Map<String, Perception>,
     queryEmbedding: FloatArray,
     excludedAssetIds: Set<String>,
     previousShot: String,
+    directorTone: String = "",
   ): ShotSpec? {
-    val candidates = Recall.topK(request, eventAssets, perceptions, queryEmbedding, excludedAssetIds, k = 8)
-    if (candidates.isEmpty()) return null
-    if (candidates.size == 1) return composeSpec(order, request, candidates[0].asset, "only candidate")
+    val candidates = Recall.topK(request, nBlueprint, eventAssets, perceptions, queryEmbedding, excludedAssetIds, k = 8)
+    val grade = ColorGradeFromTone.pick(directorTone)
+    if (candidates.size == 1) return composeSpec(order, request, candidates[0].asset, "only candidate", grade)
 
-    val thumbs = candidates.mapNotNull { MediaLoader.loadImage(context, it.asset, maxSide = 512) }
+    val visualCandidates = candidates.mapNotNull { candidate ->
+      MediaLoader.loadImage(context, candidate.asset, maxSide = 512)?.let { candidate to it }
+    }
+    if (visualCandidates.isEmpty()) {
+      return candidates.firstOrNull()?.let { composeSpec(order, request, it.asset, "thumbnail load failed; fallback to top recall", grade) }
+    }
+    val thumbs = visualCandidates.map { it.second }
     val userMsg = """
 当前 slot：role=${request.role}; mood=${request.moodTarget}; visual_req=${request.visualRequirements}
 previous_shot_summary: $previousShot
 请从 ${thumbs.size} 张候选中选 1 张（编号 1..${thumbs.size}）。
 """.trimIndent()
-    val raw = agent.ask(systemPrompt = PromptStrings.EDITOR_SYSTEM, userText = userMsg, images = thumbs)
+    val raw = try {
+      agent.ask(systemPrompt = PromptStrings.EDITOR_SYSTEM, userText = userMsg, images = thumbs)
+    } finally {
+      // Free thumbnail bitmaps once they've been encoded into the inference request.
+      thumbs.forEach { runCatching { it.recycle() } }
+    }
     val obj = try { JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject } catch (_: Throwable) { null }
     val idx = obj?.get("chosen_index")?.jsonPrimitive?.intOrNull?.minus(1) ?: 0
     val rationale = obj?.get("rationale")?.jsonPrimitive?.contentOrNull.orEmpty()
-    val chosen = candidates.getOrNull(idx) ?: candidates.first()
-    return composeSpec(order, request, chosen.asset, rationale)
+    val chosen = visualCandidates.getOrNull(idx)?.first ?: visualCandidates.first().first
+    return composeSpec(order, request, chosen.asset, rationale, grade)
   }
 
-  private fun composeSpec(order: Int, request: ShotRequest, asset: Asset, rationale: String): ShotSpec {
+  private fun composeSpec(order: Int, request: ShotRequest, asset: Asset, rationale: String, grade: ColorGrade): ShotSpec {
     val mediaType = asset.mediaType
-    // For video / live photo: trim a window matching the requested duration when possible.
-    val trim = if (mediaType != com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType.IMAGE
-      && asset.durationMs > 0) {
+    // For video / live photo: pick the sharpest window of the source rather than the middle.
+    // The pc-pilot reference uses a VLM frame-picker, but on device an extra Gemma 4 call per
+    // shot is too expensive — sharpness-only is a reasonable middle ground that beats "always
+    // take the middle" for shaky source clips.
+    val trim = if (mediaType != MediaType.IMAGE && asset.durationMs > 0) {
       val durSec = asset.durationMs / 1000f
       val want = request.durationSec.coerceAtMost(durSec)
-      val mid = durSec / 2f
-      VideoTrim(startSec = (mid - want / 2f).coerceAtLeast(0f), endSec = (mid + want / 2f).coerceAtMost(durSec))
+      val start = SharpestWindowPicker.pick(context, asset, want).coerceIn(0f, (durSec - want).coerceAtLeast(0f))
+      VideoTrim(startSec = start, endSec = (start + want).coerceAtMost(durSec))
     } else null
 
     return ShotSpec(
@@ -78,10 +94,10 @@ previous_shot_summary: $previousShot
       assetId = asset.id,
       mediaType = mediaType,
       durationSec = request.durationSec,
-      kenBurns = request.kenBurnsHint,
-      colorGrade = ColorGrade.NEUTRAL,
+      kenBurns = normalizeKenBurns(request.kenBurnsHint),
+      colorGrade = grade,
       caption = request.captionText,
-      transitionIn = TRANSITION_MAP[request.transitionInHint] ?: TransitionKind.CUT,
+      transitionIn = transitionFor(order, request.transitionInHint),
       videoTrim = trim,
       rationale = rationale,
     )
@@ -91,10 +107,39 @@ previous_shot_summary: $previousShot
     private val TRANSITION_MAP = mapOf(
       "cut" to TransitionKind.CUT,
       "fade" to TransitionKind.FADE,
+      "crossfade" to TransitionKind.CROSSFADE,
+      "fadeblack" to TransitionKind.FADEBLACK,
       "fadewhite" to TransitionKind.FADEWHITE,
+      "fade_white" to TransitionKind.FADEWHITE,
+      "slideleft" to TransitionKind.SLIDELEFT,
+      "slide_left" to TransitionKind.SLIDELEFT,
+      "slideright" to TransitionKind.SLIDERIGHT,
+      "slide_right" to TransitionKind.SLIDERIGHT,
+      "circleopen" to TransitionKind.CIRCLEOPEN,
+      "circle_open" to TransitionKind.CIRCLEOPEN,
+      "circleclose" to TransitionKind.CIRCLECLOSE,
+      "circle_close" to TransitionKind.CIRCLECLOSE,
       "zoomin" to TransitionKind.ZOOMIN,
+      "zoom_in" to TransitionKind.ZOOMIN,
       "smoothleft" to TransitionKind.SMOOTHLEFT,
+      "smooth_left" to TransitionKind.SMOOTHLEFT,
       "smoothright" to TransitionKind.SMOOTHRIGHT,
+      "smooth_right" to TransitionKind.SMOOTHRIGHT,
     )
+
+    private fun transitionFor(order: Int, raw: String): TransitionKind {
+      val key = raw.trim().lowercase()
+      if (key.isBlank()) return if (order == 1) TransitionKind.FADE else TransitionKind.CROSSFADE
+      return TRANSITION_MAP[key] ?: if (order == 1) TransitionKind.FADE else TransitionKind.CROSSFADE
+    }
+
+    private fun normalizeKenBurns(raw: String): String =
+      when (raw.trim().lowercase()) {
+        "zoom_in", "zoomin", "in" -> "in"
+        "zoom_out", "zoomout", "out" -> "out"
+        "pan_left", "panleft" -> "pan_left"
+        "pan_right", "panright" -> "pan_right"
+        else -> raw
+      }
   }
 }
