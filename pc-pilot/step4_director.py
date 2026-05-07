@@ -207,8 +207,62 @@ def _asset_duration_stats(event: Event, assets: dict) -> str:
     return "\n".join(lines)
 
 
+def _validate_brief(brief: DirectorBrief) -> list[str]:
+    """Hard structural checks. Qwen3.5-9B reliably ignores instructions like
+    "self-check duration sum" — code-side validation forces the issue. Returns
+    a list of failure reasons (empty = passes)."""
+    fails: list[str] = []
+    target = brief.target_duration_sec
+    shots = brief.shot_blueprint or []
+    n = len(shots)
+
+    # 1. Duration budget within ±10%
+    total = sum(s.duration_sec for s in shots)
+    if not (target * 0.9 <= total <= target * 1.1):
+        delta = total - target
+        fails.append(
+            f"shot duration sum {total:.1f}s is off by {delta:+.1f}s vs target_duration_sec={target:.1f}s "
+            f"(must be within ±10%). Adjust individual shot duration_sec values to fix."
+        )
+
+    # 2. Caption count ≥ 4
+    captioned = sum(1 for s in shots if (s.caption_text or "").strip())
+    if captioned < 4:
+        fails.append(
+            f"only {captioned} shots have non-empty caption_text. Vlog feel REQUIRES ≥4 captions; "
+            f"add captions on at least the opening, one mid-section anchor, the climax/payoff, and the closing."
+        )
+
+    # 3. Hook is short — opening shot ≤ 1.0s
+    if n >= 1:
+        first = shots[0]
+        if first.duration_sec > 1.0:
+            fails.append(
+                f"shot 1 (opening/hook) is {first.duration_sec:.1f}s — must be ≤1.0s for true hook impact "
+                f"(a long opening kills the hook)."
+            )
+
+    # 4. Closing has weight — last shot ≥ 2.5s
+    if n >= 2:
+        last = shots[-1]
+        if last.duration_sec < 2.5:
+            fails.append(
+                f"closing shot is {last.duration_sec:.1f}s — must be ≥2.5s to give the emotional payoff time to land."
+            )
+
+    # 5. Exactly one quick-cut hook (other shots ≥ 1.8s)
+    quick_cuts = [i for i, s in enumerate(shots, 1) if s.duration_sec < 1.5]
+    if len(quick_cuts) > 1:
+        fails.append(
+            f"multiple quick-cut shots at positions {quick_cuts} — only the hook (shot 1) may be <1.5s; "
+            f"every other shot must be ≥1.8s to avoid 'PPT anxiety' rhythm."
+        )
+
+    return fails
+
+
 def direct(event: Event, memory: EventMemory, audience: AudienceBrief, styles: list[StyleDef], assets: dict) -> DirectorBrief:
-    user = USER_TEMPLATE.format(
+    base_user = USER_TEMPLATE.format(
         audience_json=audience.model_dump_json(indent=2),
         memory_json=memory.model_dump_json(indent=2),
         event_id=event.event_id,
@@ -220,26 +274,52 @@ def direct(event: Event, memory: EventMemory, audience: AudienceBrief, styles: l
     )
     schema = DirectorBrief.model_json_schema()
 
-    t0 = time.time()
-    raw = call_llm_json(
-        system=SYSTEM,
-        user_text=user,
-        schema=schema,
-        schema_name="DirectorBrief",
-        temperature=0.7,
-        max_tokens=8192,
+    def _call(user_text: str) -> tuple[DirectorBrief, dict, float]:
+        t0 = time.time()
+        raw = call_llm_json(
+            system=SYSTEM,
+            user_text=user_text,
+            schema=schema,
+            schema_name="DirectorBrief",
+            temperature=0.7,
+            max_tokens=8192,
+        )
+        dt = time.time() - t0
+        raw["event_id"] = event.event_id
+        return DirectorBrief.model_validate(raw), raw, dt
+
+    brief, raw, dt = _call(base_user)
+    log_call(step="step4_director", event_id=event.event_id, system=SYSTEM,
+             user_text=base_user, response=raw, latency_sec=dt)
+
+    fails = _validate_brief(brief)
+    if not fails:
+        return brief
+
+    # ONE repair retry. Append the structured failure list as feedback so the model
+    # has a concrete checklist to fix (not vague "try again"). Empirically Qwen3.5
+    # repairs reliably when given specific, enumerated errors.
+    print(f"  ⟲ director validator failed ({len(fails)} issues); requesting one repair pass:")
+    for f in fails:
+        print(f"     - {f}")
+    repair_user = (
+        base_user
+        + "\n\n【上一轮 DirectorBrief 自动校验失败】\n"
+        + "\n".join(f"- {f}" for f in fails)
+        + "\n\n请重写 DirectorBrief，**逐条修复上面的问题**。其余规则仍按 system prompt 执行。"
     )
-    dt = time.time() - t0
-    log_call(
-        step="step4_director",
-        event_id=event.event_id,
-        system=SYSTEM,
-        user_text=user,
-        response=raw,
-        latency_sec=dt,
-    )
-    raw["event_id"] = event.event_id
-    return DirectorBrief.model_validate(raw)
+    brief2, raw2, dt2 = _call(repair_user)
+    log_call(step="step4_director_repair", event_id=event.event_id, system=SYSTEM,
+             user_text=repair_user, response=raw2, latency_sec=dt2)
+
+    fails2 = _validate_brief(brief2)
+    if fails2:
+        print(f"  ! director validator still failing after repair ({len(fails2)} issues); shipping repaired version anyway")
+        for f in fails2:
+            print(f"     - {f}")
+    else:
+        print("  ✓ director validator passed after repair")
+    return brief2
 
 
 def main():

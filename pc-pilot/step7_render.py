@@ -8,8 +8,10 @@ so you can compare across runs and never lose a previous take.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +24,12 @@ from step5_render import (
     render_image_shot,
     render_video_shot,
 )
+
+# Tunables (env-overridable so we can A/B without code edits)
+MAX_PARALLEL_RENDERS = int(os.environ.get("PC_PILOT_PARALLEL_RENDERS", "4"))
+ENABLE_BEAT_SNAP = os.environ.get("PC_PILOT_BEAT_SNAP", "1") not in ("0", "false", "False")
+BEAT_SNAP_MAX_OFFSET = float(os.environ.get("PC_PILOT_BEAT_SNAP_OFFSET", "0.25"))
+MIN_SHOT_AFTER_SNAP = 0.6  # never let a shot collapse below this when adjusting cuts
 
 ROOT = Path(__file__).parent
 W = ROOT / "workspace"
@@ -45,41 +53,108 @@ def _archive_previous(out_path: Path) -> Path | None:
     return archive_path
 
 
+def _render_one_shot(args):
+    """Render a single shot in isolation. Returns (out_path, actual_dur, spec_with_actual)
+    on success, or (None, None, spec) on failure. Designed to be safe from a thread
+    pool — each call is one ffmpeg subprocess with no shared state."""
+    s, a, out, color_grade = args
+    try:
+        if s.media_type == "image" and a.image_path:
+            _, actual_dur = render_image_shot(ROOT / a.image_path, s.duration_sec, s.ken_burns, s.caption, out, color_grade=color_grade)
+        elif s.media_type in ("video", "live_photo") and a.video_path:
+            trim_start = s.video_trim_start or 0.0
+            _, actual_dur = render_video_shot(ROOT / a.video_path, trim_start, s.duration_sec, s.caption, out, color_grade=color_grade)
+        elif a.image_path:
+            _, actual_dur = render_image_shot(ROOT / a.image_path, s.duration_sec, s.ken_burns, s.caption, out, color_grade=color_grade)
+        else:
+            return (None, None, s)
+        return (out, actual_dur, s.model_copy(update={"duration_sec": round(actual_dur, 2)}))
+    except Exception as e:
+        print(f"  ! shot {s.order} ({a.asset_id}) failed: {type(e).__name__}: {e}")
+        return (None, None, s)
+
+
+def _snap_cuts_to_beats(shot_durations: list[float], bgm_path: Path) -> list[float]:
+    """Walk cumulative cut boundaries and snap each to the nearest BGM beat within
+    ±BEAT_SNAP_MAX_OFFSET. Compensation goes to the NEXT shot so total length and
+    earlier already-snapped boundaries stay stable. If any adjustment would collapse
+    a shot below MIN_SHOT_AFTER_SNAP, the snap is rejected (return original)."""
+    try:
+        from audio_beats import cached_analyze, snap_to_nearest_beat
+    except Exception as e:
+        print(f"        beat snap skipped (audio_beats import: {e})")
+        return shot_durations
+    try:
+        info = cached_analyze(bgm_path)
+    except Exception as e:
+        print(f"        beat snap skipped (analyze: {e})")
+        return shot_durations
+    beats = info.get("beats_sec") or []
+    if not beats or len(shot_durations) < 2:
+        return shot_durations
+
+    adjusted = list(shot_durations)
+    cum = 0.0
+    snapped_any = False
+    for i in range(len(adjusted) - 1):
+        cum += adjusted[i]
+        target = snap_to_nearest_beat(cum, beats, max_offset=BEAT_SNAP_MAX_OFFSET)
+        delta = target - cum
+        if abs(delta) <= 0.01:
+            continue
+        # Move time across the cut: this shot grows/shrinks by delta; next shot
+        # compensates oppositely so the rest of the timeline stays aligned.
+        if (adjusted[i] + delta) < MIN_SHOT_AFTER_SNAP or (adjusted[i + 1] - delta) < MIN_SHOT_AFTER_SNAP:
+            continue
+        adjusted[i] += delta
+        adjusted[i + 1] -= delta
+        cum = target
+        snapped_any = True
+
+    if snapped_any:
+        bpm = info.get("bpm", 0)
+        print(f"        beat-snapped: bpm={bpm:.0f}, {sum(1 for a, b in zip(shot_durations, adjusted) if abs(a-b)>0.01)} cuts moved")
+    return adjusted
+
+
 def render_timeline(tl: Timeline, assets: dict[str, Asset], out_dir: Path) -> Path | None:
     cache_dir = W / "render_cache_v2" / tl.event_id
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    shot_paths: list[Path] = []
-    shot_durations: list[float] = []   # ACTUAL rendered duration per shot — fed to xfade
-    transitions: list[str] = []
-    captions_used: list[str] = []
-    actual_shots: list[ShotSpec] = []  # mutated copies with actual durations for caller to persist
     sorted_shots = sorted(tl.shots, key=lambda x: x.order)
+
+    # Build the work list (one entry per renderable shot, in order).
+    work = []
     for s in sorted_shots:
         a = assets.get(s.asset_id)
         if not a:
             print(f"  ! shot {s.order}: asset {s.asset_id} missing, skip")
             continue
         out = cache_dir / f"shot_{s.order:03d}.mp4"
-        try:
-            if s.media_type == "image" and a.image_path:
-                _, actual_dur = render_image_shot(ROOT / a.image_path, s.duration_sec, s.ken_burns, s.caption, out, color_grade=tl.color_grade)
-            elif s.media_type in ("video", "live_photo") and a.video_path:
-                trim_start = s.video_trim_start or 0.0
-                _, actual_dur = render_video_shot(ROOT / a.video_path, trim_start, s.duration_sec, s.caption, out, color_grade=tl.color_grade)
-            elif a.image_path:
-                _, actual_dur = render_image_shot(ROOT / a.image_path, s.duration_sec, s.ken_burns, s.caption, out, color_grade=tl.color_grade)
-            else:
-                continue
-            shot_paths.append(out)
-            shot_durations.append(actual_dur)
-            transitions.append(s.transition_in)
-            captions_used.append(s.caption)
-            # Persist actual duration onto a copy for the caller to write back to timeline
-            actual_shots.append(s.model_copy(update={"duration_sec": round(actual_dur, 2)}))
-        except Exception as e:
-            print(f"  ! shot {s.order} ({a.asset_id}) failed: {type(e).__name__}: {e}")
+        work.append((s, a, out, tl.color_grade))
+
+    if not work:
+        return None
+
+    # Parallel ffmpeg renders. Each shot is an independent subprocess so a thread
+    # pool gives us actual concurrency despite the GIL. libx264 is internally
+    # threaded so 4 concurrent encodes saturate without thrashing on modern CPUs.
+    with ThreadPoolExecutor(max_workers=MAX_PARALLEL_RENDERS) as pool:
+        results = list(pool.map(_render_one_shot, work))
+
+    shot_paths: list[Path] = []
+    shot_durations: list[float] = []
+    transitions: list[str] = []
+    captions_used: list[str] = []
+    actual_shots: list[ShotSpec] = []
+    for (s, a, _, _), (out_p, actual_dur, spec_actual) in zip(work, results):
+        if out_p is None:
             continue
+        shot_paths.append(out_p)
+        shot_durations.append(actual_dur)
+        transitions.append(s.transition_in)
+        captions_used.append(s.caption)
+        actual_shots.append(spec_actual)
 
     if not shot_paths:
         return None
@@ -88,6 +163,11 @@ def render_timeline(tl: Timeline, assets: dict[str, Asset], out_dir: Path) -> Pa
     bgm = find_bgm_for_event(tl.event_id, tl.color_grade)
     if bgm:
         print(f"        bgm: {bgm.name}")
+        # Beat-snap the cut boundaries so transitions land on actual onsets.
+        # This is what separates "amateur" from "TikTok-tier" cuts.
+        if ENABLE_BEAT_SNAP:
+            shot_durations = _snap_cuts_to_beats(shot_durations, bgm)
+
     out_path = out_dir / f"{tl.event_id}.mp4"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     archived = _archive_previous(out_path)

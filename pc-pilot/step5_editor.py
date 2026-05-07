@@ -140,6 +140,9 @@ def recall_candidates(
     used_aids: set[str],
     n_blueprint: int,
     top_k: int = DEFAULT_RECALL_TOP_K,
+    text_emb: Optional[np.ndarray] = None,
+    key_moment_aids: Optional[set[str]] = None,
+    subgroup_aids: Optional[set[str]] = None,
 ) -> list[tuple[str, Path]]:
     """Rank event assets by relevance to the ShotRequest, return top_k (asset_id, img_path).
 
@@ -164,13 +167,16 @@ def recall_candidates(
         target_frac = (request.position - 0.5) / max(1, n_blueprint)
         target_t = t_min.timestamp() + target_frac * span
 
-    # Encode visual_requirements with CLIP text encoder for similarity ranking
-    text_emb = None
-    if clip_embs is not None and request.visual_requirements:
+    # Encode visual_requirements with CLIP text encoder for similarity ranking.
+    # Caller (edit_event) can pre-pass a pooled embedding to dedupe across shots +
+    # critic revisions; fall back to per-call compute if not supplied.
+    if text_emb is None and clip_embs is not None and request.visual_requirements:
         try:
             text_emb = clip_emb.embed_text(request.visual_requirements)
         except Exception as e:
             print(f"  ! clip text embed failed for slot {request.position}: {e}")
+    key_moment_aids = key_moment_aids or set()
+    subgroup_aids = subgroup_aids or set()
 
     scored: list[tuple[float, str, Path]] = []
     LONG_SHOT_THRESHOLD = 3.5
@@ -204,8 +210,10 @@ def recall_candidates(
         # NORMALIZE: director may write "person_A", "A", "主角A", "Person A" — strip
         # to bare token and compare case-insensitive against the cluster IDs (A/B/C).
         constraint_norm = _normalize_person_id(request.person_constraint)
-        if constraint_norm and constraint_norm not in {pid.upper() for pid in person_ids_here}:
-            pass  # don't hard-drop; just no person bonus added below
+        # We don't HARD-drop on miss (would risk leaving slots unfilled when face
+        # detection failed on an otherwise good frame), but we apply a soft penalty
+        # at scoring time so a person-required slot won't silently land on a no-people
+        # frame just because CLIP scored it well.
 
         rep = representative_image(a, p)
         if not rep:
@@ -231,9 +239,18 @@ def recall_candidates(
             score += 0.3
         if a.media_type in ("video", "live_photo") and request.role in ("action", "climax"):
             score += 0.3
-        # person bonus (normalized comparison)
-        if constraint_norm and constraint_norm in {pid.upper() for pid in person_ids_here}:
-            score += 0.6
+        # person bonus / penalty (normalized comparison)
+        if constraint_norm:
+            if constraint_norm in {pid.upper() for pid in person_ids_here}:
+                score += 0.6
+            else:
+                score -= 0.4   # soft penalty so CLIP win can't override missing person
+
+        # EventMemory signals (the VLM already told us what mattered in step3)
+        if aid in key_moment_aids:
+            score += 1.5      # key moment = director-priority asset
+        if aid in subgroup_aids:
+            score += 0.5      # subgroup member = thematically grouped (e.g. "连拍 5 张父子自拍")
         # Duration matching: prefer clips that can SUSTAIN the requested duration.
         # We no longer hard-exclude (would leave slots unfilled), but score heavily
         # toward clips with the right length so longer slots don't end up on 1.4s
@@ -483,6 +500,7 @@ def edit_event(
     perceptions: dict[str, Perception],
     clip_embs: Optional[np.ndarray],
     asset_to_clip_idx: dict[str, int],
+    memory: Optional[EventMemory] = None,
 ) -> Timeline:
     used: set[str] = set()
     # Track which time-segments of long videos are already used so we don't re-pick
@@ -492,9 +510,41 @@ def edit_event(
     n_blueprint = len(brief.shot_blueprint)
     prev_path: Optional[Path] = None
 
+    # Surface EventMemory signals so recall can prioritize what the VLM already
+    # flagged as story-critical in step3. KeyMoments carry resolved asset_ids;
+    # SubGroups carry contact-sheet 1-based indices that map back to event.asset_ids
+    # (montage built the sheet in event.asset_ids order after junk filter).
+    key_moment_aids: set[str] = set()
+    subgroup_aids: set[str] = set()
+    if memory:
+        key_moment_aids = {km.asset_id for km in memory.key_moments if km.asset_id}
+        for sg in memory.notable_subgroups:
+            for idx in sg.indices:
+                if 1 <= idx <= len(event.asset_ids):
+                    subgroup_aids.add(event.asset_ids[idx - 1])
+        if key_moment_aids or subgroup_aids:
+            print(f"  · EventMemory recall hints: {len(key_moment_aids)} key_moments + "
+                  f"{len(subgroup_aids)} subgroup assets")
+
+    # Pre-compute CLIP text embeddings ONCE per unique visual_requirements (these are
+    # re-used by critic revisions too). On a 7-shot timeline this saves 7 GPU wakeups
+    # vs. per-recall encoding.
+    text_emb_by_req: dict[str, Optional[np.ndarray]] = {}
+    if clip_embs is not None:
+        unique_reqs = {r.visual_requirements for r in brief.shot_blueprint if r.visual_requirements}
+        for vr in unique_reqs:
+            try:
+                text_emb_by_req[vr] = clip_emb.embed_text(vr)
+            except Exception as e:
+                print(f"  ! clip text embed failed for '{vr[:30]}…': {e}")
+                text_emb_by_req[vr] = None
+
     for req in sorted(brief.shot_blueprint, key=lambda r: r.position):
         candidates = recall_candidates(
-            req, event, assets, perceptions, clip_embs, asset_to_clip_idx, used, n_blueprint
+            req, event, assets, perceptions, clip_embs, asset_to_clip_idx, used, n_blueprint,
+            text_emb=text_emb_by_req.get(req.visual_requirements),
+            key_moment_aids=key_moment_aids,
+            subgroup_aids=subgroup_aids,
         )
         if not candidates:
             print(f"  ! slot {req.position} ({req.role}): no candidates after recall, skipping")
@@ -559,9 +609,19 @@ def main():
             continue
         brief = DirectorBrief.model_validate_json(brief_path.read_text(encoding="utf-8"))
 
+        # Pull EventMemory if present so recall can use key_moments + subgroups.
+        # Optional — pipeline still works without it (just no recall bonuses).
+        memory = None
+        mem_path = W / "event_memory" / f"{ev.event_id}.json"
+        if mem_path.exists():
+            try:
+                memory = EventMemory.model_validate_json(mem_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                print(f"[step5] {ev.event_id}: failed to load EventMemory: {e}")
+
         print(f"[step5] {ev.event_id}: editing {len(brief.shot_blueprint)} slots ('{brief.title}')")
         try:
-            tl = edit_event(ev, brief, assets, perceptions, clip_embs, asset_to_clip_idx)
+            tl = edit_event(ev, brief, assets, perceptions, clip_embs, asset_to_clip_idx, memory=memory)
             out.write_text(tl.model_dump_json(indent=2), encoding="utf-8")
             print(f"[step5] {ev.event_id}: timeline v1 with {len(tl.shots)} shots ({tl.total_duration_sec:.1f}s) -> {out}")
         except Exception as e:
