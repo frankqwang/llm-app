@@ -29,6 +29,7 @@ import java.io.Closeable
 import java.io.File
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
@@ -146,6 +147,9 @@ class AgentRuntime(
     } catch (_: TimeoutCancellationException) {
       Log.w(TAG, "ask timed out after ${ASK_TIMEOUT_MS}ms (label=$label, partial=${sb.length} chars)")
       outcome = "timeout"
+    } catch (t: CancellationException) {
+      Log.w(TAG, "ask cancelled (label=$label)")
+      throw t
     } catch (t: Throwable) {
       Log.w(TAG, "ask failed: ${t.message}")
       outcome = "error:${t::class.java.simpleName}"

@@ -209,7 +209,14 @@ object PhotoIngest {
         val tsStr = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
           ?: exif.getAttribute(ExifInterface.TAG_DATETIME)
         val ts = parseExifDate(tsStr)
-        val latLon = exif.latLong
+        // Only touch latLong when GPS tags are actually present and non-empty.
+        // exif.latLong internally parses the GPS rational fields and prints a
+        // warning when they are 0/1,0/1,0/1 + blank ref (common for screenshots
+        // / downloaded images). Checking the raw attribute first silences the
+        // logspam during album scans.
+        val hasGps = exif.getAttribute(ExifInterface.TAG_GPS_LATITUDE)?.isNotBlank() == true &&
+          exif.getAttribute(ExifInterface.TAG_GPS_LATITUDE_REF)?.isNotBlank() == true
+        val latLon = if (hasGps) exif.latLong else null
         Triple(ts, latLon?.get(0), latLon?.get(1))
       } ?: Triple(null, null, null)
     } catch (_: Throwable) {

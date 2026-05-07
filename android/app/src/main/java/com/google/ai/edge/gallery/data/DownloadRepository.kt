@@ -45,6 +45,7 @@ import java.util.UUID
 import java.util.concurrent.Executors
 
 private const val TAG = "AGDownloadRepository"
+private const val MODEL_DOWNLOAD_TAG = "modelDownload"
 private const val MODEL_NAME_TAG = "modelName"
 private const val TASK_ID_TAG = "taskId"
 
@@ -130,6 +131,7 @@ class DefaultDownloadRepository(
       OneTimeWorkRequestBuilder<DownloadWorker>()
         .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
         .setInputData(inputData)
+        .addTag(MODEL_DOWNLOAD_TAG)
         .addTag("$MODEL_NAME_TAG:${model.name}")
         .addTag("$TASK_ID_TAG:${task?.id ?: ""}")
         .build()
@@ -154,7 +156,7 @@ class DefaultDownloadRepository(
 
   override fun cancelAll(onComplete: () -> Unit) {
     workManager
-      .cancelAllWork()
+      .cancelAllWorkByTag(MODEL_DOWNLOAD_TAG)
       .result
       .addListener({ onComplete() }, Executors.newSingleThreadExecutor())
   }

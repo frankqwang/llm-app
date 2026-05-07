@@ -114,6 +114,7 @@ fun VlogPilotScreen(
 ) {
   val state by viewModel.state.collectAsState()
   val decisions by viewModel.decisions.collectAsState()
+  val progress by viewModel.progress.collectAsState()
   val context = LocalContext.current
   var selectedTab by remember { mutableStateOf(VlogPilotTab.Results) }
 
@@ -155,6 +156,7 @@ fun VlogPilotScreen(
       StudioStatusCard(
         state = state,
         decisions = decisions,
+        progress = progress,
         running = running,
         onRunClick = {
           if (running) {
@@ -270,6 +272,7 @@ private fun WorkspaceTabs(selected: VlogPilotTab, onSelect: (VlogPilotTab) -> Un
 private fun StudioStatusCard(
   state: PipelineState,
   decisions: List<EventDecisions>,
+  progress: ProgressSnapshot,
   running: Boolean,
   onRunClick: () -> Unit,
 ) {
@@ -326,6 +329,78 @@ private fun StudioStatusCard(
             icon = if (rendered > 0) Icons.Outlined.CheckCircle else Icons.Outlined.Movie,
             accent = rendered > 0,
           )
+        }
+      }
+
+      if (running || progress.stage != "idle") {
+        ProgressInsightPanel(progress)
+      }
+    }
+  }
+}
+
+@Composable
+private fun ProgressInsightPanel(progress: ProgressSnapshot) {
+  val fraction = remember(progress.current, progress.total) {
+    if (progress.total > 0) (progress.current.toFloat() / progress.total.toFloat()).coerceIn(0f, 1f) else null
+  }
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(14.dp),
+    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
+  ) {
+    Column(
+      modifier = Modifier.padding(12.dp),
+      verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.Top,
+      ) {
+        Icon(Icons.Outlined.Visibility, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+          Text(progress.headline, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+          if (progress.detail.isNotBlank()) {
+            Text(
+              progress.detail,
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              maxLines = 3,
+              overflow = TextOverflow.Ellipsis,
+            )
+          }
+        }
+      }
+
+      if (fraction != null) {
+        LinearProgressIndicator(
+          progress = { fraction },
+          modifier = Modifier
+            .fillMaxWidth()
+            .height(6.dp)
+            .clip(RoundedCornerShape(999.dp)),
+        )
+      }
+
+      LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (progress.stage.isNotBlank()) item { InfoPill(progress.stage, Icons.Outlined.Star, progress.stage.contains("done")) }
+        if (progress.current > 0 && progress.total > 0) item { InfoPill("${progress.current}/${progress.total}", Icons.Outlined.Timer) }
+        if (progress.mediaType.isNotBlank()) item { InfoPill(progress.mediaType, Icons.Outlined.Movie) }
+        if (progress.elapsedMs > 0) item { InfoPill(formatMs(progress.elapsedMs), Icons.Outlined.Timer, true) }
+      }
+
+      if (progress.recent.isNotEmpty()) {
+        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+          progress.recent.take(4).forEach { item ->
+            Text(
+              item,
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
+          }
         }
       }
     }

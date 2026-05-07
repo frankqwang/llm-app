@@ -853,7 +853,7 @@ constructor(
   private fun processPendingDownloads() {
     // Cancel all pending downloads for the retrieved models.
     downloadRepository.cancelAll {
-      Log.d(TAG, "All workers are cancelled.")
+      Log.d(TAG, "All model download workers are cancelled.")
 
       viewModelScope.launch(Dispatchers.Main) {
         val checkedModelNames = mutableSetOf<String>()

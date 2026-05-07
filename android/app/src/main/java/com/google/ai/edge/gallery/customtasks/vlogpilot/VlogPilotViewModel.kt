@@ -1,9 +1,9 @@
 /*
  * Copyright 2026 The pc-pilot v3 authors
  *
- * UI state holder for the M1 scaffolding. Drives ingest + segmentation and
- * exposes a sealed PipelineState the screen can render. M2-M5 grow this into
- * a full pipeline orchestrator.
+ * UI state holder for VlogPilot. It exposes both the durable decision artifacts
+ * and a live progress snapshot so the process viewer can explain what the
+ * on-device agents are doing while long VLM calls are running.
  */
 package com.google.ai.edge.gallery.customtasks.vlogpilot
 
@@ -12,6 +12,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.google.ai.edge.gallery.customtasks.vlogpilot.ingest.PhotoIngest
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventSegmenter
@@ -22,14 +23,17 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.DecisionStore
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventDecisions
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineEventBus
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineProgress
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.StateBreadcrumb
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.VlogPipelineWorker
 import com.google.ai.edge.gallery.data.Model
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -47,6 +51,18 @@ sealed interface PipelineState {
 
 data class EventResult(val eventId: String, val outputPath: String)
 
+data class ProgressSnapshot(
+  val headline: String = "等待开始",
+  val detail: String = "",
+  val stage: String = "idle",
+  val current: Int = 0,
+  val total: Int = 0,
+  val assetName: String = "",
+  val mediaType: String = "",
+  val elapsedMs: Long = 0L,
+  val recent: List<String> = emptyList(),
+)
+
 @HiltViewModel
 class VlogPilotViewModel @Inject constructor(
   @ApplicationContext private val appContext: Context,
@@ -58,16 +74,17 @@ class VlogPilotViewModel @Inject constructor(
   private val _decisions = MutableStateFlow<List<EventDecisions>>(emptyList())
   val decisions: StateFlow<List<EventDecisions>> = _decisions.asStateFlow()
 
+  private val _progress = MutableStateFlow(ProgressSnapshot())
+  val progress: StateFlow<ProgressSnapshot> = _progress.asStateFlow()
+
+  private val collectedOutputs = mutableMapOf<String, String>()
+  private var decisionRefreshJob: Job? = null
+  private val workManager by lazy { WorkManager.getInstance(appContext) }
+
   init {
-    // Listen to per-stage progress events.
     viewModelScope.launch {
       PipelineEventBus.flow.collect { progress -> handleProgress(progress) }
     }
-    // Poll the decisions/ dir so the UI sees Browser/Director/Editor/Critic
-    // outputs progressively appear as each agent finishes. Reading 5-7 JSON
-    // files per event off the disk every refresh has to happen on Dispatchers.IO
-    // — running it on Main causes the kind of jank the user notices when
-    // scrolling/expanding cards mid-run.
     viewModelScope.launch {
       _decisions.value = withContext(Dispatchers.IO) { DecisionStore.loadAll(appContext) }
       while (true) {
@@ -78,59 +95,87 @@ class VlogPilotViewModel @Inject constructor(
         }
       }
     }
+    viewModelScope.launch {
+      while (true) {
+        syncWorkState()
+        delay(1_500)
+      }
+    }
   }
 
   fun scanAlbum(windowDays: Int = 30) {
     viewModelScope.launch {
       _state.value = PipelineState.Scanning("正在读取相册")
+      _progress.value = progressWithRecent(ProgressSnapshot("正在读取相册", "扫描 MediaStore 中的图片、视频和 Live Photo", "scan"))
       try {
         val assets = PhotoIngest.loadRecent(appContext, windowDays)
         _state.value = PipelineState.Scanning("正在把 ${assets.size} 个素材切分成事件")
+        _progress.value = progressWithRecent(ProgressSnapshot("正在切分事件", "按时间间隔和事件跨度合并相邻素材", "segment"))
         val events = EventSegmenter.segment(assets)
         _state.value = PipelineState.Ready(assets, events)
+        _progress.value = progressWithRecent(ProgressSnapshot("预扫完成", "${assets.size} 个素材，${events.size} 个事件，可开始生成", "ready"))
       } catch (t: Throwable) {
-        _state.value = PipelineState.Error(t.message ?: t::class.java.simpleName)
+        val msg = t.message ?: t::class.java.simpleName
+        _state.value = PipelineState.Error(msg)
+        _progress.value = progressWithRecent(ProgressSnapshot("扫描失败", msg, "error"))
       }
     }
   }
 
   fun reportError(message: String) {
     _state.value = PipelineState.Error(message)
+    _progress.value = progressWithRecent(ProgressSnapshot("错误", message, "error"))
   }
 
   fun cancelPipeline() {
-    WorkManager.getInstance(appContext).cancelUniqueWork(VlogPipelineWorker.WORK_NAME)
+    StateBreadcrumb.mark(appContext, "ui_cancel_request", "cancel unique work")
+    workManager.cancelUniqueWork(VlogPipelineWorker.WORK_NAME)
     _state.value = PipelineState.Idle
+    _progress.value = progressWithRecent(ProgressSnapshot("已取消", "后台生成任务已取消", "idle"))
   }
 
   fun runFullPipeline(model: Model) {
-    // The Worker can't easily inject Hilt singletons or look the Model up via task.models
-    // (that's an in-memory ViewModel state). Stash the resolved Model here, then the worker
-    // pulls it back. Single concurrent pipeline is enforced by enqueueUniqueWork+KEEP below.
-    VlogPilotModelRegistry.stash(appContext, model)
-    VlogPipelineWorker.ensureChannel(appContext)
-    val req = OneTimeWorkRequestBuilder<VlogPipelineWorker>().build()
-    WorkManager.getInstance(appContext)
-      .enqueueUniqueWork(VlogPipelineWorker.WORK_NAME, ExistingWorkPolicy.KEEP, req)
-    _state.value = PipelineState.Running("任务已加入后台队列")
+    viewModelScope.launch {
+      StateBreadcrumb.mark(appContext, "ui_run_request", "model=${model.name}")
+      val active = withContext(Dispatchers.IO) { activeWorkInfo() }
+      if (active != null && !isStaleWork()) {
+        StateBreadcrumb.mark(appContext, "ui_run_existing", "id=${active.id} state=${active.state}")
+        _state.value = PipelineState.Running("已有后台任务正在运行")
+        _progress.value = progressWithRecent(
+          ProgressSnapshot(
+            "已有后台任务正在运行",
+            "没有重新入队，避免再次点击生成把当前 Worker 取消；需要重跑请先点取消",
+            "work_running",
+          ),
+        )
+        return@launch
+      }
+
+      collectedOutputs.clear()
+      VlogPilotModelRegistry.stash(appContext, model)
+      VlogPipelineWorker.ensureChannel(appContext)
+      val req = OneTimeWorkRequestBuilder<VlogPipelineWorker>().build()
+      val policy = if (active != null) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP
+      StateBreadcrumb.mark(appContext, "ui_enqueue", "policy=$policy request=${req.id}")
+      workManager.enqueueUniqueWork(VlogPipelineWorker.WORK_NAME, policy, req)
+      _state.value = PipelineState.Running("任务已加入后台队列")
+      _progress.value = progressWithRecent(
+        ProgressSnapshot(
+          "任务已入队",
+          if (policy == ExistingWorkPolicy.REPLACE) "检测到旧后台任务长时间无心跳，已重置并重新开始" else "等待 WorkManager 启动前台任务",
+          "queued",
+        ),
+      )
+    }
   }
 
-  private val collectedOutputs = mutableMapOf<String, String>()
-
   private fun handleProgress(p: PipelineProgress) {
+    val snapshot = snapshotFor(p)
     when (p) {
-      is PipelineProgress.DownloadingModels -> _state.value = PipelineState.Running("下载模型 ${p.percent}% (${p.label})")
-      PipelineProgress.Ingesting -> _state.value = PipelineState.Running("正在扫描相册")
-      is PipelineProgress.IngestDone -> _state.value = PipelineState.Running("已收集 ${p.assetCount} 个素材，切出 ${p.eventCount} 个事件")
-      is PipelineProgress.Perceiving -> _state.value = PipelineState.Running("视觉感知 ${p.current}/${p.total}")
-      is PipelineProgress.Annotating -> _state.value = PipelineState.Running("素材语义标注 ${p.current}/${p.total}")
-      is PipelineProgress.EventStart -> _state.value = PipelineState.Running("处理事件 ${p.index}/${p.total} (${p.eventId})")
-      is PipelineProgress.EventStage -> _state.value = PipelineState.Running("${p.eventId}: ${p.stage}")
       is PipelineProgress.EventDone -> {
         collectedOutputs[p.eventId] = p.outputPath
-        _state.value = PipelineState.Running("${p.eventId} 已生成")
+        _state.value = PipelineState.Running(snapshot.headline)
       }
-      is PipelineProgress.EventFailed -> _state.value = PipelineState.Running("${p.eventId} 失败：${p.message}")
       PipelineProgress.AllDone -> {
         val all = collectedOutputs.toList()
           .ifEmpty { listExistingCandidates() }
@@ -138,7 +183,162 @@ class VlogPilotViewModel @Inject constructor(
         _state.value = PipelineState.Done(all)
       }
       is PipelineProgress.Failed -> _state.value = PipelineState.Error(p.message)
+      else -> _state.value = PipelineState.Running(snapshot.headline)
     }
+    _progress.value = progressWithRecent(snapshot)
+    scheduleDecisionRefresh()
+  }
+
+  private fun snapshotFor(p: PipelineProgress): ProgressSnapshot = when (p) {
+    is PipelineProgress.DownloadingModels -> ProgressSnapshot(
+      headline = "下载/检查模型 ${p.percent}%",
+      detail = p.label,
+      stage = "download",
+      current = p.percent,
+      total = 100,
+    )
+    PipelineProgress.Ingesting -> ProgressSnapshot("扫描相册", "读取 MediaStore，过滤非相机目录和过大文件", "ingest")
+    is PipelineProgress.IngestDone -> ProgressSnapshot(
+      headline = "相册扫描完成",
+      detail = "已收集 ${p.assetCount} 个输入素材，切出 ${p.eventCount} 个事件；接下来做本地视觉感知",
+      stage = "ingest_done",
+      current = p.assetCount,
+      total = p.assetCount,
+    )
+    is PipelineProgress.Perceiving -> ProgressSnapshot(
+      headline = "视觉感知 ${p.current}/${p.total}",
+      detail = "${p.assetName.ifBlank { "当前素材" }} · ${p.mediaType.ifBlank { "media" }} · ${if (p.cacheHit) "读取缓存" else "计算清晰度/亮度/人脸/NSFW/视频切点"}",
+      stage = "perceive",
+      current = p.current,
+      total = p.total,
+      assetName = p.assetName,
+      mediaType = p.mediaType,
+    )
+    is PipelineProgress.Annotating -> {
+      val action = when (p.phase) {
+        "start" -> "Gemma 正在看素材"
+        "skipped" -> "语义标注跳过"
+        else -> "语义标注完成"
+      }
+      val why = if (p.mediaType.contains("video") || p.mediaType.contains("live")) {
+        "视频会抽 6 帧拼成网格，让 VLM 判断动作变化和 best moment"
+      } else {
+        "图片会送 512px 缩略图，让 VLM 输出 scene/subjects/action/mood"
+      }
+      ProgressSnapshot(
+        headline = "素材语义标注 ${p.current}/${p.total}",
+        detail = "$action：${p.assetName.ifBlank { "当前素材" }} · ${p.mediaType.ifBlank { "media" }} · $why${if (p.elapsedMs > 0) " · 用时 ${formatDuration(p.elapsedMs)}" else ""}",
+        stage = "annotate",
+        current = p.current,
+        total = p.total,
+        assetName = p.assetName,
+        mediaType = p.mediaType,
+        elapsedMs = p.elapsedMs,
+      )
+    }
+    is PipelineProgress.AnnotationDone -> ProgressSnapshot(
+      headline = "素材语义标注完成",
+      detail = "完成 ${p.annotated}/${p.total} 个素材，用时 ${formatDuration(p.elapsedMs)}；接下来进入事件 browse / director / editor",
+      stage = "annotate_done",
+      current = p.annotated,
+      total = p.total,
+      elapsedMs = p.elapsedMs,
+    )
+    is PipelineProgress.EventStart -> ProgressSnapshot(
+      headline = "处理事件 ${p.index}/${p.total}",
+      detail = "${p.eventId}：开始生成事件级故事和时间线",
+      stage = "event_start",
+      current = p.index,
+      total = p.total,
+    )
+    is PipelineProgress.EventStage -> ProgressSnapshot(
+      headline = "${p.eventId}: ${stageLabel(p.stage)}",
+      detail = p.detail.ifBlank { stageDetail(p.stage) },
+      stage = p.stage,
+    )
+    is PipelineProgress.EventDone -> ProgressSnapshot(
+      headline = "${p.eventId} 已生成",
+      detail = p.outputPath,
+      stage = "event_done",
+    )
+    is PipelineProgress.EventFailed -> ProgressSnapshot(
+      headline = "${p.eventId} 失败",
+      detail = p.message,
+      stage = "event_failed",
+    )
+    PipelineProgress.AllDone -> ProgressSnapshot("全部完成", "候选视频已写入本地 candidates 目录", "done")
+    is PipelineProgress.Failed -> ProgressSnapshot("任务失败", p.message, "failed")
+  }
+
+  private fun progressWithRecent(snapshot: ProgressSnapshot): ProgressSnapshot {
+    val line = listOfNotNull(
+      snapshot.headline,
+      snapshot.assetName.takeIf { it.isNotBlank() },
+      snapshot.elapsedMs.takeIf { it > 0 }?.let { formatDuration(it) },
+    ).joinToString(" · ")
+    val recent = (listOf(line) + _progress.value.recent).distinct().take(8)
+    return snapshot.copy(recent = recent)
+  }
+
+  private fun stageLabel(stage: String): String = when {
+    stage.startsWith("browse") -> "浏览素材"
+    stage.startsWith("audience") -> "观众策略"
+    stage.startsWith("director") -> "导演分镜"
+    stage.startsWith("editor") -> "剪辑选片"
+    stage.startsWith("critic") -> "审片返工"
+    stage.startsWith("render") -> "渲染成片"
+    else -> stage
+  }
+
+  private fun stageDetail(stage: String): String = when {
+    stage.startsWith("browse") -> "把事件素材拼成 contact sheet，生成 EventMemory"
+    stage.startsWith("audience") -> "决定 hook、情绪回报、节奏和避坑项"
+    stage.startsWith("director") -> "生成叙事弧线和 shot blueprint"
+    stage.startsWith("editor") -> "召回候选素材/视频窗口，并让 VLM 选择镜头"
+    stage.startsWith("critic") -> "看 storyboard，检查重复、高潮、节奏和结尾"
+    stage.startsWith("render") -> "FFmpeg 渲染镜头、转场、字幕和 BGM"
+    else -> ""
+  }
+
+  private fun scheduleDecisionRefresh() {
+    if (decisionRefreshJob?.isActive == true) return
+    decisionRefreshJob = viewModelScope.launch {
+      delay(250)
+      _decisions.value = withContext(Dispatchers.IO) { DecisionStore.loadAll(appContext) }
+    }
+  }
+
+  private suspend fun syncWorkState() {
+    val active = withContext(Dispatchers.IO) { activeWorkInfo() }
+    if (active != null && _state.value !is PipelineState.Running && _state.value !is PipelineState.Scanning) {
+      _state.value = PipelineState.Running("后台生成任务仍在运行")
+      _progress.value = progressWithRecent(
+        ProgressSnapshot(
+          "后台生成任务仍在运行",
+          "WorkManager: ${active.state} · ${active.id}",
+          "work_running",
+        ),
+      )
+    }
+  }
+
+  private fun activeWorkInfo(): WorkInfo? {
+    val activeStates = setOf(WorkInfo.State.ENQUEUED, WorkInfo.State.RUNNING, WorkInfo.State.BLOCKED)
+    return try {
+      workManager.getWorkInfosForUniqueWork(VlogPipelineWorker.WORK_NAME)
+        .get(2, TimeUnit.SECONDS)
+        .firstOrNull { it.state in activeStates }
+    } catch (_: Throwable) {
+      null
+    }
+  }
+
+  private fun isStaleWork(): Boolean {
+    val stateFile = File(appContext.filesDir, "_state.txt")
+    val lastTick = runCatching {
+      stateFile.readText().substringBefore('\t').toLong()
+    }.getOrNull() ?: return false
+    return System.currentTimeMillis() - lastTick > STALE_WORK_HEARTBEAT_MS
   }
 
   private fun listExistingCandidates(): List<Pair<String, String>> {
@@ -148,5 +348,12 @@ class VlogPilotViewModel @Inject constructor(
       ?.map { it.nameWithoutExtension to it.absolutePath }
       ?.sortedBy { it.first }
       .orEmpty()
+  }
+
+  private fun formatDuration(ms: Long): String =
+    if (ms < 1000) "${ms}ms" else "${ms / 1000}.${(ms % 1000) / 100}s"
+
+  companion object {
+    private const val STALE_WORK_HEARTBEAT_MS = 10 * 60 * 1000L
   }
 }

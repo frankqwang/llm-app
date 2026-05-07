@@ -68,6 +68,7 @@ object Recall {
         val durationFit = durationCompat(asset, request.durationSec)
         val roleHintFit = roleHintMatch(perc.vlmTags.narrativeRoleHint, request.role)
         val faceBonus = if (request.role == ShotRole.PORTRAIT && perc.faces.isNotEmpty()) 0.20f else 0f
+        val travelBonus = TravelSceneScorer.assetScore(asset, perc) * travelWeight(request.role)
         // Score weights: VLM tag overlap is the dominant semantic signal (the analogue of
         // CLIP cosine pre-v4). Time fit + duration fit are structural correctness.
         // Sharpness breaks ties between otherwise-equal candidates.
@@ -77,6 +78,7 @@ object Recall {
           roleHintFit * 0.10f +
           perc.sharpness * 0.07f +
           faceBonus +
+          travelBonus +
           if (perc.vlmTags.scene.isBlank()) -0.10f else 0f  // soft penalty: VLM didn't tag this
         expandWindows(asset, perc, request, score).asSequence()
       }
@@ -150,7 +152,8 @@ object Recall {
         if (perc.isJunk) return@mapNotNull null
         val score = semanticOverlap(perc, requestTokens) * 0.45f +
           perc.sharpness * 0.30f +
-          durationCompat(asset, request.durationSec) * 0.25f
+          durationCompat(asset, request.durationSec) * 0.25f +
+          TravelSceneScorer.assetScore(asset, perc) * travelWeight(request.role)
         expandWindows(asset, perc, request, score)
       }
       .flatten()
@@ -251,6 +254,16 @@ object Recall {
     ShotRole.CLIMAX -> 0.70f
     ShotRole.TRANSITION -> 0.50f
     ShotRole.CLOSING -> 0.84f
+  }
+
+  private fun travelWeight(role: ShotRole): Float = when (role) {
+    ShotRole.OPENING,
+    ShotRole.ESTABLISHING,
+    ShotRole.TRANSITION,
+    ShotRole.CLOSING -> 0.12f
+    ShotRole.ACTION,
+    ShotRole.CLIMAX -> 0.08f
+    ShotRole.PORTRAIT -> 0.04f
   }
 
   /**
