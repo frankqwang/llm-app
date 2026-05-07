@@ -1,16 +1,26 @@
 /*
  * Copyright 2026 The pc-pilot v3 authors
  *
- * Rule-based candidate recall for the editor agent. For a given ShotRequest,
- * filter the event's perceptions by quality + person + time-window, then sort
- * by CLIP text-image similarity to `visual_requirements`. The top-K
- * (default 8) candidates are returned for VLM curate.
+ * Tag-based candidate recall for the editor agent. For a given ShotRequest,
+ * filter the event's perceptions by quality + time-window, score by token
+ * overlap between request.visualRequirements/moodTarget and the asset's
+ * VlmTags, then return the top-K (default 8) for VLM curation.
+ *
+ * Pre-v4 this file used CLIP text-image cosine for ranking — but the CLIP
+ * TFLite was never OTA-shipped (no canonical sub-50MB int8 source), and the
+ * fallback (sharpness only) ranked everything roughly equal. VlmTags from
+ * VlmAnnotator carry the semantic signal CLIP was supposed to provide; token
+ * overlap on the tag fields is a strong-enough surrogate for the ranking
+ * stage (the editor still asks Gemma to make the final pick from top-K).
  */
 package com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline
 
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Perception
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRequest
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRole
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.VlmTags
 
 object Recall {
 
@@ -21,7 +31,6 @@ object Recall {
     nBlueprint: Int,                            // total shots in DirectorBrief.shotBlueprint
     eventAssets: List<Asset>,
     perceptions: Map<String, Perception>,
-    queryEmbedding: FloatArray,                 // CLIP text-encoded visual_requirements
     excludedAssetIds: Set<String> = emptySet(), // already used by another shot in this timeline
     k: Int = 8,
   ): List<Candidate> {
@@ -29,81 +38,124 @@ object Recall {
     if (sorted.isEmpty()) return emptyList()
 
     // Position-derived time window: shot at position p of N → centered at (p-0.5)/N along the
-    // event's time axis. Earlier ports divided by `request.position` instead of `nBlueprint`,
-    // collapsing every shot toward the end of the event.
+    // event's time axis.
     val tStart = sorted.first().takenEpochMs
     val tEnd = sorted.last().takenEpochMs
     val span = (tEnd - tStart).coerceAtLeast(1L)
     val pNorm = ((request.position - 0.5f) / kotlin.math.max(1, nBlueprint).toFloat()).coerceIn(0f, 1f)
     val targetMs = tStart + (span * pNorm).toLong()
     val windowMs = (span * 0.4f).toLong().coerceAtLeast(60_000L) // ≥1 min flex window
-    val personConstraint = normalizePersonConstraint(request.personConstraint)
-    val wantsNoPerson = request.personConstraint?.trim() == "无人物"
 
-    // Score weights: when CLIP is available the dominant signal is text-image cosine, otherwise
-    // (model not yet OTA-shipped) we fall back to a quality + duration-fit blend so callers still
-    // get something better than random.
-    val clipAvailable = queryEmbedding.isNotEmpty()
+    // Pre-tokenize the request once so we don't re-split per asset.
+    val requestTokens = tokenize(request.visualRequirements + " " + request.moodTarget)
 
-    return sorted
+    val scored = sorted
       .asSequence()
       .filter { it.id !in excludedAssetIds }
       .filter { perceptions[it.id]?.isJunk != true }
-      .filter { asset ->
-        if (!wantsNoPerson) return@filter true
-        val faces = perceptions[asset.id]?.faces ?: return@filter false
-        faces.none { !it.personId.isNullOrBlank() }
-      }
       .map { asset ->
         val perc = perceptions[asset.id] ?: return@map Candidate(asset, blank(asset.id), 0f)
+        val tagOverlap = vlmOverlap(perc.vlmTags, requestTokens)
         val timeDelta = kotlin.math.abs(asset.takenEpochMs - targetMs)
         val timeFit = (1f - (timeDelta.toFloat() / windowMs.coerceAtLeast(1L).toFloat())).coerceIn(0f, 1f)
-        val personFit = personFit(perc, personConstraint)
-        val clipScore = if (clipAvailable && perc.clipEmbedding.isNotEmpty()) {
-          cosine(queryEmbedding, perc.clipEmbedding.toFloatArray())
-        } else 0f
         val durationFit = durationCompat(asset, request.durationSec)
-        val score = if (clipAvailable) {
-          clipScore * 0.58f + timeFit * 0.12f + personFit * 0.12f + perc.sharpness * 0.08f + durationFit * 0.10f
-        } else {
-          perc.sharpness * 0.35f + durationFit * 0.25f + timeFit * 0.15f + personFit * 0.15f +
-            roleBonus(asset, perc, request.role) * 0.10f
-        }
+        val roleHintFit = roleHintMatch(perc.vlmTags.narrativeRoleHint, request.role)
+        val faceBonus = if (request.role == ShotRole.PORTRAIT && perc.faces.isNotEmpty()) 0.20f else 0f
+        // Score weights: VLM tag overlap is the dominant semantic signal (the analogue of
+        // CLIP cosine pre-v4). Time fit + duration fit are structural correctness.
+        // Sharpness breaks ties between otherwise-equal candidates.
+        val score = tagOverlap * 0.45f +
+          timeFit * 0.18f +
+          durationFit * 0.15f +
+          roleHintFit * 0.10f +
+          perc.sharpness * 0.07f +
+          faceBonus +
+          if (perc.vlmTags.scene.isBlank()) -0.10f else 0f  // soft penalty: VLM didn't tag this
         Candidate(asset, perc, score)
       }
       .sortedByDescending { it.score }
       .take(k)
       .toList()
-      .ifEmpty {
-        relaxedFallback(request, eventAssets, perceptions, excludedAssetIds, k)
-      }
+
+    return scored.ifEmpty { relaxedFallback(request, eventAssets, perceptions, excludedAssetIds, k) }
   }
 
-  /** Soft role-aware bonus used when CLIP isn't available. Mirrors pc-pilot's recall heuristics:
-   *  portrait roles favor frames with detected faces; action/climax favor video clips. */
-  private fun roleBonus(
-    asset: Asset,
-    perception: Perception,
-    role: com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRole,
-  ): Float {
-    val isVideo = asset.mediaType != com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType.IMAGE
-    return when (role) {
-      com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRole.PORTRAIT ->
-        if (perception.faces.isNotEmpty()) 0.8f else 0.1f
-      com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRole.ACTION,
-      com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRole.CLIMAX -> if (isVideo) 0.7f else 0.2f
-      com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRole.CLOSING -> 0.4f
-      else -> 0.3f
+  /**
+   * Token-overlap score between [requestTokens] (from director's
+   * visual_requirements + mood) and the asset's VlmTags. Range [0, 1].
+   * Returns 0 when tags are empty (annotation pass didn't run / failed).
+   */
+  private fun vlmOverlap(tags: VlmTags, requestTokens: Set<String>): Float {
+    if (requestTokens.isEmpty()) return 0f
+    if (tags.scene.isBlank() && tags.subjects.isEmpty() &&
+        tags.action.isBlank() && tags.mood.isBlank() && tags.salient.isBlank()) {
+      return 0f
     }
+    val tagText = buildString {
+      append(tags.scene); append(' ')
+      tags.subjects.forEach { append(it); append(' ') }
+      append(tags.action); append(' ')
+      append(tags.mood); append(' ')
+      append(tags.timeFeel); append(' ')
+      append(tags.salient)
+    }
+    val tagTokens = tokenize(tagText)
+    if (tagTokens.isEmpty()) return 0f
+    val intersection = requestTokens.count { it in tagTokens }
+    // Normalize by request size so a 5-token request with 2 hits scores higher than a
+    // 20-token request with 4 hits. Cap at 1.0.
+    return (intersection.toFloat() / requestTokens.size).coerceIn(0f, 1f)
   }
 
-  /** A 1.0 when the source can stretch to the requested duration without freezing,
-   *  falling off as freeze risk grows. Pure images return 0.6 (always renderable as Ken Burns). */
+  /**
+   * Hint match between VLM-suggested narrative role and the slot's actual role.
+   * Returns 1.0 when they agree, 0 otherwise. The VLM is wrong often enough
+   * (it's guessing from one image) that we don't penalize a mismatch — just
+   * reward agreement.
+   */
+  private fun roleHintMatch(hint: String, slotRole: ShotRole): Float =
+    if (hint.isNotBlank() && hint.equals(slotRole.name, ignoreCase = true)) 1f else 0f
+
+  /**
+   * Last-resort recall when the strict filter returns nothing — drops the
+   * time-window constraint and just scores by sharpness + duration_fit + tag
+   * overlap. Better than dropping a director-planned slot.
+   */
+  private fun relaxedFallback(
+    request: ShotRequest,
+    eventAssets: List<Asset>,
+    perceptions: Map<String, Perception>,
+    excludedAssetIds: Set<String>,
+    k: Int,
+  ): List<Candidate> {
+    val requestTokens = tokenize(request.visualRequirements + " " + request.moodTarget)
+    return eventAssets
+      .asSequence()
+      .filter { it.id !in excludedAssetIds }
+      .mapNotNull { asset ->
+        val perc = perceptions[asset.id] ?: return@mapNotNull null
+        if (perc.isJunk) return@mapNotNull null
+        val score = vlmOverlap(perc.vlmTags, requestTokens) * 0.45f +
+          perc.sharpness * 0.30f +
+          durationCompat(asset, request.durationSec) * 0.25f
+        Candidate(asset, perc, score)
+      }
+      .sortedByDescending { it.score }
+      .take(k)
+      .toList()
+  }
+
+  /**
+   * A 1.0 when the source can stretch to the requested duration without freezing,
+   * falling off as freeze risk grows. Pure images return 0.6 (always renderable
+   * as Ken Burns).
+   */
   private fun durationCompat(asset: Asset, requestedSec: Float): Float {
+    if (asset.mediaType == MediaType.IMAGE) return 0.6f
     val durMs = asset.durationMs
-    if (durMs <= 0) return 0.6f                     // image
+    if (durMs <= 0) return 0.6f
     val durSec = durMs / 1000f
-    val ratio = durSec / requestedSec               // ≥1: no slow-mo needed
+    val ratio = durSec / requestedSec
     return when {
       ratio >= 1.0f -> 1.0f
       ratio >= 0.66f -> 0.85f                       // <=1.5x slow-mo
@@ -112,46 +164,38 @@ object Recall {
     }
   }
 
-  private fun blank(id: String) = Perception(assetId = id, isJunk = true, junkReason = "missing_perception")
-
-  private fun personFit(perception: Perception, constraint: String?): Float {
-    if (constraint.isNullOrBlank()) return 0.5f
-    val ids = perception.faces.mapNotNull { it.personId?.uppercase() }.toSet()
-    return if (constraint in ids) 1.0f else 0.0f
-  }
-
-  private fun normalizePersonConstraint(raw: String?): String? {
-    val s = raw?.trim().orEmpty()
-    if (s.isBlank() || s.equals("null", ignoreCase = true) || s == "无人物") return null
-    val token = Regex("[A-Za-z]+\\s*$").find(s)?.value?.trim()?.uppercase() ?: return null
-    return token.removePrefix("PERSON").trim('_', '-', ' ').takeIf { it.isNotBlank() }
-  }
-
-  private fun relaxedFallback(
-    request: ShotRequest,
-    eventAssets: List<Asset>,
-    perceptions: Map<String, Perception>,
-    excludedAssetIds: Set<String>,
-    k: Int,
-  ): List<Candidate> =
-    eventAssets
-      .asSequence()
-      .filter { it.id !in excludedAssetIds }
-      .mapNotNull { asset ->
-        val perc = perceptions[asset.id] ?: return@mapNotNull null
-        if (perc.isJunk) return@mapNotNull null
-        val score = perc.sharpness * 0.45f + durationCompat(asset, request.durationSec) * 0.35f +
-          roleBonus(asset, perc, request.role) * 0.20f
-        Candidate(asset, perc, score)
+  /**
+   * Cheap token splitter for Chinese + English. Splits on whitespace + punctuation,
+   * additionally breaks Chinese strings into 1-and-2-char shingles since BPE-free
+   * Chinese is hard to tokenize otherwise. Returns lower-cased set so case doesn't
+   * matter for English overlap.
+   */
+  private fun tokenize(text: String): Set<String> {
+    if (text.isBlank()) return emptySet()
+    val out = mutableSetOf<String>()
+    // Whitespace + punctuation split for Latin chunks
+    val pieces = text.lowercase().split(Regex("[\\s,，。:：;；、!?！？\"'“”‘’()（）/·…—\\-]+"))
+    for (piece in pieces) {
+      if (piece.isBlank()) continue
+      // Pure Latin/digit token: keep as-is
+      if (piece.all { it.code < 128 }) {
+        if (piece.length >= 2) out += piece
+        continue
       }
-      .sortedByDescending { it.score }
-      .take(k)
-      .toList()
-
-  private fun cosine(a: FloatArray, b: FloatArray): Float {
-    if (a.size != b.size || a.isEmpty()) return 0f
-    var s = 0f
-    for (i in a.indices) s += a[i] * b[i]
-    return s
+      // Chinese / mixed: emit single-char + bigram shingles. Stop chars are skipped above.
+      val chars = piece.toCharArray()
+      for (i in chars.indices) {
+        val ch = chars[i].toString()
+        if (ch.isBlank()) continue
+        out += ch
+        if (i + 1 < chars.size) {
+          val bi = ch + chars[i + 1]
+          if (!bi.any { it.isWhitespace() }) out += bi
+        }
+      }
+    }
+    return out
   }
+
+  private fun blank(id: String) = Perception(assetId = id, isJunk = true, junkReason = "missing_perception")
 }

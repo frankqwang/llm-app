@@ -85,12 +85,16 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.PromptStrings
+import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.VlmAnnotator
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.MediaLoader
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Perception
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotSpec
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Timeline
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.VlmTags
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventDecisions
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.StagePerf
 import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
@@ -111,6 +115,7 @@ fun VlogPilotScreen(
   val state by viewModel.state.collectAsState()
   val decisions by viewModel.decisions.collectAsState()
   val context = LocalContext.current
+  var selectedTab by remember { mutableStateOf(VlogPilotTab.Results) }
 
   val perms = remember {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -174,18 +179,88 @@ fun VlogPilotScreen(
       }
     }
 
-    val ready = state as? PipelineState.Ready
-    if (ready != null) {
-      item {
-        AlbumPreviewCard(assets = ready.assets, events = ready.events)
-      }
+    item {
+      WorkspaceTabs(selected = selectedTab, onSelect = { selectedTab = it })
     }
 
-    if (decisions.isEmpty()) {
-      item { EmptyProcessCard(state) }
-    } else {
-      items(decisions, key = { it.eventId }) { decision ->
-        EventDecisionCard(decision)
+    val ready = state as? PipelineState.Ready
+    when (selectedTab) {
+      VlogPilotTab.Results -> {
+        if (decisions.isEmpty()) {
+          item { EmptyProcessCard(state, "还没有生成结果", "完成生成后，这里只展示成片和最终时间线。") }
+        } else {
+          items(decisions, key = { "result-${it.eventId}" }) { decision ->
+            ResultEventCard(decision)
+          }
+        }
+      }
+
+      VlogPilotTab.Process -> {
+        if (decisions.isEmpty()) {
+          item { EmptyProcessCard(state, "还没有过程数据", "开始生成后，这里会逐步出现输入素材、Agent 输出和渲染状态。") }
+        } else {
+          items(decisions, key = { "process-${it.eventId}" }) { decision ->
+            EventDecisionCard(decision)
+          }
+        }
+      }
+
+      VlogPilotTab.Assets -> {
+        if (ready != null) {
+          item { AlbumPreviewCard(assets = ready.assets, events = ready.events) }
+        }
+        if (decisions.isEmpty()) {
+          item { EmptyProcessCard(state, "还没有素材清单", "事件开始处理后，这里会显示每张素材的感知分数和 VLM 标签。") }
+        } else {
+          items(decisions, key = { "assets-${it.eventId}" }) { decision ->
+            AssetManagementCard(decision)
+          }
+        }
+      }
+
+      VlogPilotTab.Prompts -> {
+        item { PromptCatalog() }
+      }
+    }
+  }
+}
+
+private enum class VlogPilotTab(val label: String, val icon: ImageVector) {
+  Results("生成结果", Icons.Outlined.Movie),
+  Process("过程透视", Icons.Outlined.Visibility),
+  Assets("素材管理", Icons.Outlined.PhotoLibrary),
+  Prompts("Prompt", Icons.Outlined.Edit),
+}
+
+@Composable
+private fun WorkspaceTabs(selected: VlogPilotTab, onSelect: (VlogPilotTab) -> Unit) {
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(18.dp),
+    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+  ) {
+    LazyRow(
+      modifier = Modifier.padding(5.dp),
+      horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+      items(VlogPilotTab.entries) { tab ->
+        val active = tab == selected
+        Surface(
+          modifier = Modifier.clickable { onSelect(tab) },
+          shape = RoundedCornerShape(14.dp),
+          color = if (active) MaterialTheme.colorScheme.surface else Color.Transparent,
+          contentColor = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+          tonalElevation = if (active) 2.dp else 0.dp,
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Icon(tab.icon, contentDescription = null, modifier = Modifier.size(16.dp))
+            Text(tab.label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+          }
+        }
       }
     }
   }
@@ -275,7 +350,11 @@ private fun AlbumPreviewCard(assets: List<Asset>, events: List<Event>) {
 }
 
 @Composable
-private fun EmptyProcessCard(state: PipelineState) {
+private fun EmptyProcessCard(
+  state: PipelineState,
+  title: String = "还没有过程数据",
+  message: String = "开始生成后，这里会逐步出现输入素材、Agent 输出和渲染结果。",
+) {
   Surface(
     modifier = Modifier.fillMaxWidth(),
     shape = RoundedCornerShape(18.dp),
@@ -293,18 +372,199 @@ private fun EmptyProcessCard(state: PipelineState) {
       )
       Column {
         Text(
-          if (state is PipelineState.Error) "任务中断" else "还没有过程数据",
+          if (state is PipelineState.Error) "任务中断" else title,
           style = MaterialTheme.typography.titleSmall,
           fontWeight = FontWeight.SemiBold,
         )
         Text(
-          if (state is PipelineState.Error) state.message else "开始生成后，这里会逐步出现输入素材、Agent 输出和渲染结果。",
+          if (state is PipelineState.Error) state.message else message,
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
       }
     }
   }
+}
+
+@Composable
+private fun ResultEventCard(d: EventDecisions) {
+  var showTimeline by remember { mutableStateOf(false) }
+  val timeline = d.timelineFinal ?: d.timelineV1
+  val title = d.director?.title?.takeIf { it.isNotBlank() } ?: "事件 ${shortId(d.eventId)}"
+  val durationSec = timeline?.shots?.sumOf { it.durationSec.toDouble() } ?: 0.0
+  val assetMap = remember(d.inputAssets) { d.inputAssets.associateBy { it.id } }
+
+  ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Surface(
+          shape = RoundedCornerShape(14.dp),
+          color = MaterialTheme.colorScheme.secondaryContainer,
+          contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        ) {
+          Icon(Icons.Outlined.Movie, contentDescription = null, modifier = Modifier.padding(10.dp))
+        }
+        Column(modifier = Modifier.weight(1f)) {
+          Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+          Text(
+            eventSubtitle(d),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
+      }
+
+      LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        item { InfoPill("镜头 ${timeline?.shots?.size ?: 0}", Icons.Outlined.Edit) }
+        item { InfoPill(formatSec(durationSec), Icons.Outlined.Timer) }
+        item { InfoPill("素材 ${d.inputAssets.size}", Icons.Outlined.PhotoLibrary) }
+        item {
+          InfoPill(
+            text = if (d.mp4Path != null) "已渲染" else "等待渲染",
+            icon = if (d.mp4Path != null) Icons.Outlined.CheckCircle else Icons.Outlined.Movie,
+            accent = d.mp4Path != null,
+          )
+        }
+      }
+
+      d.mp4Path?.let { VideoPreview(mp4Path = it) }
+
+      if (timeline != null) {
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.SpaceBetween,
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          SectionHeader(Icons.Outlined.Edit, "最终时间线", "${timeline.shots.size} 个镜头")
+          FilledTonalButton(onClick = { showTimeline = !showTimeline }) {
+            Text(if (showTimeline) "收起" else "展开")
+          }
+        }
+        if (showTimeline) {
+          DecisionSection(icon = Icons.Outlined.Edit, title = "Timeline", subtitle = "按最终渲染顺序") {
+            timeline.shots.forEach { shot -> ShotRow(shot = shot, asset = assetMap[shot.assetId]) }
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun AssetManagementCard(d: EventDecisions) {
+  val timeline = d.timelineFinal ?: d.timelineV1
+  val usedOrders = remember(timeline) {
+    timeline?.shots.orEmpty().groupBy { it.assetId }.mapValues { entry -> entry.value.map { it.order } }
+  }
+  val tagged = d.inputPerceptions.values.count { it.vlmTags.scene.isNotBlank() }
+
+  ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+      SectionHeader(
+        icon = Icons.Outlined.PhotoLibrary,
+        title = "事件 ${shortId(d.eventId)} 素材",
+        subtitle = "${d.inputAssets.size} 个输入 / $tagged 个有 VLM 标签",
+      )
+      if (d.inputAssets.isNotEmpty()) {
+        AssetStrip(assets = d.inputAssets.take(24), totalCount = d.inputAssets.size)
+      }
+      d.inputAssets.forEach { asset ->
+        AssetAnnotationRow(
+          asset = asset,
+          perception = d.inputPerceptions[asset.id],
+          usedOrders = usedOrders[asset.id].orEmpty(),
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun AssetAnnotationRow(asset: Asset, perception: Perception?, usedOrders: List<Int>) {
+  var expanded by remember { mutableStateOf(false) }
+  val tags = perception?.vlmTags
+  Surface(
+    modifier = Modifier
+      .fillMaxWidth()
+      .clip(RoundedCornerShape(14.dp))
+      .clickable { expanded = !expanded },
+    shape = RoundedCornerShape(14.dp),
+    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+  ) {
+    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+      Row(
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.Top,
+      ) {
+        AssetThumb(
+          asset = asset,
+          modifier = Modifier.width(56.dp).height(72.dp),
+        )
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+          Text(
+            asset.displayName.ifBlank { shortId(asset.id) },
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+          Text(
+            assetMeta(asset),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+          Text(
+            annotationSummary(tags),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = if (expanded) 4 else 2,
+            overflow = TextOverflow.Ellipsis,
+          )
+          LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            item { InfoPill(if (tags?.scene?.isNotBlank() == true) "已标注" else "未标注", Icons.Outlined.Search, tags?.scene?.isNotBlank() == true) }
+            if (usedOrders.isNotEmpty()) item { InfoPill("入片 #${usedOrders.joinToString(",")}", Icons.Outlined.CheckCircle, true) }
+            item { InfoPill("face ${perception?.faces?.size ?: 0}", Icons.Outlined.Person) }
+          }
+        }
+      }
+
+      if (expanded) {
+        HorizontalDivider()
+        KeyValue("assetId", asset.id)
+        perception?.let { p ->
+          KeyValue("质量", "sharp=${"%.2f".format(Locale.US, p.sharpness)} / bright=${"%.2f".format(Locale.US, p.brightness)} / nsfw=${"%.2f".format(Locale.US, p.nsfwScore)}")
+          KeyValue("过滤", if (p.isJunk) "junk: ${p.junkReason}" else "可用")
+          if (p.sceneCuts.isNotEmpty()) KeyValue("切点", p.sceneCuts.take(8).joinToString(", ") { "%.1fs".format(Locale.US, it) })
+          AnnotationKeyValues(p.vlmTags)
+        } ?: Text(
+          "还没有 perception_cache 记录。通常是该素材还没进入感知/标注阶段，或缓存被清理。",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun AnnotationKeyValues(tags: VlmTags) {
+  if (tags.scene.isBlank() && tags.subjects.isEmpty() && tags.action.isBlank() && tags.mood.isBlank()) {
+    Text("VLM 标签为空。Recall 会退化到质量/时序/时长信号。", style = MaterialTheme.typography.bodySmall)
+    return
+  }
+  KeyValue("scene", tags.scene)
+  if (tags.subjects.isNotEmpty()) KeyValue("subjects", tags.subjects.joinToString("、"))
+  KeyValue("action", tags.action)
+  KeyValue("mood", tags.mood)
+  KeyValue("time", tags.timeFeel)
+  KeyValue("salient", tags.salient)
+  KeyValue("role", tags.narrativeRoleHint)
 }
 
 @Composable
@@ -319,9 +579,7 @@ private fun EventDecisionCard(d: EventDecisions) {
   val durationSec = timeline?.shots?.sumOf { it.durationSec.toDouble() } ?: 0.0
 
   ElevatedCard(
-    modifier = Modifier
-      .fillMaxWidth()
-      .clickable { expanded = !expanded },
+    modifier = Modifier.fillMaxWidth(),
     colors = CardDefaults.elevatedCardColors(
       containerColor = MaterialTheme.colorScheme.surface,
     ),
@@ -331,7 +589,11 @@ private fun EventDecisionCard(d: EventDecisions) {
       verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
       Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+          .fillMaxWidth()
+          .clip(RoundedCornerShape(12.dp))
+          .clickable { expanded = !expanded }
+          .padding(vertical = 2.dp),
         verticalAlignment = Alignment.Top,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
       ) {
@@ -829,6 +1091,161 @@ private fun InfoPill(text: String, icon: ImageVector, accent: Boolean = false) {
   }
 }
 
+@Composable
+private fun PromptCatalog() {
+  ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+      SectionHeader(
+        icon = Icons.Outlined.Edit,
+        title = "当前 Prompt",
+        subtitle = "系统 prompt + 实际 user prompt 模板",
+      )
+      promptSpecs().forEach { spec ->
+        PromptCard(spec)
+      }
+    }
+  }
+}
+
+@Composable
+private fun PromptCard(spec: PromptSpec) {
+  var expanded by remember { mutableStateOf(false) }
+  Surface(
+    modifier = Modifier
+      .fillMaxWidth()
+      .clip(RoundedCornerShape(16.dp))
+      .clickable { expanded = !expanded },
+    shape = RoundedCornerShape(16.dp),
+    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+  ) {
+    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Column(modifier = Modifier.weight(1f)) {
+          Text(spec.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+          Text(spec.subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Icon(
+          imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+          contentDescription = null,
+        )
+      }
+      PromptTextBlock("System", spec.systemPrompt, expanded)
+      spec.userTemplate?.let { PromptTextBlock("User 模板", it, expanded) }
+    }
+  }
+}
+
+@Composable
+private fun PromptTextBlock(label: String, text: String, expanded: Boolean) {
+  val shown = if (expanded || text.length <= 520) text else text.take(520) + "\n..."
+  Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(10.dp),
+    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.75f),
+  ) {
+    Text(
+      shown,
+      modifier = Modifier.padding(10.dp),
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+  }
+}
+
+private data class PromptSpec(
+  val title: String,
+  val subtitle: String,
+  val systemPrompt: String,
+  val userTemplate: String? = null,
+)
+
+private fun promptSpecs(): List<PromptSpec> = listOf(
+  PromptSpec(
+    title = "VLM 单素材标注",
+    subtitle = "每张缩略图 -> VlmTags",
+    systemPrompt = VlmAnnotator.SYSTEM_PROMPT,
+    userTemplate = "媒体类型: <image/video/live_photo>。请输出 VlmTags JSON。",
+  ),
+  PromptSpec(
+    title = "Browser / Contact Sheet",
+    subtitle = "事件缩略图网格 -> EventMemory",
+    systemPrompt = PromptStrings.MONTAGE_SYSTEM,
+    userTemplate = "事件 <eventId> 第 <page>/<pages> 页，本页 <N> 张。image_index 为本页内 1..<N> 编号。请输出 EventMemory JSON。",
+  ),
+  PromptSpec(
+    title = "Audience",
+    subtitle = "事件记忆 -> 观众情绪目标",
+    systemPrompt = PromptStrings.AUDIENCE_SYSTEM,
+    userTemplate = """
+事件 <eventId> 的 EventMemory:
+- storyline_summary: <storyline_summary>
+- emotional_arc: <emotional_arc>
+- characters: <characters>
+- visual_style: <visual_style_signals>
+
+请输出 AudienceBrief JSON。
+""".trimIndent(),
+  ),
+  PromptSpec(
+    title = "Director",
+    subtitle = "EventMemory + AudienceBrief -> 分镜剧本",
+    systemPrompt = PromptStrings.DIRECTOR_SYSTEM,
+    userTemplate = """
+EventMemory:
+<storyline_summary>
+情绪曲线: <emotional_arc>
+人物: <characters>
+
+AudienceBrief:
+- 情绪点: <emotional_payoff>
+- hook: <hook_strategy>
+- pov: <pov_voice>
+- 节奏: <pacing_guidance>
+- 避免: <avoid_list>
+
+总素材: <assetCount> 张/段；目标 vlog 时长 18-22 秒。
+请输出 DirectorBrief JSON。
+""".trimIndent(),
+  ),
+  PromptSpec(
+    title = "Editor",
+    subtitle = "候选缩略图 + 标签 -> 选一个镜头",
+    systemPrompt = PromptStrings.EDITOR_SYSTEM,
+    userTemplate = """
+当前 slot：role=<role>; mood=<mood_target>; visual_req=<visual_requirements>
+previous_shot_summary: <previous_shot_summary>
+
+候选标签（VLM 已经看过每张图，结构化摘要）：
+  1. scene=<scene> / action=<action> / mood=<mood> / salient=<salient> / subjects=<subjects>
+  ...
+
+请综合标签 + 缩略图视觉，从 <N> 张候选中选 1 张（编号 1..<N>）。
+""".trimIndent(),
+  ),
+  PromptSpec(
+    title = "Critic",
+    subtitle = "粗剪 timeline -> 审片与修订请求",
+    systemPrompt = PromptStrings.CRITIC_SYSTEM,
+    userTemplate = """
+DirectorBrief.title=<title>; tone=<tone>; target_duration=<target_duration>
+narrative_arc: <arc>
+
+EventMemory.storyline: <storyline>
+
+Timeline v<iteration> shots:
+  #1 [image/video] dur=<sec>s caption="<caption>" — <rationale>
+  ...
+
+请审片，输出 Critique JSON。
+""".trimIndent(),
+  ),
+)
+
 private data class StageUi(val label: String, val done: Boolean)
 
 private fun eventSubtitle(d: EventDecisions): String {
@@ -866,3 +1283,24 @@ private fun formatSec(sec: Double): String = when {
 
 private fun shortId(id: String): String =
   if (id.length <= 8) id else id.take(6) + "…" + id.takeLast(4)
+
+private fun assetMeta(asset: Asset): String {
+  val type = asset.mediaType.name.lowercase()
+  val size = if (asset.widthPx > 0 && asset.heightPx > 0) "${asset.widthPx}x${asset.heightPx}" else "unknown size"
+  val dur = if (asset.durationMs > 0) " / ${formatSec(asset.durationMs / 1000.0)}" else ""
+  return "$type / $size$dur"
+}
+
+private fun annotationSummary(tags: VlmTags?): String {
+  if (tags == null) return "未读取到标注缓存"
+  if (tags.scene.isBlank() && tags.subjects.isEmpty() && tags.action.isBlank() && tags.mood.isBlank()) {
+    return "VLM 标签为空"
+  }
+  return listOfNotNull(
+    tags.scene.takeIf { it.isNotBlank() },
+    tags.subjects.takeIf { it.isNotEmpty() }?.joinToString("、"),
+    tags.action.takeIf { it.isNotBlank() },
+    tags.mood.takeIf { it.isNotBlank() },
+    tags.salient.takeIf { it.isNotBlank() },
+  ).joinToString(" · ")
+}

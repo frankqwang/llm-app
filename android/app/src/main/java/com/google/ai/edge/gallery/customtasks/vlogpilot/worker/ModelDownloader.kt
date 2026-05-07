@@ -32,16 +32,15 @@ object ModelDownloader {
 
   data class ModelSpec(val fileName: String, val url: String, val sizeBytes: Long)
 
-  /** Smaller perception models — Gemma 4 is handled separately by the gallery model manager.
+  /** Cheap perception assets that need to land on disk before the fast pass.
+   *  Gemma 4 is handled separately by the gallery model manager.
    *
-   *  Excluded from this list (handled differently or not yet sourced):
-   *  - mobileclip2_*.tflite — anton96vice/mobileclip2_tflite hosts only float-precision
-   *    340 MB+ files which is too heavy for OTA. Until we ship a sub-50 MB int8 variant,
-   *    CLIP is offline and Recall.kt gracefully falls back to sharpness ranking.
-   *  - mobilefacenet.tflite — no canonical public TFLite source; face embedding/clustering
-   *    is disabled until we host or source one.
-   *  - yolo26n_int8.tflite — same; YOLO output is a nice-to-have for sceneClass tagging
-   *    but not required for shot selection. */
+   *  v4 architecture: semantic understanding (scene/subjects/action/mood) is now
+   *  produced by VlmAnnotator (Gemma 4 VLM call per asset), so the previous
+   *  CLIP / YOLO / FaceEmbedder TFLite stack is gone. Only two things remain:
+   *  - face landmark bbox (used for portrait weighting + "any face present?")
+   *  - NSFW classifier (compliance floor; cannot rely on VLM to refuse)
+   */
   val PERCEPTION_MODELS = listOf(
     ModelSpec(
       fileName = "face_landmarker.task",
@@ -52,16 +51,6 @@ object ModelDownloader {
       fileName = "nsfw_vit_int8.onnx",
       url = "https://huggingface.co/AdamCodd/vit-base-nsfw-detector/resolve/main/onnx/model_int8.onnx",
       sizeBytes = 88_500_000L,
-    ),
-    ModelSpec(
-      fileName = "clip_vocab.json",
-      url = "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/vocab.json",
-      sizeBytes = 1_000_000L,
-    ),
-    ModelSpec(
-      fileName = "clip_merges.txt",
-      url = "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/merges.txt",
-      sizeBytes = 525_000L,
     ),
   )
 

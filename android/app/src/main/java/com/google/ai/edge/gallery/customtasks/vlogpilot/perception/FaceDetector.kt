@@ -1,9 +1,10 @@
 /*
  * Copyright 2026 The pc-pilot v3 authors
  *
- * MediaPipe Face Landmarker → bounding boxes + 478 landmarks. We use the
- * landmark min/max as the tight face box (more accurate than detector-only
- * fallback) and feed the cropped face into FaceEmbedder.
+ * MediaPipe Face Landmarker → bounding boxes + 478 landmarks. The landmark
+ * min/max gives the tight face box (more accurate than detector-only
+ * fallback). Used for portrait-shot weighting and "face present?" signals;
+ * face identity / clustering moved to the VLM annotator in v4.
  */
 package com.google.ai.edge.gallery.customtasks.vlogpilot.perception
 

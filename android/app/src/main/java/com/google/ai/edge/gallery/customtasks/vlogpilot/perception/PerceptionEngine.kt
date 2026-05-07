@@ -1,11 +1,17 @@
 /*
  * Copyright 2026 The pc-pilot v3 authors
  *
- * Orchestrates step1_perceive on-device: for each Asset, run quality, NSFW,
- * YOLO, face landmark+embedding+cluster, scene cuts (video only), and
- * MobileCLIP image embedding. Models that fail to load (file missing) are
- * silently skipped — the resulting Perception is degraded but the pipeline
- * keeps moving so a missing asset bundle doesn't brick the whole run.
+ * Cheap, no-LLM perception pass: per-asset junk filter (sharpness + brightness
+ * + NSFW) + face bbox via MediaPipe FaceLandmarker. Runs BEFORE Gemma 4 boots
+ * so it doesn't compete with the LLM for memory.
+ *
+ * Semantic understanding (scene, subjects, action, mood) is filled in later
+ * by VlmAnnotator after Gemma is up. Recall scoring composes the cheap
+ * signals + VLM tags from the resulting Perception JSON.
+ *
+ * Models that fail to load (file missing) are silently skipped — the
+ * resulting Perception is degraded but the pipeline keeps moving so a
+ * missing asset bundle doesn't brick the whole run.
  */
 package com.google.ai.edge.gallery.customtasks.vlogpilot.perception
 
@@ -26,13 +32,14 @@ class PerceptionEngine(
   private val brightnessJunkHigh: Float = 0.97f,
 ) : Closeable {
 
-  private val yolo = YoloDetector(context, "models/yolo26n_int8.tflite")
   private val faceDetector = FaceDetector(context)
-  private val faceEmbedder = FaceEmbedder(context)
-  private val clip = ClipEmbedder(context)
   private val nsfw = NsfwClassifier(context)
-  private val clusterer = FaceClusterer()
 
+  /**
+   * Cheap no-LLM perception. Returns a Perception with sharpness, brightness,
+   * faces, nsfw, sceneCuts (video only) populated. `vlmTags` is left empty —
+   * the VLM annotation pass fills it in after Gemma 4 boots.
+   */
   fun analyze(asset: Asset): Perception {
     val cover: Bitmap = MediaLoader.loadImage(context, asset, maxSide = 1024)
       ?: run {
@@ -44,38 +51,24 @@ class PerceptionEngine(
     val nsfwScore = nsfw.score(cover)
 
     val faces = faceDetector.detect(cover).map { hit ->
-      val crop = BitmapPrep.cropNorm(cover, hit.xn, hit.yn, hit.wn, hit.hn, square = true)
-      val emb = if (crop != null) faceEmbedder.embed(crop) else FloatArray(0)
-      // Free the face crop bitmap — embedder copied pixels to a buffer, no further use.
-      crop?.recycle()
-      val pid = if (emb.isNotEmpty()) clusterer.assign(emb) else FaceClusterer.UNK
       val faceArea = hit.wn * hit.hn
       FaceBox(
         x = hit.xn, y = hit.yn, w = hit.wn, h = hit.hn,
-        embedding = emb.toList(),
-        personId = pid,
         quality = (q.sharpness * faceArea).coerceIn(0f, 1f),
       )
     }
 
-    val yoloObjs = yolo.detect(cover)
-    val sceneClass = yoloObjs.maxByOrNull { it.conf }?.cls ?: "unknown"
-    val clipEmb = clip.embedImage(cover)
-
     val sceneCuts = if (asset.mediaType != MediaType.IMAGE) {
       try { SceneCutDetector.detect(context, asset) } catch (_: Throwable) { emptyList() }
     } else emptyList()
-    val fps = if (asset.mediaType != MediaType.IMAGE && asset.durationMs > 0) {
-      // We don't have a cheap FPS probe without ffprobe — leave 0 unless a renderer fills it.
-      0f
-    } else 0f
+    val fps = 0f  // not measured — render layer probes separately when needed
 
     val (junk, reason) = decideJunk(q, nsfwScore)
 
-    // Cover bitmap is the biggest one (1024px on the long side). After all the
-    // per-asset perception calls done above, no caller holds a reference, so
-    // free the native pixel buffer immediately rather than waiting on GC.
-    // Without this, peak heap during a 100-asset run can climb past 1 GB.
+    // Free the cover bitmap before returning. After this point only the
+    // VlmAnnotator phase needs a thumbnail (which it loads at smaller size
+    // separately). Without recycling here, peak heap during a 100-asset run
+    // climbs past 1 GB.
     cover.recycle()
 
     return Perception(
@@ -85,9 +78,6 @@ class PerceptionEngine(
       sharpness = q.sharpness,
       brightness = q.brightness,
       faces = faces,
-      yoloObjs = yoloObjs,
-      sceneClass = sceneClass,
-      clipEmbedding = clipEmb.toList(),
       nsfwScore = nsfwScore,
       sceneCuts = sceneCuts,
       fps = fps,
@@ -102,15 +92,9 @@ class PerceptionEngine(
     else -> false to ""
   }
 
-  /** CLIP text embedding bridge so editor recall can score "visual_requirements" prompts. */
-  fun embedText(text: String): FloatArray = clip.embedText(text)
-
   override fun close() {
-    yolo.close()
-    faceDetector.close()
-    faceEmbedder.close()
-    clip.close()
-    nsfw.close()
+    runCatching { faceDetector.close() }
+    runCatching { nsfw.close() }
   }
 
   companion object { private const val TAG = "PerceptionEngine" }

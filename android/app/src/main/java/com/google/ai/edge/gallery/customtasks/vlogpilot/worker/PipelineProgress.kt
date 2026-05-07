@@ -11,6 +11,8 @@ sealed interface PipelineProgress {
   data object Ingesting : PipelineProgress
   data class IngestDone(val assetCount: Int, val eventCount: Int) : PipelineProgress
   data class Perceiving(val current: Int, val total: Int) : PipelineProgress
+  /** VLM tagging pass — Gemma 4 reads each thumbnail and writes scene/subjects/mood JSON. */
+  data class Annotating(val current: Int, val total: Int) : PipelineProgress
   data class EventStart(val eventId: String, val index: Int, val total: Int) : PipelineProgress
   data class EventStage(val eventId: String, val stage: String) : PipelineProgress // browse/audience/director/editor/critic/render
   data class EventDone(val eventId: String, val outputPath: String) : PipelineProgress

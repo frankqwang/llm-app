@@ -44,9 +44,8 @@ mlkit-genai-prompt = "1.0.0-beta2"  # Ref: https://developers.google.com/ml-kit/
 # M3 VLM: Gemma 4 E2B-it (text+img+audio, 2.59 GB int4) loaded by existing litertlm 0.11.0,
 #         downloaded first launch from HF litert-community/gemma-4-E2B-it-litert-lm.
 coroutines = "1.9.0"
-mediapipeTasks = "0.10.21"
-onnxRuntime = "1.20.0"
-tensorflowLite = "2.16.1"
+mediapipeTasks = "0.10.26"
+onnxRuntime = "1.22.0"
 ffmpegKit = "6.1.1"
 okhttp = "4.12.0"
 # Deferred: TarsosDSP 2.5 not on Maven Central (only mvnrepository indexed it).
@@ -107,7 +106,6 @@ mlkit-genai-prompt = { group = "com.google.mlkit", name = "genai-prompt", versio
 # v3 vlogpilot — verified May 2026
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 mediapipe-tasks-vision = { group = "com.google.mediapipe", name = "tasks-vision", version.ref = "mediapipeTasks" }
-tensorflow-lite = { group = "org.tensorflow", name = "tensorflow-lite", version.ref = "tensorflowLite" }
 onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxRuntime" }
 ffmpegKit16kb = { group = "com.moizhassan.ffmpeg", name = "ffmpeg-kit-16kb", version.ref = "ffmpegKit" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }

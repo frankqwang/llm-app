@@ -20,8 +20,9 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.CriticAgent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.DirectorAgent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.EditorAgent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.MontageAgent
+import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.VlmAnnotator
 import com.google.ai.edge.gallery.customtasks.vlogpilot.ingest.PhotoIngest
-import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.ClipEmbedder
+import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.MediaLoader
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.PerceptionCache
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.PerceptionEngine
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventSegmenter
@@ -126,15 +127,49 @@ class PipelineOrchestrator(
       val director = DirectorAgent(agent)
       val editor = EditorAgent(context, agent)
       val critic = CriticAgent(agent)
+      val annotator = VlmAnnotator(agent)
       val renderer = VideoRenderer(context)
-      // Just the CLIP text encoder — was previously a full PerceptionEngine, which
-      // dragged in YOLO + face landmarker + face embedder + NSFW just to call embedText.
-      // Five extra TFLite/MediaPipe interpreters loaded during the Gemma 4 phase
-      // pushed peak memory toward the foreground-service OOM cliff. Use ClipEmbedder
-      // directly so only the text tower lives alongside the LLM.
-      val embedderForRecall = ClipEmbedder(context)
       val resumeIds = resumeEvents.map { it.eventId }.toSet()
       val cachedDecisions = DecisionStore.loadAll(context).associateBy { it.eventId }
+
+      // ---- VLM annotation pass ----
+      // For every kept non-junk asset whose Perception.vlmTags is empty, run a
+      // single Gemma 4 call to fill scene/subjects/action/mood/salient. Replaces
+      // the never-shipped CLIP/YOLO/FaceEmbedder small-model stack with VLM
+      // understanding. Cached to disk; re-runs over the same album are free.
+      var annotateMs = 0L
+      var annotatedCount = 0
+      run {
+        val needsAnnotation = perceptions.values
+          .filter { !it.isJunk && it.vlmTags.scene.isBlank() }
+          .mapNotNull { perc -> assetMap[perc.assetId]?.let { perc to it } }
+        if (needsAnnotation.isNotEmpty()) {
+          val annotateStart = System.nanoTime()
+          for ((idx, pair) in needsAnnotation.withIndex()) {
+            val (perc, asset) = pair
+            val thumb = MediaLoader.loadImage(context, asset, maxSide = 512) ?: continue
+            val tags = try {
+              annotator.annotate(thumb, asset.mediaType.name.lowercase())
+            } catch (t: Throwable) {
+              Log.w(TAG, "annotate failed for ${asset.id}: ${t.message}")
+              null
+            } finally {
+              runCatching { thumb.recycle() }
+            }
+            if (tags != null && tags.scene.isNotBlank()) {
+              val updated = perc.copy(vlmTags = tags)
+              perceptions[perc.assetId] = updated
+              PerceptionCache.put(context, asset, updated)
+              annotatedCount++
+            }
+            if (idx % 5 == 0 || idx == needsAnnotation.size - 1) {
+              onProgress(PipelineProgress.Annotating(idx + 1, needsAnnotation.size))
+            }
+          }
+          annotateMs = (System.nanoTime() - annotateStart) / 1_000_000
+          Log.d(TAG, "annotate: $annotatedCount/${needsAnnotation.size} assets in ${annotateMs}ms")
+        }
+      }
 
       for ((eventIdx, event) in events.withIndex()) {
         onProgress(PipelineProgress.EventStart(event.eventId, eventIdx + 1, events.size))
@@ -183,7 +218,7 @@ class PipelineOrchestrator(
           DecisionStore.writeDirector(context, event.eventId, plan)
 
           onProgress(PipelineProgress.EventStage(event.eventId, "editor"))
-          val v1 = timer.editor { buildTimeline(plan.shotBlueprint, plan.tone, event, eventAssets, perceptions, embedderForRecall, editor) }
+          val v1 = timer.editor { buildTimeline(plan.shotBlueprint, plan.tone, event, eventAssets, perceptions, editor) }
           DecisionStore.writeTimelineV1(context, event.eventId, v1)
 
           // Up-to-2 critic iterations, mirroring pc-pilot/step6_critic.py MAX_ITER=2.
@@ -198,7 +233,7 @@ class PipelineOrchestrator(
             critiques += crit
             lastCritique = crit
             if (crit.revisedRequests.isEmpty()) break
-            working = applyRevisions(working, crit.revisedRequests, plan.tone, event, eventAssets, perceptions, embedderForRecall, editor)
+            working = applyRevisions(working, crit.revisedRequests, plan.tone, event, eventAssets, perceptions, editor)
           }
           // Keep a separate critique.json for the LATEST iteration so existing
           // DecisionStore consumers (UI) keep working unchanged; the full history
@@ -223,7 +258,6 @@ class PipelineOrchestrator(
           onProgress(PipelineProgress.EventFailed(event.eventId, t.message ?: t::class.java.simpleName))
         }
       }
-      runCatching { embedderForRecall.close() }
     } finally {
       agent.close()
     }
@@ -240,7 +274,6 @@ class PipelineOrchestrator(
     event: Event,
     eventAssets: List<Asset>,
     perceptions: Map<String, Perception>,
-    embedder: ClipEmbedder,
     editor: EditorAgent,
   ): Timeline {
     val used = mutableSetOf<String>()
@@ -248,14 +281,12 @@ class PipelineOrchestrator(
     var prevSummary = ""
     val nBlueprint = blueprint.size
     for ((order, req) in blueprint.withIndex()) {
-      val q = embedder.embedText(req.visualRequirements)
       var spec = editor.pickShot(
         order = order + 1,
         request = req,
         nBlueprint = nBlueprint,
         eventAssets = eventAssets,
         perceptions = perceptions,
-        queryEmbedding = q,
         excludedAssetIds = used,
         previousShot = prevSummary,
         directorTone = directorTone,
@@ -270,7 +301,6 @@ class PipelineOrchestrator(
           nBlueprint = nBlueprint,
           eventAssets = eventAssets,
           perceptions = perceptions,
-          queryEmbedding = q,
           excludedAssetIds = emptySet(),
           previousShot = prevSummary,
           directorTone = directorTone,
@@ -294,7 +324,6 @@ class PipelineOrchestrator(
     event: Event,
     eventAssets: List<Asset>,
     perceptions: Map<String, Perception>,
-    embedder: ClipEmbedder,
     editor: EditorAgent,
   ): Timeline {
     val byOrder = base.shots.associateBy { it.order }.toMutableMap()
@@ -311,7 +340,6 @@ class PipelineOrchestrator(
         nBlueprint = nBlueprint,
         eventAssets = eventAssets,
         perceptions = perceptions,
-        queryEmbedding = embedder.embedText(rev.newRequest.visualRequirements),
         excludedAssetIds = used,
         previousShot = "(revised slot)",
         directorTone = directorTone,

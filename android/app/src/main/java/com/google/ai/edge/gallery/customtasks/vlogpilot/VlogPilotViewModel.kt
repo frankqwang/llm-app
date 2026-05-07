@@ -123,6 +123,7 @@ class VlogPilotViewModel @Inject constructor(
       PipelineProgress.Ingesting -> _state.value = PipelineState.Running("正在扫描相册")
       is PipelineProgress.IngestDone -> _state.value = PipelineState.Running("已收集 ${p.assetCount} 个素材，切出 ${p.eventCount} 个事件")
       is PipelineProgress.Perceiving -> _state.value = PipelineState.Running("视觉感知 ${p.current}/${p.total}")
+      is PipelineProgress.Annotating -> _state.value = PipelineState.Running("素材语义标注 ${p.current}/${p.total}")
       is PipelineProgress.EventStart -> _state.value = PipelineState.Running("处理事件 ${p.index}/${p.total} (${p.eventId})")
       is PipelineProgress.EventStage -> _state.value = PipelineState.Running("${p.eventId}: ${p.stage}")
       is PipelineProgress.EventDone -> {

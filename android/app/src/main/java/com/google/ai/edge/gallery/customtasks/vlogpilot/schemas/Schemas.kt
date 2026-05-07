@@ -43,13 +43,26 @@ data class Asset(
 @Serializable
 data class FaceBox(
   val x: Float, val y: Float, val w: Float, val h: Float, // normalized 0..1
-  val embedding: List<Float> = emptyList(),               // 192-dim face embedding
-  val personId: String? = null,                           // assigned by clustering in step1
   val quality: Float = 0f,                                // sharpness * face_size
 )
 
+/**
+ * VLM-produced semantic tags for an asset. Replaces the YOLO sceneClass +
+ * MobileCLIP embedding combo that we never could ship as TFLite (no public
+ * sub-50MB int8 sources). Gemma 4 E2B-IT produces this from a single
+ * thumbnail in ~3-5s on Dimensity 9400 GPU; result is JSON-cached on disk
+ * so repeated runs over the same album are free.
+ */
 @Serializable
-data class YoloObj(val cls: String, val conf: Float, val x: Float, val y: Float, val w: Float, val h: Float)
+data class VlmTags(
+  val scene: String = "",                  // "户外烧烤聚会" / "晨间咖啡店内景"
+  val subjects: List<String> = emptyList(), // ["三个朋友", "烤架"]
+  val action: String = "",                 // "举杯" / "凝视窗外"
+  val mood: String = "",                   // "热闹放松" / "宁静沉思"
+  val timeFeel: String = "",               // "傍晚" / "清晨"
+  val salient: String = "",                // <=40字 这张图最值得选的细节
+  val narrativeRoleHint: String = "",      // opening/establishing/portrait/action/climax/transition/closing 之一，或空
+)
 
 @Serializable
 data class Perception(
@@ -59,10 +72,9 @@ data class Perception(
   val sharpness: Float = 0f,
   val brightness: Float = 0f,
   val faces: List<FaceBox> = emptyList(),
-  val yoloObjs: List<YoloObj> = emptyList(),
-  val sceneClass: String = "unknown",       // YOLO majority / heuristic
-  val clipEmbedding: List<Float> = emptyList(), // 512-d MobileCLIP image
   val nsfwScore: Float = 0f,
+  /** VLM-produced tags. Empty (scene.isBlank()) = needs annotation pass. */
+  val vlmTags: VlmTags = VlmTags(),
   // video-only
   val sceneCuts: List<Float> = emptyList(), // seconds where scene changes
   val fps: Float = 0f,

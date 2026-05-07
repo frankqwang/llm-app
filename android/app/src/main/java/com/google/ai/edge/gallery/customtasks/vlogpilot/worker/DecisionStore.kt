@@ -9,12 +9,14 @@ package com.google.ai.edge.gallery.customtasks.vlogpilot.worker
 
 import android.content.Context
 import android.util.Log
+import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.PerceptionCache
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.AudienceBrief
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Critique
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.DirectorBrief
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.EventMemory
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Perception
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Timeline
 import java.io.File
 import kotlinx.serialization.Serializable
@@ -32,6 +34,7 @@ data class EventDecisions(
   val eventId: String,
   val event: Event? = null,
   val inputAssets: List<Asset> = emptyList(),
+  val inputPerceptions: Map<String, Perception> = emptyMap(),
   val memory: EventMemory? = null,
   val audience: AudienceBrief? = null,
   val director: DirectorBrief? = null,
@@ -89,10 +92,15 @@ object DecisionStore {
       val eid = dir.name
       val mp4 = File(candidatesDir, "$eid.mp4").takeIf { it.isFile }?.absolutePath
       val inputs = readJson<EventInputManifest>(dir, "event_inputs.json")
+      val inputAssets = inputs?.assets.orEmpty()
+      val inputPerceptions = inputAssets.mapNotNull { asset ->
+        PerceptionCache.get(context, asset.id)?.let { asset.id to it }
+      }.toMap()
       EventDecisions(
         eventId = eid,
         event = inputs?.event,
-        inputAssets = inputs?.assets.orEmpty(),
+        inputAssets = inputAssets,
+        inputPerceptions = inputPerceptions,
         memory = readJson(dir, "event_memory.json"),
         audience = readJson(dir, "audience.json"),
         director = readJson(dir, "director.json"),

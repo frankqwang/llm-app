@@ -2,9 +2,10 @@
  * Copyright 2026 The pc-pilot v3 authors
  *
  * step5_editor: for each ShotRequest, recall up to 8 candidates → ask Gemma 4
- * to pick one with rationale → assemble ShotSpec. Caller is responsible for
- * passing in pre-computed CLIP text embedding for the request's
- * visual_requirements (the editor lives downstream of the perception engine).
+ * to pick one with rationale → assemble ShotSpec. Recall uses VlmTags from
+ * the per-asset annotation pass; the curate prompt also surfaces those tags
+ * to Gemma alongside the candidate thumbnails so the model has structured
+ * context (scene/subjects/action/mood/salient) per candidate.
  */
 package com.google.ai.edge.gallery.customtasks.vlogpilot.agents
 
@@ -32,7 +33,6 @@ class EditorAgent(
   private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
   /**
-   * @param queryEmbedding CLIP text embedding of [request.visualRequirements]
    * @param previousShot brief description of the previously chosen shot, for continuity
    * @return chosen ShotSpec, or null if recall returned no candidates
    */
@@ -42,13 +42,20 @@ class EditorAgent(
     nBlueprint: Int,
     eventAssets: List<Asset>,
     perceptions: Map<String, Perception>,
-    queryEmbedding: FloatArray,
     excludedAssetIds: Set<String>,
     previousShot: String,
     directorTone: String = "",
   ): ShotSpec? {
-    val candidates = Recall.topK(request, nBlueprint, eventAssets, perceptions, queryEmbedding, excludedAssetIds, k = 8)
+    val candidates = Recall.topK(
+      request = request,
+      nBlueprint = nBlueprint,
+      eventAssets = eventAssets,
+      perceptions = perceptions,
+      excludedAssetIds = excludedAssetIds,
+      k = 8,
+    )
     val grade = ColorGradeFromTone.pick(directorTone)
+    if (candidates.isEmpty()) return null
     if (candidates.size == 1) return composeSpec(order, request, candidates[0].asset, "only candidate", grade)
 
     val visualCandidates = candidates.mapNotNull { candidate ->
@@ -58,10 +65,25 @@ class EditorAgent(
       return candidates.firstOrNull()?.let { composeSpec(order, request, it.asset, "thumbnail load failed; fallback to top recall", grade) }
     }
     val thumbs = visualCandidates.map { it.second }
+    val tagSummary = visualCandidates.withIndex().joinToString("\n") { (i, pair) ->
+      val tags = pair.first.perception.vlmTags
+      val parts = listOfNotNull(
+        tags.scene.takeIf { it.isNotBlank() }?.let { "scene=$it" },
+        tags.action.takeIf { it.isNotBlank() }?.let { "action=$it" },
+        tags.mood.takeIf { it.isNotBlank() }?.let { "mood=$it" },
+        tags.salient.takeIf { it.isNotBlank() }?.let { "salient=$it" },
+        tags.subjects.takeIf { it.isNotEmpty() }?.let { "subjects=${it.joinToString("、")}" },
+      )
+      "  ${i + 1}. ${parts.joinToString(" / ").ifBlank { "(no tags)" }}"
+    }
     val userMsg = """
 当前 slot：role=${request.role}; mood=${request.moodTarget}; visual_req=${request.visualRequirements}
 previous_shot_summary: $previousShot
-请从 ${thumbs.size} 张候选中选 1 张（编号 1..${thumbs.size}）。
+
+候选标签（VLM 已经看过每张图，结构化摘要）：
+$tagSummary
+
+请综合标签 + 缩略图视觉，从 ${thumbs.size} 张候选中选 1 张（编号 1..${thumbs.size}）。
 """.trimIndent()
     val raw = try {
       agent.ask(systemPrompt = PromptStrings.EDITOR_SYSTEM, userText = userMsg, images = thumbs)

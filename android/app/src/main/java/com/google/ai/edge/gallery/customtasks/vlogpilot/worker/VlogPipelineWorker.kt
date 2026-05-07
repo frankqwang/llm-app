@@ -67,6 +67,7 @@ class VlogPipelineWorker(
       PipelineProgress.Ingesting -> "扫描相册…"
       is PipelineProgress.IngestDone -> "${p.assetCount} 张素材 / ${p.eventCount} 个事件"
       is PipelineProgress.Perceiving -> "感知 ${p.current}/${p.total}"
+      is PipelineProgress.Annotating -> "标注 ${p.current}/${p.total}"
       is PipelineProgress.EventStart -> "事件 ${p.index}/${p.total}（${p.eventId}）"
       is PipelineProgress.EventStage -> "${p.eventId}: ${p.stage}"
       is PipelineProgress.EventDone -> "${p.eventId}: 完成"
