@@ -121,6 +121,15 @@ dependencies {
   debugImplementation(libs.androidx.ui.test.manifest)
   ksp(libs.moshi.kotlin.codegen)
   implementation(libs.mlkit.genai.prompt)
+
+  // v3 vlogpilot
+  implementation(libs.kotlinx.coroutines.android)
+  implementation(libs.mediapipe.tasks.vision)
+  implementation(libs.tensorflow.lite)
+  implementation(libs.onnxruntime.android)
+  implementation(libs.ffmpegKit16kb)
+  // Deferred: tarsosdsp (BPM) — not on Maven Central, add via JitPack in v3.1
+  implementation(libs.okhttp)
 }
 
 protobuf {

@@ -1,0 +1,112 @@
+/*
+ * Copyright 2026 The pc-pilot v3 authors
+ *
+ * UI state holder for the M1 scaffolding. Drives ingest + segmentation and
+ * exposes a sealed PipelineState the screen can render. M2-M5 grow this into
+ * a full pipeline orchestrator.
+ */
+package com.google.ai.edge.gallery.customtasks.vlogpilot
+
+import android.content.Context
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import com.google.ai.edge.gallery.customtasks.vlogpilot.ingest.PhotoIngest
+import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventSegmenter
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineEventBus
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineProgress
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.VlogPipelineWorker
+import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import java.io.File
+import javax.inject.Inject
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+
+sealed interface PipelineState {
+  data object Idle : PipelineState
+  data class Scanning(val phase: String) : PipelineState
+  data class Ready(val assets: List<Asset>, val events: List<Event>) : PipelineState
+  data class Running(val message: String) : PipelineState
+  data class Done(val outputs: List<EventResult>) : PipelineState
+  data class Error(val message: String) : PipelineState
+}
+
+data class EventResult(val eventId: String, val outputPath: String)
+
+@HiltViewModel
+class VlogPilotViewModel @Inject constructor(
+  @ApplicationContext private val appContext: Context,
+) : ViewModel() {
+
+  private val _state = MutableStateFlow<PipelineState>(PipelineState.Idle)
+  val state: StateFlow<PipelineState> = _state.asStateFlow()
+
+  init {
+    viewModelScope.launch {
+      PipelineEventBus.flow.collect { progress -> handleProgress(progress) }
+    }
+  }
+
+  fun scanAlbum(windowDays: Int = 30) {
+    viewModelScope.launch {
+      _state.value = PipelineState.Scanning("MediaStore query…")
+      try {
+        val assets = PhotoIngest.loadRecent(appContext, windowDays)
+        _state.value = PipelineState.Scanning("Segmenting ${assets.size} assets…")
+        val events = EventSegmenter.segment(assets)
+        _state.value = PipelineState.Ready(assets, events)
+      } catch (t: Throwable) {
+        _state.value = PipelineState.Error(t.message ?: t::class.java.simpleName)
+      }
+    }
+  }
+
+  fun runFullPipeline() {
+    VlogPipelineWorker.ensureChannel(appContext)
+    val req = OneTimeWorkRequestBuilder<VlogPipelineWorker>().build()
+    WorkManager.getInstance(appContext)
+      .enqueueUniqueWork(VlogPipelineWorker.WORK_NAME, ExistingWorkPolicy.KEEP, req)
+    _state.value = PipelineState.Running("Worker enqueued…")
+  }
+
+  private val collectedOutputs = mutableMapOf<String, String>()
+
+  private fun handleProgress(p: PipelineProgress) {
+    when (p) {
+      is PipelineProgress.DownloadingModels -> _state.value = PipelineState.Running("下载模型 ${p.percent}% (${p.label})")
+      PipelineProgress.Ingesting -> _state.value = PipelineState.Running("扫描相册…")
+      is PipelineProgress.IngestDone -> _state.value = PipelineState.Running("素材 ${p.assetCount}, 事件 ${p.eventCount}")
+      is PipelineProgress.Perceiving -> _state.value = PipelineState.Running("感知 ${p.current}/${p.total}")
+      is PipelineProgress.EventStart -> _state.value = PipelineState.Running("事件 ${p.index}/${p.total} (${p.eventId})")
+      is PipelineProgress.EventStage -> _state.value = PipelineState.Running("${p.eventId}: ${p.stage}")
+      is PipelineProgress.EventDone -> {
+        collectedOutputs[p.eventId] = p.outputPath
+        _state.value = PipelineState.Running("${p.eventId} ✓")
+      }
+      is PipelineProgress.EventFailed -> _state.value = PipelineState.Running("${p.eventId} ✗ ${p.message}")
+      PipelineProgress.AllDone -> {
+        val all = collectedOutputs.toList()
+          .ifEmpty { listExistingCandidates() }
+          .map { (id, path) -> EventResult(id, path) }
+        _state.value = PipelineState.Done(all)
+      }
+      is PipelineProgress.Failed -> _state.value = PipelineState.Error(p.message)
+    }
+  }
+
+  private fun listExistingCandidates(): List<Pair<String, String>> {
+    val dir = File(appContext.filesDir, "candidates")
+    return dir.listFiles()
+      ?.filter { it.isFile && it.name.endsWith(".mp4") }
+      ?.map { it.nameWithoutExtension to it.absolutePath }
+      ?.sortedBy { it.first }
+      .orEmpty()
+  }
+}
