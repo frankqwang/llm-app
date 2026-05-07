@@ -1,0 +1,17 @@
+name: collage
+display_name: 拼贴快剪
+target_duration_sec: 20
+shot_pace: fast
+suitable_when: |
+  - 素材数 >= 40
+  - 场景多样、节奏感强（聚会、城市游、街拍）
+  - 用户偏小红书/抖音爆款风格
+  - BGM 节拍明显的电子/流行音乐时效果最好
+prompt_hints: |
+  选片偏向：广撒网，每张图都给一个露脸机会，重点是节奏不是单图质量
+  节奏：单镜头 0.4-1.2 秒，紧贴 BGM 节拍切换
+  转场：cut 为主（不用 crossfade，要硬切的冲击感）
+  Ken Burns：static 或快速 zoom_in（节奏快不需要慢运镜）
+  字幕：可有可无，有的话像弹幕（短词、emoji 风格）
+  布局：可以接受素材重复出现（同一张闪 2 次）
+  必须避免：长镜头、慢节奏、大段空镜

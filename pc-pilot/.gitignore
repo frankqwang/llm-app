@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+workspace/*
+!workspace/.gitkeep
+inbox/*
+!inbox/.gitkeep
+assets/bgm/*
+!assets/bgm/.gitkeep
+# Microsoft YaHei font has Microsoft license — README tells user to copy from system
+assets/fonts/*
+!assets/fonts/.gitkeep
+.uv/
+uv.lock

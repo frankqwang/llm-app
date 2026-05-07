@@ -1,0 +1,52 @@
+[project]
+name = "pc-pilot"
+version = "0.1.0"
+description = "PC pilot for AI-driven vlog candidate generation from photo albums"
+requires-python = ">=3.11"
+dependencies = [
+    # LLM client
+    "openai>=1.50",
+    "pydantic>=2.8",
+    # Image / video media
+    "pillow>=10.4",
+    "pillow-heif>=0.18",          # HEIC support
+    "imageio-ffmpeg>=0.5",        # for ffprobe/ffmpeg path discovery
+    "av>=12.3",                   # PyAV for video metadata + frame extraction
+    # Perception layer
+    "ultralytics>=8.3",           # YOLOv11
+    "insightface>=0.7",           # face detection + embedding
+    "onnxruntime-gpu>=1.18",      # InsightFace + many ONNX models
+    "open-clip-torch>=2.26",      # CLIP / SigLIP embeddings
+    "scenedetect[opencv]>=0.6",   # video shot boundary detection
+    "scikit-learn>=1.5",          # DBSCAN, etc.
+    "numpy>=1.26",
+    "opencv-python>=4.10",        # quality metrics, helpers
+    # Pipeline glue
+    "jinja2>=3.1",                # HTML templating
+    "tqdm>=4.66",
+    "python-dateutil>=2.9",
+    "pyyaml>=6.0",                # style library
+    "librosa>=0.11.0",
+    "soundfile>=0.13.1",
+    "gradio-client>=2.5.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+]
+
+# Pull torch+cu128 wheels from PyTorch's index instead of plain PyPI (which only ships CPU).
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"

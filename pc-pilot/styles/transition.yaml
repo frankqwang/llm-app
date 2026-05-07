@@ -1,0 +1,18 @@
+name: transition
+display_name: 地点切换
+target_duration_sec: 35
+shot_pace: medium
+suitable_when: |
+  - GPS 显示事件跨越多个明显不同的 location
+  - 或场景标签多样（city + nature + restaurant 等混合）
+  - 旅行类、city walk 类素材
+prompt_hints: |
+  选片偏向：按地点分组，每个地点 2-4 个镜头快速带过
+  - 第一镜：地点的 establishing shot（远景、地标、店招）
+  - 中间：地点内的细节、人物、活动
+  - 最后：离开/换场的镜头（路上、车窗、背影）
+  节奏：单镜头 1.5-2.5 秒
+  转场：地点切换时可以用 fade 黑场过渡（emphasis）
+  字幕：每换一个地点必有地名字幕（黑底白字、大号、停留 1 秒）
+  BGM 风格：行进感、轻快、有节奏推进
+  避免：在同一地点停留过久、忽略地点切换

@@ -1,0 +1,18 @@
+name: cinematic
+display_name: 大片质感
+target_duration_sec: 50
+shot_pace: slow
+suitable_when: |
+  - 风景类、空镜、远景较多（scene 多为 outdoor/beach/mountain/city）
+  - 情绪偏 contemplative / peaceful
+  - 单事件素材数 >= 20，能撑起慢节奏
+  - 有视频片段（慢镜头效果更好）
+prompt_hints: |
+  选片偏向：构图分高（>=0.7）的远景/空镜作开场，强情绪/冲击力镜头作高潮，留白镜头收尾
+  节奏：单镜头 3-5 秒（视频片段可 4-8 秒），crossfade 1.0-1.5 秒
+  字幕：字数少 (<=10)，文艺/诗意感，可以是引语
+  BGM 风格：大气、电影配乐、弦乐或氛围电子
+  特殊处理：
+  - 视频片段优先使用，让画面真的"动"起来
+  - Ken Burns 用 zoom_in 慢推拉
+  - 开头黑场 1 秒淡入，结尾淡出 1 秒

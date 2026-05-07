@@ -11,3 +11,6 @@ Thumbs.db
 *.litertlm
 *.task
 models/
+
+# Third-party repos cloned at root (not part of this project, see pc-pilot/README.md)
+ACE-Step-1.5/

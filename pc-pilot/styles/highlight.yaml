@@ -1,0 +1,14 @@
+name: highlight
+display_name: 高潮集锦
+target_duration_sec: 25
+shot_pace: fast
+suitable_when: |
+  - 素材数 >= 30 且 aesthetic_score 分布有明显高峰
+  - 事件有明确的"精彩时刻"（如烟花、合影、跳跃、特殊景观）
+  - 用户想发短平台（抖音、视频号、小红书短版）
+prompt_hints: |
+  选片偏向：只挑 aesthetic_score top 20%-30% 的镜头，宁少勿多
+  节奏：单镜头 1-2 秒，密集快切
+  字幕：极简或无字幕，让画面说话
+  BGM 风格：节奏感强、有 build-up
+  避免：过场、空镜、低质量镜头一律不要
