@@ -55,7 +55,7 @@ previous_shot_summary: $previousShot
 请从 ${thumbs.size} 张候选中选 1 张（编号 1..${thumbs.size}）。
 """.trimIndent()
     val raw = agent.ask(systemPrompt = PromptStrings.EDITOR_SYSTEM, userText = userMsg, images = thumbs)
-    val obj = JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject
+    val obj = try { JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject } catch (_: Throwable) { null }
     val idx = obj?.get("chosen_index")?.jsonPrimitive?.intOrNull?.minus(1) ?: 0
     val rationale = obj?.get("rationale")?.jsonPrimitive?.contentOrNull.orEmpty()
     val chosen = candidates.getOrNull(idx) ?: candidates.first()

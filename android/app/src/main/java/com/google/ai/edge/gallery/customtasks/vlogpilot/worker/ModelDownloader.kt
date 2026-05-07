@@ -32,17 +32,21 @@ object ModelDownloader {
 
   data class ModelSpec(val fileName: String, val url: String, val sizeBytes: Long)
 
-  /** Smaller perception models — Gemma 4 is handled separately by the gallery model manager. */
+  /** Smaller perception models — Gemma 4 is handled separately by the gallery model manager.
+   *
+   *  Excluded from this list (handled differently or not yet sourced):
+   *  - mobileclip2_*.tflite — anton96vice/mobileclip2_tflite hosts only float-precision
+   *    340 MB+ files which is too heavy for OTA. Until we ship a sub-50 MB int8 variant,
+   *    CLIP is offline and Recall.kt gracefully falls back to sharpness ranking.
+   *  - mobilefacenet.tflite — no canonical public TFLite source; face embedding/clustering
+   *    is disabled until we host or source one.
+   *  - yolo26n_int8.tflite — same; YOLO output is a nice-to-have for sceneClass tagging
+   *    but not required for shot selection. */
   val PERCEPTION_MODELS = listOf(
     ModelSpec(
-      fileName = "mobileclip2_s1_image.tflite",
-      url = "https://huggingface.co/anton96vice/mobileclip2_tflite/resolve/main/mobileclip_s1_datacompdr_image.tflite",
-      sizeBytes = 26_000_000L,
-    ),
-    ModelSpec(
-      fileName = "mobileclip2_s1_text.tflite",
-      url = "https://huggingface.co/anton96vice/mobileclip2_tflite/resolve/main/mobileclip_s1_datacompdr_text.tflite",
-      sizeBytes = 130_000_000L,
+      fileName = "face_landmarker.task",
+      url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task",
+      sizeBytes = 5_400_000L,
     ),
     ModelSpec(
       fileName = "nsfw_vit_int8.onnx",

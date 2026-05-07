@@ -42,7 +42,7 @@ AudienceBrief:
 请输出 DirectorBrief JSON。
 """.trimIndent()
     val raw = agent.ask(systemPrompt = PromptStrings.DIRECTOR_SYSTEM, userText = userMsg)
-    val obj = JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject
+    val obj = try { JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject } catch (_: Throwable) { null }
       ?: return fallback(memory)
     return parseBrief(memory.eventId, obj) ?: fallback(memory)
   }

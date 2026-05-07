@@ -18,6 +18,8 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventSegmenter
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotModelRegistry
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.DecisionStore
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventDecisions
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineEventBus
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineProgress
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.VlogPipelineWorker
@@ -26,10 +28,13 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 sealed interface PipelineState {
   data object Idle : PipelineState
@@ -50,9 +55,28 @@ class VlogPilotViewModel @Inject constructor(
   private val _state = MutableStateFlow<PipelineState>(PipelineState.Idle)
   val state: StateFlow<PipelineState> = _state.asStateFlow()
 
+  private val _decisions = MutableStateFlow<List<EventDecisions>>(emptyList())
+  val decisions: StateFlow<List<EventDecisions>> = _decisions.asStateFlow()
+
   init {
+    // Listen to per-stage progress events.
     viewModelScope.launch {
       PipelineEventBus.flow.collect { progress -> handleProgress(progress) }
+    }
+    // Poll the decisions/ dir so the UI sees Browser/Director/Editor/Critic
+    // outputs progressively appear as each agent finishes. Reading 5-7 JSON
+    // files per event off the disk every refresh has to happen on Dispatchers.IO
+    // — running it on Main causes the kind of jank the user notices when
+    // scrolling/expanding cards mid-run.
+    viewModelScope.launch {
+      _decisions.value = withContext(Dispatchers.IO) { DecisionStore.loadAll(appContext) }
+      while (true) {
+        delay(3_000)
+        val s = _state.value
+        if (s is PipelineState.Running || s is PipelineState.Scanning || s is PipelineState.Done) {
+          _decisions.value = withContext(Dispatchers.IO) { DecisionStore.loadAll(appContext) }
+        }
+      }
     }
   }
 
@@ -70,11 +94,20 @@ class VlogPilotViewModel @Inject constructor(
     }
   }
 
+  fun reportError(message: String) {
+    _state.value = PipelineState.Error(message)
+  }
+
+  fun cancelPipeline() {
+    WorkManager.getInstance(appContext).cancelUniqueWork(VlogPipelineWorker.WORK_NAME)
+    _state.value = PipelineState.Idle
+  }
+
   fun runFullPipeline(model: Model) {
     // The Worker can't easily inject Hilt singletons or look the Model up via task.models
     // (that's an in-memory ViewModel state). Stash the resolved Model here, then the worker
     // pulls it back. Single concurrent pipeline is enforced by enqueueUniqueWork+KEEP below.
-    VlogPilotModelRegistry.resolvedModel = model
+    VlogPilotModelRegistry.stash(appContext, model)
     VlogPipelineWorker.ensureChannel(appContext)
     val req = OneTimeWorkRequestBuilder<VlogPipelineWorker>().build()
     WorkManager.getInstance(appContext)

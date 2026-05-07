@@ -34,6 +34,11 @@ object ShotRenderer {
   private const val MAX_SLOWMO_HIGHFPS = 2.5f
   private const val HIGHFPS_THRESHOLD = 48f
 
+  // Video encoder is picked at runtime by EncoderProbe — prefers
+  // h264_mediacodec (hardware) when available, falls back to mpeg4 (always
+  // available). Computed lazily and cached for the process lifetime.
+  private val VIDEO_ENCODER: String get() = EncoderProbe.videoEncoderArgs()
+
   data class Result(val path: String, val actualDurationSec: Float)
 
   fun render(
@@ -81,7 +86,7 @@ object ShotRenderer {
     val caption = CaptionFilter.build(spec.caption, dur, fontPath).let { if (it.isEmpty()) "" else ",$it" }
     val vf = "[0:v]$zoompan${grade}${polish}${caption}[v]"
     return "-y -loop 1 -i \"$input\" -filter_complex \"$vf\" -map \"[v]\" -t $dur " +
-      "-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -r $FPS \"$output\""
+      "$VIDEO_ENCODER -pix_fmt yuv420p -r $FPS \"$output\""
   }
 
   // ---- video / live photo ----
@@ -117,7 +122,7 @@ object ShotRenderer {
 
     val vf = "[0:v]$setpts,$blurredCompose${grade}${polish}${caption}[v]"
     return "-y $ssArg -i \"$input\" $toArg -filter_complex \"$vf\" -map \"[v]\" -an " +
-      "-t $effectiveDur -c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -r $FPS \"$output\""
+      "-t $effectiveDur $VIDEO_ENCODER -pix_fmt yuv420p -r $FPS \"$output\""
   }
 
   private fun resolveSourcePath(context: Context, asset: Asset): String? {

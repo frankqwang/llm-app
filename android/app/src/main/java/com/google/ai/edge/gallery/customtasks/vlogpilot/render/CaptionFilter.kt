@@ -17,21 +17,23 @@ object CaptionFilter {
    * @return the drawtext filter string, ready to be appended after a comma into a filter_complex
    */
   fun build(text: String, shotDurationSec: Float, fontPath: String?): String {
-    if (text.isBlank()) return ""
+    // No font, no drawtext. ffmpeg's `drawtext` without `fontfile=` aborts the
+    // whole filter graph (exit 1) on Android because ffmpeg-kit ships without
+    // any default font. Until we bundle a CJK font, render the shot silent on
+    // captions rather than fail the entire MP4. Better degraded video than no
+    // video at all.
+    if (text.isBlank() || fontPath.isNullOrEmpty()) return ""
     val escaped = escape(text)
-    val font = fontPath?.let { "fontfile='${it.replace("'", "\\'")}'" }.orEmpty()
+    val font = "fontfile='${fontPath.replace("'", "\\'")}'"
     val enterEnd = 0.4f
     val exitStart = (shotDurationSec - 0.3f).coerceAtLeast(enterEnd + 0.1f)
-    // box=1: filled rounded background; we approximate via boxborderw + boxcolor.
     return buildString {
-      append("drawtext=$font")
-      if (font.isNotEmpty()) append(":")
+      append("drawtext=$font:")
       append("text='$escaped'")
       append(":fontcolor=black")
       append(":fontsize=h*0.046")
       append(":box=1:boxcolor=white@0.92:boxborderw=24")
       append(":x=(w-text_w)/2")
-      // Slide up from bottom: at t=0 y=h; at t=enterEnd y=h*0.78
       append(":y='if(lt(t,$enterEnd),h-(h-h*0.78)*(t/$enterEnd),h*0.78)'")
       append(":alpha='if(lt(t,$exitStart),1,max(0,1-(t-$exitStart)/0.3))'")
     }

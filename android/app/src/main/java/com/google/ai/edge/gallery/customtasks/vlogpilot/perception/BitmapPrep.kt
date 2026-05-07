@@ -29,6 +29,8 @@ object BitmapPrep {
     val canvas = Canvas(out)
     canvas.drawColor(padColor)
     canvas.drawBitmap(sized, padX.toFloat(), padY.toFloat(), Paint(Paint.ANTI_ALIAS_FLAG))
+    // `sized` is an intermediate; we composited it onto `out` and never need it again.
+    if (sized != src) sized.recycle()
     return LetterboxResult(out, scale, padX, padY)
   }
 
@@ -39,7 +41,8 @@ object BitmapPrep {
    * Buffer layout: 1 * H * W * 3 floats.
    */
   fun toNhwcFloat01(bmp: Bitmap, side: Int): ByteBuffer {
-    val src = if (bmp.width == side && bmp.height == side) bmp else Bitmap.createScaledBitmap(bmp, side, side, true)
+    val (src, srcOwned) = if (bmp.width == side && bmp.height == side) bmp to false
+                          else Bitmap.createScaledBitmap(bmp, side, side, true) to true
     val buffer = ByteBuffer.allocateDirect(side * side * 3 * 4).order(ByteOrder.nativeOrder())
     val pixels = IntArray(side * side)
     src.getPixels(pixels, 0, side, 0, 0, side, side)
@@ -49,6 +52,7 @@ object BitmapPrep {
       buffer.putFloat((p and 0xff) / 255f)
     }
     buffer.rewind()
+    if (srcOwned) src.recycle()
     return buffer
   }
 
@@ -57,7 +61,8 @@ object BitmapPrep {
    * mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225].
    */
   fun toNchwImagenetFloat(bmp: Bitmap, side: Int): FloatBuffer {
-    val src = if (bmp.width == side && bmp.height == side) bmp else Bitmap.createScaledBitmap(bmp, side, side, true)
+    val (src, srcOwned) = if (bmp.width == side && bmp.height == side) bmp to false
+                          else Bitmap.createScaledBitmap(bmp, side, side, true) to true
     val buf = FloatBuffer.allocate(side * side * 3)
     val pixels = IntArray(side * side)
     src.getPixels(pixels, 0, side, 0, 0, side, side)
@@ -68,6 +73,7 @@ object BitmapPrep {
     for (p in pixels) buf.put((((p shr 8) and 0xff) / 255f - mean[1]) / std[1])
     for (p in pixels) buf.put(((p and 0xff) / 255f - mean[2]) / std[2])
     buf.rewind()
+    if (srcOwned) src.recycle()
     return buf
   }
 
@@ -75,7 +81,8 @@ object BitmapPrep {
    * NHWC float32 in [-1,1]. Used by MobileCLIP and MobileFaceNet.
    */
   fun toNhwcFloatNeg1to1(bmp: Bitmap, side: Int): ByteBuffer {
-    val src = if (bmp.width == side && bmp.height == side) bmp else Bitmap.createScaledBitmap(bmp, side, side, true)
+    val (src, srcOwned) = if (bmp.width == side && bmp.height == side) bmp to false
+                          else Bitmap.createScaledBitmap(bmp, side, side, true) to true
     val buffer = ByteBuffer.allocateDirect(side * side * 3 * 4).order(ByteOrder.nativeOrder())
     val pixels = IntArray(side * side)
     src.getPixels(pixels, 0, side, 0, 0, side, side)
@@ -85,6 +92,7 @@ object BitmapPrep {
       buffer.putFloat(((p and 0xff) / 127.5f) - 1f)
     }
     buffer.rewind()
+    if (srcOwned) src.recycle()
     return buffer
   }
 

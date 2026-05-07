@@ -51,8 +51,14 @@ $timelineSummary
 请审片，输出 Critique JSON。
 """.trimIndent()
     val raw = agent.ask(systemPrompt = PromptStrings.CRITIC_SYSTEM, userText = userMsg)
-    val obj = JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject
-      ?: return Critique(iteration, emptyList(), emptyList())
+    // Gemma 4 E2B will occasionally emit malformed JSON for the critic schema
+    // (missing close-quote on a key, etc.). Treat any parse failure as "no
+    // critique available" so the event still ships v1 of the timeline.
+    val obj = try {
+      JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject
+    } catch (_: Throwable) {
+      null
+    } ?: return Critique(iteration, emptyList(), emptyList())
     val issues = obj["issues"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
     val revs = obj["revised_requests"]?.jsonArray?.mapNotNull { el ->
       val r = el.jsonObject

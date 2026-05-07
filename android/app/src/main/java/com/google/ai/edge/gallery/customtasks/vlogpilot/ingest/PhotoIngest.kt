@@ -20,18 +20,47 @@ import kotlinx.coroutines.withContext
 
 object PhotoIngest {
 
-  /** Read all images + videos taken within `windowDays` of now. */
-  suspend fun loadRecent(context: Context, windowDays: Int = 30): List<Asset> =
+  /** What to keep when reading from MediaStore. Defaults: only camera originals
+   *  (DCIM/), drop big videos, drop tiny garbage images. */
+  data class Filter(
+    val cameraOnly: Boolean = true,
+    /** Additional substring matches against RELATIVE_PATH (case-insensitive).
+     *  Useful for "include this device-specific folder too", e.g. "Pictures/Pocket3/". */
+    val extraIncludePaths: List<String> = emptyList(),
+    val maxVideoSizeBytes: Long = 100L * 1024 * 1024,   // 100 MB videos skipped
+    val maxImageSizeBytes: Long = 50L * 1024 * 1024,    // 50 MB images skipped
+    val minImageSizeBytes: Long = 50L * 1024,           // <50 KB = thumbnail/junk, skip
+  )
+
+  /** Read all images + videos taken within `windowDays` of now, filtered by
+   *  [filter]. Defaults skip non-camera (screenshots / WeChat / Downloads),
+   *  oversized videos, and tiny / oversized images. */
+  suspend fun loadRecent(
+    context: Context,
+    windowDays: Int = 30,
+    filter: Filter = Filter(),
+  ): List<Asset> =
     withContext(Dispatchers.IO) {
       val cutoffMs = System.currentTimeMillis() - windowDays.toLong() * 86_400_000L
-      val images = queryImages(context, cutoffMs)
-      val videos = queryVideos(context, cutoffMs)
+      val images = queryImages(context, cutoffMs, filter)
+      val videos = queryVideos(context, cutoffMs, filter)
       pairLivePhotos(images, videos).sortedBy { it.takenEpochMs }
     }
 
+  private fun pathPasses(relativePath: String?, filter: Filter): Boolean {
+    val p = (relativePath ?: "").lowercase(Locale.ROOT)
+    if (filter.cameraOnly) {
+      // DCIM/ is where camera-originals land on every Android phone.
+      val isCamera = p.startsWith("dcim/")
+      val isExtra = filter.extraIncludePaths.any { p.contains(it.lowercase(Locale.ROOT)) }
+      return isCamera || isExtra
+    }
+    return true
+  }
+
   // ---------- images ----------
 
-  private fun queryImages(context: Context, cutoffMs: Long): List<Asset> {
+  private fun queryImages(context: Context, cutoffMs: Long, filter: Filter): List<Asset> {
     val proj = arrayOf(
       MediaStore.Images.Media._ID,
       MediaStore.Images.Media.DISPLAY_NAME,
@@ -41,6 +70,7 @@ object PhotoIngest {
       MediaStore.Images.Media.HEIGHT,
       MediaStore.Images.Media.SIZE,
       MediaStore.Images.Media.ORIENTATION,
+      MediaStore.Images.Media.RELATIVE_PATH,
     )
     val sel = "${MediaStore.Images.Media.DATE_TAKEN} >= ?"
     val args = arrayOf(cutoffMs.toString())
@@ -59,6 +89,12 @@ object PhotoIngest {
         val h = c.getInt(idx[MediaStore.Images.Media.HEIGHT]!!)
         val size = c.getLong(idx[MediaStore.Images.Media.SIZE]!!)
         val orient = c.getInt(idx[MediaStore.Images.Media.ORIENTATION]!!)
+        val relPath = c.getString(idx[MediaStore.Images.Media.RELATIVE_PATH]!!)
+
+        // Path / size filters — skip junk before paying EXIF read.
+        if (!pathPasses(relPath, filter)) continue
+        if (size in 1 until filter.minImageSizeBytes) continue
+        if (size > filter.maxImageSizeBytes) continue
 
         // EXIF read for accurate timestamp and GPS (DATE_TAKEN can be wrong for synced files)
         val (exifTaken, lat, lon) = readExif(context, uri)
@@ -82,7 +118,7 @@ object PhotoIngest {
 
   // ---------- videos ----------
 
-  private fun queryVideos(context: Context, cutoffMs: Long): List<Asset> {
+  private fun queryVideos(context: Context, cutoffMs: Long, filter: Filter): List<Asset> {
     val proj = arrayOf(
       MediaStore.Video.Media._ID,
       MediaStore.Video.Media.DISPLAY_NAME,
@@ -92,6 +128,7 @@ object PhotoIngest {
       MediaStore.Video.Media.HEIGHT,
       MediaStore.Video.Media.DURATION,
       MediaStore.Video.Media.SIZE,
+      MediaStore.Video.Media.RELATIVE_PATH,
     )
     val sel = "${MediaStore.Video.Media.DATE_TAKEN} >= ?"
     val args = arrayOf(cutoffMs.toString())
@@ -110,6 +147,11 @@ object PhotoIngest {
         val h = c.getInt(idx[MediaStore.Video.Media.HEIGHT]!!)
         val dur = c.getLong(idx[MediaStore.Video.Media.DURATION]!!)
         val size = c.getLong(idx[MediaStore.Video.Media.SIZE]!!)
+        val relPath = c.getString(idx[MediaStore.Video.Media.RELATIVE_PATH]!!)
+
+        if (!pathPasses(relPath, filter)) continue
+        if (size > filter.maxVideoSizeBytes) continue
+
         out += Asset(
           id = stableId(uri.toString()),
           contentUri = uri.toString(),

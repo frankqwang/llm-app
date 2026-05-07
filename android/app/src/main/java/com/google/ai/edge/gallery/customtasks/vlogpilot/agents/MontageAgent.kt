@@ -28,16 +28,31 @@ class MontageAgent(private val context: Context, private val agent: AgentRuntime
     val sheets = MontageBuilder.build(context, assets)
     if (sheets.isEmpty()) return empty(eventId)
 
-    // For now we send only the first sheet — large events are subsampled in caller.
-    val first = sheets.first()
-    val raw = agent.ask(
-      systemPrompt = PromptStrings.MONTAGE_SYSTEM,
-      userText = "事件 $eventId 共 ${first.assetIds.size} 张素材，请输出 EventMemory JSON。",
-      images = listOf(first.bitmap),
-    )
-    val obj = JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject
-      ?: return empty(eventId)
-    return parseEventMemory(eventId, obj, first.assetIds)
+    // One VLM call per sheet — image indices in the agent's reply are local to
+    // that sheet (1..sheet.size), and we resolve them against sheet.assetIds.
+    // Then merge per-sheet EventMemories so large events keep all their context.
+    val partials = mutableListOf<EventMemory>()
+    for ((i, sheet) in sheets.withIndex()) {
+      val raw = agent.ask(
+        systemPrompt = PromptStrings.MONTAGE_SYSTEM,
+        userText = "事件 $eventId 第 ${i + 1}/${sheets.size} 页，本页 ${sheet.assetIds.size} 张。" +
+          "image_index 为本页内 1..${sheet.assetIds.size} 编号。请输出 EventMemory JSON。",
+        images = listOf(sheet.bitmap),
+      )
+      val obj = try { JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject } catch (_: Throwable) { null } ?: continue
+      partials += parseEventMemory(eventId, obj, sheet.assetIds)
+    }
+    return if (partials.isEmpty()) empty(eventId) else merge(eventId, partials)
+  }
+
+  private fun merge(eventId: String, parts: List<EventMemory>): EventMemory {
+    val summary = parts.map { it.storylineSummary }.filter { it.isNotEmpty() }.joinToString(" ")
+    val arc = parts.firstOrNull { it.emotionalArc.isNotEmpty() }?.emotionalArc.orEmpty()
+    val style = parts.firstOrNull { it.visualStyleSignals.isNotEmpty() }?.visualStyleSignals.orEmpty()
+    val chars = parts.flatMap { it.charactersObserved }.distinct()
+    val moments = parts.flatMap { it.keyMoments }.distinctBy { it.assetId }
+    val groups = parts.flatMap { it.notableSubgroups }
+    return EventMemory(eventId, summary, moments, arc, chars, style, groups)
   }
 
   private fun empty(eventId: String) = EventMemory(

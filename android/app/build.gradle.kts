@@ -47,6 +47,16 @@ android {
     manifestPlaceholders["appIcon"] = "@mipmap/ic_launcher"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    // Only ship native libs for arm64-v8a. ffmpeg-kit + MediaPipe + TFLite +
+    // ONNX Runtime + LiteRT-LM each carry .so files for armeabi-v7a / arm64-v8a
+    // / x86 / x86_64 — keeping all four bloats the APK from ~150 MB to ~520 MB
+    // for zero benefit on modern phones (every phone Gemma 4 actually runs on
+    // is 64-bit ARM; x86 is for emulators we don't target). To run in the
+    // Android Studio emulator on Intel/AMD, comment this out.
+    ndk {
+      abiFilters += listOf("arm64-v8a")
+    }
   }
 
   buildTypes {

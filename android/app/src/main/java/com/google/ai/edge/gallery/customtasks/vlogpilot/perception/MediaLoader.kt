@@ -19,8 +19,22 @@ import kotlin.math.max
 
 object MediaLoader {
 
-  /** Decode an image (or LIVE_PHOTO cover) to a Bitmap with the longest side ≤ maxSide. */
+  /** Decode the asset to a single Bitmap with the longest side ≤ maxSide.
+   *  - IMAGE / LIVE_PHOTO: decode the still (contentUri).
+   *  - VIDEO: pull a frame from the middle of the clip via MediaMetadataRetriever.
+   *           BitmapFactory.decodeStream cannot decode an MP4 container, which is
+   *           why all `content://media/external/video/...` URIs were failing here. */
   fun loadImage(context: Context, asset: Asset, maxSide: Int = 1024): Bitmap? {
+    return when (asset.mediaType) {
+      MediaType.IMAGE, MediaType.LIVE_PHOTO -> decodeStillImage(context, asset, maxSide)
+      MediaType.VIDEO -> {
+        val midSec = if (asset.durationMs > 0) (asset.durationMs / 2_000f) else 0.5f
+        loadVideoFrame(context, asset, midSec, maxSide)
+      }
+    }
+  }
+
+  private fun decodeStillImage(context: Context, asset: Asset, maxSide: Int): Bitmap? {
     val uri = Uri.parse(asset.contentUri)
     return try {
       val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }

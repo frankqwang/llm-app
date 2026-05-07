@@ -46,6 +46,8 @@ class PerceptionEngine(
     val faces = faceDetector.detect(cover).map { hit ->
       val crop = BitmapPrep.cropNorm(cover, hit.xn, hit.yn, hit.wn, hit.hn, square = true)
       val emb = if (crop != null) faceEmbedder.embed(crop) else FloatArray(0)
+      // Free the face crop bitmap — embedder copied pixels to a buffer, no further use.
+      crop?.recycle()
       val pid = if (emb.isNotEmpty()) clusterer.assign(emb) else FaceClusterer.UNK
       val faceArea = hit.wn * hit.hn
       FaceBox(
@@ -69,6 +71,12 @@ class PerceptionEngine(
     } else 0f
 
     val (junk, reason) = decideJunk(q, nsfwScore)
+
+    // Cover bitmap is the biggest one (1024px on the long side). After all the
+    // per-asset perception calls done above, no caller holds a reference, so
+    // free the native pixel buffer immediately rather than waiting on GC.
+    // Without this, peak heap during a 100-asset run can climb past 1 GB.
+    cover.recycle()
 
     return Perception(
       assetId = asset.id,

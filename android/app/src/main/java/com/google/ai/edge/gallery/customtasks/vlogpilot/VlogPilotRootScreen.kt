@@ -1,0 +1,57 @@
+/*
+ * Copyright 2026 The pc-pilot v3 authors
+ *
+ * App-launch landing for VlogPilot. Wraps VlogPilotScreen in a Scaffold with a
+ * minimal top bar: title plus one Apps action that opens the original gallery
+ * home (where Models / Import / other tasks live behind the side drawer).
+ */
+package com.google.ai.edge.gallery.customtasks.vlogpilot
+
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Apps
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun VlogPilotRootScreen(
+  modelManagerViewModel: ModelManagerViewModel,
+  onOpenGallery: () -> Unit,
+) {
+  Scaffold(
+    modifier = Modifier.fillMaxSize(),
+    topBar = {
+      TopAppBar(
+        title = {
+          Text(
+            "VlogPilot",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+          )
+        },
+        actions = {
+          IconButton(onClick = onOpenGallery) {
+            Icon(Icons.Outlined.Apps, contentDescription = "Open gallery")
+          }
+        },
+      )
+    },
+  ) { innerPadding ->
+    VlogPilotScreen(
+      bottomPadding = innerPadding.calculateBottomPadding(),
+      modelManagerViewModel = modelManagerViewModel,
+      modifier = Modifier.padding(top = innerPadding.calculateTopPadding()),
+    )
+  }
+}

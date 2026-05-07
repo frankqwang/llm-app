@@ -65,6 +65,8 @@ object MontageBuilder {
       val src = Rect(0, 0, cell.width, cell.height)
       val dst = Rect(x, y, x + CELL_W, y + CELL_H)
       canvas.drawBitmap(cell, src, dst, Paint(Paint.ANTI_ALIAS_FLAG))
+      // Cell pixels are now baked onto the sheet bitmap — drop the source.
+      cell.recycle()
     } else {
       val placeholder = Paint().apply { color = Color.DKGRAY }
       canvas.drawRect(x.toFloat(), y.toFloat(), (x + CELL_W).toFloat(), (y + CELL_H).toFloat(), placeholder)

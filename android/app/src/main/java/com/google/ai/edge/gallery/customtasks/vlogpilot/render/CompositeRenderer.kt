@@ -85,8 +85,11 @@ object CompositeRenderer {
     val bgmInput = if (bgmPath != null) "-i \"$bgmPath\" " else ""
     val mapAudio = if (bgmPath != null) "-map \"[a]\" -c:a aac -b:a 192k" else "-an"
 
+    // EncoderProbe picks the best available encoder at runtime
+    // (h264_mediacodec hardware → mpeg4 software fallback).
+    val videoEncoder = EncoderProbe.videoEncoderArgs()
     val cmd = "-y $inputs$bgmInput-filter_complex \"${sb.append(audioFilter)}\" " +
-      "-map \"[vout]\" $mapAudio -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p \"${outFile.absolutePath}\""
+      "-map \"[vout]\" $mapAudio $videoEncoder -pix_fmt yuv420p \"${outFile.absolutePath}\""
     return runCmd(cmd, outFile)
   }
 

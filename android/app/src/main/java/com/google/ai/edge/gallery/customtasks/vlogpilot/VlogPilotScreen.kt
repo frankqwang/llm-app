@@ -1,9 +1,10 @@
 /*
  * Copyright 2026 The pc-pilot v3 authors
  *
- * M1 UI: scan album button → list of detected events. Permission flow uses the
- * standard Activity Result API. Subsequent milestones replace the simple list
- * with a per-event card showing the rendered candidate mp4.
+ * One-button VlogPilot screen. Tap Generate → permissions → pipeline. The
+ * orchestrator does its own ingest+segment internally; no separate preview
+ * pass on the UI side. No model-picker UI either: we grab whatever LLM the
+ * user has imported, prefer Gemma 4. Everything else is progress + results.
  */
 package com.google.ai.edge.gallery.customtasks.vlogpilot
 
@@ -12,59 +13,53 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import android.widget.MediaController
+import android.widget.VideoView
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.Button
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.foundation.clickable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
-import com.google.ai.edge.gallery.data.Model
-import com.google.ai.edge.gallery.data.ModelDownloadStatusType
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventDecisions
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotSpec
 import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 @Composable
 fun VlogPilotScreen(
   bottomPadding: Dp,
   modelManagerViewModel: ModelManagerViewModel,
+  modifier: Modifier = Modifier,
   viewModel: VlogPilotViewModel = hiltViewModel(),
 ) {
   val state by viewModel.state.collectAsState()
-  val mmUiState by modelManagerViewModel.uiState.collectAsState()
+  val decisions by viewModel.decisions.collectAsState()
   val context = LocalContext.current
-
-  // Pick the best already-downloaded multimodal LLM. Empty until user downloads one
-  // via any LLM task (Ask Image / Chat) — model files are shared across tasks.
-  val downloadedMultimodal: Model? = remember(mmUiState.modelDownloadStatus, mmUiState.tasks) {
-    val downloaded = modelManagerViewModel.getAllDownloadedModels()
-      .filter { it.llmSupportImage }
-    // Prefer Gemma 4 E2B (matches our prompt set), then any other image-capable LLM.
-    downloaded.firstOrNull { it.name.contains("gemma-4", ignoreCase = true) }
-      ?: downloaded.firstOrNull()
-  }
 
   val perms = remember {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -73,13 +68,26 @@ fun VlogPilotScreen(
       arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
     }
   }
+
+  fun launchPipeline() {
+    val downloaded = modelManagerViewModel.getAllDownloadedModels()
+    val model = downloaded.firstOrNull { it.name.contains("gemma-4", ignoreCase = true) }
+      ?: downloaded.firstOrNull()
+    if (model == null) {
+      viewModel.reportError("No LLM imported. Use Models → + → From local model file.")
+      return
+    }
+    viewModel.runFullPipeline(model)
+  }
+
   val permLauncher =
     rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
-      if (grants.values.all { it }) viewModel.scanAlbum()
+      if (grants.values.all { it }) launchPipeline()
+      else viewModel.reportError("Album permission denied.")
     }
 
   Column(
-    modifier = Modifier
+    modifier = modifier
       .fillMaxSize()
       .padding(16.dp)
       .padding(bottom = bottomPadding),
@@ -87,90 +95,167 @@ fun VlogPilotScreen(
   ) {
     Text("VlogPilot", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
     Text(
-      "Scans your album from the last 30 days, segments it into events, and (in later milestones) " +
-        "renders an AI-curated vlog candidate per event — fully on-device.",
+      "Turns the last 30 days of your album into AI-curated vlog candidates, fully on-device.",
       style = MaterialTheme.typography.bodyMedium,
     )
 
+    val running = state is PipelineState.Running || state is PipelineState.Scanning
     Button(
       onClick = {
-        val ungranted = perms.filter {
-          ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+        if (running) {
+          viewModel.cancelPipeline()
+        } else {
+          val ungranted = perms.filter {
+            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+          }
+          if (ungranted.isEmpty()) launchPipeline() else permLauncher.launch(ungranted.toTypedArray())
         }
-        if (ungranted.isEmpty()) viewModel.scanAlbum() else permLauncher.launch(ungranted.toTypedArray())
       },
       modifier = Modifier.fillMaxWidth(),
     ) {
-      Text("Scan album (last 30 days)")
+      Text(if (running) "Cancel" else "Generate")
     }
 
-    Text(
-      text = if (downloadedMultimodal != null) {
-        "VLM ready: ${downloadedMultimodal.displayName.ifEmpty { downloadedMultimodal.name }}"
-      } else {
-        "VLM not downloaded — open the LLM Ask Image task and download Gemma 4 E2B (or any image-capable LLM) first."
-      },
-      style = MaterialTheme.typography.bodySmall,
-    )
-
-    if (state is PipelineState.Ready && downloadedMultimodal != null) {
-      OutlinedButton(
-        onClick = { viewModel.runFullPipeline(downloadedMultimodal) },
-        modifier = Modifier.fillMaxWidth(),
-      ) { Text("Generate vlog candidates (full pipeline)") }
-    }
-
-    Spacer(Modifier.height(4.dp))
     StatusLine(state)
-
-    when (val s = state) {
-      is PipelineState.Ready -> LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(s.events) { evt -> EventCard(evt) }
-      }
-      is PipelineState.Running -> LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-      is PipelineState.Done -> LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(s.outputs) { r -> ResultCard(r) }
-      }
-      else -> Unit
+    if (state is PipelineState.Running || state is PipelineState.Scanning) {
+      LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+    }
+    // Decision-chain viewer: each event shows the AI's progressive output as
+    // each agent finishes (browse → audience → director → editor → critic).
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+      items(decisions) { d -> EventDecisionCard(d) }
     }
   }
 }
 
 @Composable
-private fun ResultCard(r: EventResult) {
-  Card(modifier = Modifier.fillMaxWidth()) {
-    Column(modifier = Modifier.padding(12.dp)) {
-      Text(r.eventId, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-      Text(r.outputPath, style = MaterialTheme.typography.bodySmall)
+private fun EventDecisionCard(d: EventDecisions) {
+  var expanded by remember { mutableStateOf(false) }
+  val tlFinal = d.timelineFinal ?: d.timelineV1
+  val stages = listOfNotNull(
+    "Browser".takeIf { d.memory != null },
+    "Audience".takeIf { d.audience != null },
+    "Director".takeIf { d.director != null },
+    "Editor".takeIf { tlFinal != null },
+    "Critic".takeIf { d.critique != null },
+    "Render".takeIf { d.mp4Path != null },
+  )
+  Card(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }) {
+    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+      Text(d.eventId, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+      Text(
+        stages.joinToString(" › ") + if (d.mp4Path != null) "  ✓" else "  …",
+        style = MaterialTheme.typography.bodySmall,
+        color = if (d.mp4Path != null) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant,
+      )
+      if (expanded) {
+        HorizontalDivider()
+        d.memory?.let { m ->
+          SectionLabel("📖 Browser — 故事概括")
+          Text(m.storylineSummary, style = MaterialTheme.typography.bodySmall)
+          if (m.charactersObserved.isNotEmpty()) Text("人物: ${m.charactersObserved.joinToString(", ")}", style = MaterialTheme.typography.labelSmall)
+          if (m.emotionalArc.isNotEmpty()) Text("情绪弧: ${m.emotionalArc}", style = MaterialTheme.typography.labelSmall)
+        }
+        d.audience?.let { a ->
+          SectionLabel("👥 Audience — 情绪诉求")
+          if (a.emotionalPayoff.isNotEmpty()) Text(a.emotionalPayoff, style = MaterialTheme.typography.bodySmall)
+          if (a.pacingGuidance.isNotEmpty()) Text("节奏: ${a.pacingGuidance}", style = MaterialTheme.typography.labelSmall)
+        }
+        d.director?.let { dir ->
+          SectionLabel("🎬 Director — 导演脚本")
+          if (dir.title.isNotEmpty()) Text(dir.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+          Text("基调: ${dir.tone}", style = MaterialTheme.typography.labelSmall)
+          if (dir.narrativeArc.isNotEmpty()) Text(dir.narrativeArc.joinToString(" → "), style = MaterialTheme.typography.labelSmall)
+        }
+        tlFinal?.let { t ->
+          SectionLabel("✂️ Editor — Timeline (${t.shots.size} shots)")
+          for (s in t.shots) ShotRow(s)
+        }
+        d.critique?.let { c ->
+          if (c.issues.isNotEmpty() || c.revisedRequests.isNotEmpty()) {
+            SectionLabel("🔍 Critic — 审片")
+            for (issue in c.issues) Text("• $issue", style = MaterialTheme.typography.labelSmall)
+            if (c.revisedRequests.isNotEmpty()) {
+              Text("修订: ${c.revisedRequests.size} shot 重选", style = MaterialTheme.typography.labelSmall)
+            }
+          }
+        }
+        d.mp4Path?.let { path ->
+          SectionLabel("🎞 Render — 成片预览")
+          MiniVideoPlayer(mp4Path = path)
+          Text(path, style = MaterialTheme.typography.labelSmall, color = Color(0xFF2E7D32))
+        }
+        d.perf?.let { p ->
+          SectionLabel("⏱ 耗时")
+          Text(
+            "总 ${formatMs(p.totalMs)}  ·  感知 ${formatMs(p.perceptionMs)} (${p.perceptionAssetCount} 张, 缓存 ${p.perceptionCacheHits})  ·  " +
+              "browse ${formatMs(p.browseMs)}  audience ${formatMs(p.audienceMs)}  director ${formatMs(p.directorMs)}  " +
+              "editor ${formatMs(p.editorMs)}  critic ${formatMs(p.criticMs)}  render ${formatMs(p.renderMs)}",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        }
+      } else if (stages.isNotEmpty()) {
+        Text("点击展开 AI 决策细节", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+      }
     }
+  }
+}
+
+@Composable
+private fun SectionLabel(text: String) {
+  Text(text, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold,
+    modifier = Modifier.padding(top = 6.dp))
+}
+
+private fun formatMs(ms: Long): String = when {
+  ms < 1000 -> "${ms}ms"
+  ms < 60_000 -> "${ms / 1000}s"
+  else -> "${ms / 60_000}m${(ms % 60_000) / 1000}s"
+}
+
+@Composable
+private fun MiniVideoPlayer(mp4Path: String) {
+  // VideoView wrapped in AndroidView. Cheap, no extra dep. Uses Android's
+  // built-in MediaPlayer under the hood, which can play whatever MediaCodec
+  // can decode (H.264 / mpeg4 — both of our possible encoder outputs).
+  AndroidView(
+    factory = { ctx ->
+      VideoView(ctx).apply {
+        setVideoPath(mp4Path)
+        setMediaController(MediaController(ctx).also { it.setAnchorView(this) })
+        seekTo(1)  // show first frame as preview
+      }
+    },
+    modifier = Modifier
+      .fillMaxWidth()
+      .aspectRatio(9f / 16f)
+      .padding(top = 4.dp),
+  )
+}
+
+@Composable
+private fun ShotRow(s: ShotSpec) {
+  Column(modifier = Modifier.fillMaxWidth().padding(start = 6.dp)) {
+    Text("#${s.order} · ${s.mediaType.name.lowercase()} · ${"%.1f".format(s.durationSec)}s",
+      style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+    if (s.caption.isNotEmpty()) Text("「${s.caption}」", style = MaterialTheme.typography.bodySmall)
+    if (s.rationale.isNotEmpty()) Text(s.rationale, style = MaterialTheme.typography.labelSmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant)
   }
 }
 
 @Composable
 private fun StatusLine(state: PipelineState) {
   val text = when (state) {
-    is PipelineState.Idle -> "Tap the button to begin."
-    is PipelineState.Scanning -> "Working: ${state.phase}"
-    is PipelineState.Ready -> "Found ${state.assets.size} assets in ${state.events.size} events."
+    is PipelineState.Idle -> ""
+    is PipelineState.Scanning -> state.phase
+    is PipelineState.Ready -> "${state.assets.size} assets, ${state.events.size} events"
     is PipelineState.Running -> state.message
-    is PipelineState.Done -> "Done — ${state.outputs.size} candidate(s) ready."
+    is PipelineState.Done -> "Done — ${state.outputs.size} candidate(s)"
     is PipelineState.Error -> "Error: ${state.message}"
   }
-  Text(text, style = MaterialTheme.typography.bodySmall)
-}
-
-private val EVT_FMT = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
-
-@Composable
-private fun EventCard(event: Event) {
-  Card(modifier = Modifier.fillMaxWidth()) {
-    Column(modifier = Modifier.padding(12.dp)) {
-      Text(event.eventId, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-      Text(
-        "${EVT_FMT.format(Date(event.startEpochMs))}  →  ${EVT_FMT.format(Date(event.endEpochMs))}",
-        style = MaterialTheme.typography.bodySmall,
-      )
-      Text("${event.assetIds.size} assets", style = MaterialTheme.typography.bodySmall)
-    }
+  if (text.isNotEmpty()) {
+    Text(text, style = MaterialTheme.typography.bodySmall)
   }
 }

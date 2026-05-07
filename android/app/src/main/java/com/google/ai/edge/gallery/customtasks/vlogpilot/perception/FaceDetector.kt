@@ -16,6 +16,10 @@ import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
 import java.io.Closeable
+import java.io.File
+import java.io.FileInputStream
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 
 class FaceDetector(
   context: Context,
@@ -29,16 +33,44 @@ class FaceDetector(
     val landmarks: List<Pair<Float, Float>>,                    // normalized 478 points
   )
 
-  private val landmarker: FaceLandmarker? = try {
-    val opts = FaceLandmarker.FaceLandmarkerOptions.builder()
-      .setBaseOptions(BaseOptions.builder().setModelAssetPath(modelAssetPath).build())
-      .setRunningMode(RunningMode.IMAGE)
-      .setNumFaces(numFaces)
-      .build()
-    FaceLandmarker.createFromOptions(context, opts)
-  } catch (t: Throwable) {
-    Log.w(TAG, "FaceLandmarker init failed", t)
-    null
+  private val landmarker: FaceLandmarker? = run {
+    // MediaPipe's native createFromOptions does NOT throw when the model is
+    // missing — it SEGVs in strlen() before Kotlin gets a chance to catch.
+    // Resolve to a ByteBuffer first (filesDir OTA download → bundled asset),
+    // and only call MediaPipe once we have real bytes.
+    val baseOpts = resolveBase(context, modelAssetPath) ?: run {
+      Log.w(TAG, "$modelAssetPath not found in filesDir/models or assets — face detection disabled")
+      return@run null
+    }
+    try {
+      val opts = FaceLandmarker.FaceLandmarkerOptions.builder()
+        .setBaseOptions(baseOpts)
+        .setRunningMode(RunningMode.IMAGE)
+        .setNumFaces(numFaces)
+        .build()
+      FaceLandmarker.createFromOptions(context, opts)
+    } catch (t: Throwable) {
+      Log.w(TAG, "FaceLandmarker init failed", t)
+      null
+    }
+  }
+
+  private fun resolveBase(context: Context, modelAssetPath: String): BaseOptions? {
+    // (1) OTA-downloaded copy under filesDir/models/<basename>
+    val basename = File(modelAssetPath).name
+    val ota = File(context.filesDir, "models/$basename")
+    if (ota.isFile && ota.length() > 0) {
+      val buffer: ByteBuffer = FileInputStream(ota).channel.use { ch ->
+        ch.map(FileChannel.MapMode.READ_ONLY, 0, ota.length())
+      }
+      return BaseOptions.builder().setModelAssetBuffer(buffer).build()
+    }
+    // (2) Bundled asset path
+    val bundled = try {
+      context.assets.open(modelAssetPath).close(); true
+    } catch (_: Throwable) { false }
+    if (bundled) return BaseOptions.builder().setModelAssetPath(modelAssetPath).build()
+    return null
   }
 
   fun detect(bmp: Bitmap): List<Hit> {

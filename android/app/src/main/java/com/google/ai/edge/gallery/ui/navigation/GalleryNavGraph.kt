@@ -96,6 +96,7 @@ private const val ROUTE_MODEL_LIST = "model_list"
 private const val ROUTE_MODEL = "route_model"
 private const val ROUTE_BENCHMARK = "benchmark"
 private const val ROUTE_MODEL_MANAGER = "model_manager"
+private const val ROUTE_VLOGPILOT = "vlogpilot_root"
 private const val ENTER_ANIMATION_DURATION_MS = 500
 private val ENTER_ANIMATION_EASING = EaseOutExpo
 private const val ENTER_ANIMATION_DELAY_MS = 100
@@ -182,10 +183,20 @@ fun GalleryNavHost(
 
   NavHost(
     navController = navController,
-    startDestination = ROUTE_HOMESCREEN,
+    startDestination = ROUTE_VLOGPILOT,
     enterTransition = { EnterTransition.None },
     exitTransition = { ExitTransition.None },
   ) {
+    // VlogPilot direct landing — c-end users see the big Generate button on launch.
+    // The "Models" action in the top bar is the escape hatch to gallery's model
+    // import flow + the rest of the gallery's tasks via the home screen.
+    composable(route = ROUTE_VLOGPILOT) {
+      com.google.ai.edge.gallery.customtasks.vlogpilot.VlogPilotRootScreen(
+        modelManagerViewModel = modelManagerViewModel,
+        onOpenGallery = { navController.navigate(ROUTE_HOMESCREEN) },
+      )
+    }
+
     // Home screen.
     composable(route = ROUTE_HOMESCREEN) {
       // Create a state to trigger PromoScreen fade in animation.
@@ -199,9 +210,14 @@ fun GalleryNavHost(
             tosViewModel = hiltViewModel(),
             enableAnimation = enableHomeScreenAnimation,
             navigateToTaskScreen = { task ->
-              pickedTask = task
-              enableModelListAnimation = true
-              navController.navigate(ROUTE_MODEL_LIST)
+              if (task.id == com.google.ai.edge.gallery.customtasks.vlogpilot.VlogPilotTask.TASK_ID) {
+                // VlogPilot has no model picker — go straight to the task screen.
+                navController.navigate(ROUTE_VLOGPILOT)
+              } else {
+                pickedTask = task
+                enableModelListAnimation = true
+                navController.navigate(ROUTE_MODEL_LIST)
+              }
               firebaseAnalytics?.logEvent(
                 GalleryEvent.CAPABILITY_SELECT.id,
                 Bundle().apply { putString("capability_name", task.id) },

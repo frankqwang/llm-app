@@ -81,7 +81,8 @@ adb push C:\dev\llm-app\models\gemma-4-E2B-it.litertlm /sdcard/Download/
 6. **Critical** — in the import dialog, before tapping confirm, toggle these switches **ON**:
    - **Support speculative decoding** — required for MTP. If left off, the SPECULATIVE_DECODING capability never gets attached to the model and the chat config won't show the runtime toggle, killing the v0.11.0 perf win.
    - **Support thinking** — only if you want thinking mode (off by default is fine for raw decode benchmarks)
-   - **Support image** / **Support audio** — only if you want vision / audio inputs (off keeps things simpler)
+   - **Support image** — recommended ON. VlogPilot does NOT gate on this flag (it asks the engine for vision at runtime regardless), but the gallery's other vision tasks like LLM Ask Image do filter by it. Off is fine if you only care about VlogPilot.
+   - **Support audio** — only if you want audio inputs (off keeps things simpler)
    - **Compatible accelerators** — make sure GPU is selected
 7. Tap confirm. The app copies the file into its own storage at `/sdcard/Android/data/com.google.aiedge.gallery/files/__imports/gemma-4-E2B-it.litertlm` and registers it.
 8. After "Model imported successfully", the model appears under "Imported Models" and is available in the **AI Chat** task.

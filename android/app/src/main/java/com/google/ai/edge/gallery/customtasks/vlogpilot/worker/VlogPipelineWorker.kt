@@ -11,6 +11,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.content.pm.ServiceInfo
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
@@ -26,9 +27,18 @@ class VlogPipelineWorker(
   override suspend fun doWork(): androidx.work.ListenableWorker.Result {
     setForeground(initialForegroundInfo())
     val gemma = VlogPilotModelRegistry.resolvedModel ?: run {
-      PipelineEventBus.publish(
-        PipelineProgress.Failed("No multimodal LLM available. Download Gemma 4 (or any image-capable LLM) first via the gallery's model manager.")
-      )
+      // The static was wiped — almost always means the foreground-service
+      // process was killed (OOM, force-stop, "Battery optimization is killing
+      // background apps"…). WorkManager tried to retry but we have no way to
+      // re-resolve the gallery Model from the worker context alone. Fail
+      // loudly so the UI shows a recovery hint, then unique-work clears.
+      val lastName = VlogPilotModelRegistry.lastEnqueuedModelName(applicationContext)
+      val msg = if (lastName != null) {
+        "Pipeline interrupted (process was killed mid-run). Open the app and tap Generate again — model '$lastName' is still imported."
+      } else {
+        "No LLM imported yet. Open Models → import Gemma 4 (or another LLM) first."
+      }
+      PipelineEventBus.publish(PipelineProgress.Failed(msg))
       return androidx.work.ListenableWorker.Result.failure()
     }
     val orch = PipelineOrchestrator(applicationContext, gemma)
@@ -48,7 +58,7 @@ class VlogPipelineWorker(
 
   private fun initialForegroundInfo(): ForegroundInfo {
     ensureChannel(applicationContext)
-    return ForegroundInfo(NOTIF_ID, buildNotif("VlogPilot 启动…"))
+    return buildForeground(buildNotif("VlogPilot 启动…"))
   }
 
   private fun foregroundFor(p: PipelineProgress): ForegroundInfo {
@@ -64,8 +74,18 @@ class VlogPipelineWorker(
       PipelineProgress.AllDone -> "全部完成"
       is PipelineProgress.Failed -> "出错: ${p.message}"
     }
-    return ForegroundInfo(NOTIF_ID, buildNotif(text))
+    return buildForeground(buildNotif(text))
   }
+
+  /** Android 14+ (targetSDK 34+) requires a foregroundServiceType bitmap on the
+   *  ForegroundInfo or the platform throws InvalidForegroundServiceTypeException.
+   *  We declare dataSync in the manifest and pass the matching bit here. */
+  private fun buildForeground(notif: Notification): ForegroundInfo =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      ForegroundInfo(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+    } else {
+      ForegroundInfo(NOTIF_ID, notif)
+    }
 
   private fun buildNotif(text: String): Notification {
     val builder = NotificationCompat.Builder(applicationContext, CHANNEL_ID)

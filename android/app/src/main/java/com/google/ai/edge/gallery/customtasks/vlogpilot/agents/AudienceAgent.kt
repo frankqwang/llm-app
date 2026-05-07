@@ -27,7 +27,7 @@ class AudienceAgent(private val agent: AgentRuntime) {
 请输出 AudienceBrief JSON。
 """.trimIndent()
     val raw = agent.ask(systemPrompt = PromptStrings.AUDIENCE_SYSTEM, userText = userMsg)
-    val obj = JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject
+    val obj = try { JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject } catch (_: Throwable) { null }
       ?: return fallback(memory)
     return AudienceBrief(
       eventId = memory.eventId,

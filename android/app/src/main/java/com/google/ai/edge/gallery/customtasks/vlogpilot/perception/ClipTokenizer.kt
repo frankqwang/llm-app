@@ -59,14 +59,30 @@ class ClipTokenizer(
   }
 
   companion object {
-    fun tryLoad(context: Context): ClipTokenizer? = try {
-      val vocabJson = context.assets.open("models/clip_vocab.json").bufferedReader().use { it.readText() }
-      val mergesTxt = context.assets.open("models/clip_merges.txt").bufferedReader().use { it.readText() }
-      val vocab = parseVocab(vocabJson)
-      val merges = parseMerges(mergesTxt)
-      ClipTokenizer(vocab, merges)
-    } catch (_: Throwable) {
-      null
+    fun tryLoad(context: Context): ClipTokenizer? {
+      // Two-tier resolution: (1) OTA-downloaded copy under filesDir/models/
+      // (where ModelDownloader writes), then (2) bundled asset. Without the
+      // dual lookup, OTA-downloaded vocab is invisible to the tokenizer and
+      // text embeddings silently degrade to all-UNK garbage.
+      return try {
+        val vocabJson = readResource(context, "clip_vocab.json") ?: return null
+        val mergesTxt = readResource(context, "clip_merges.txt") ?: return null
+        ClipTokenizer(parseVocab(vocabJson), parseMerges(mergesTxt))
+      } catch (_: Throwable) {
+        null
+      }
+    }
+
+    private fun readResource(context: Context, basename: String): String? {
+      // (1) filesDir/models/<basename> — what ModelDownloader writes.
+      val ota = java.io.File(context.filesDir, "models/$basename")
+      if (ota.isFile) return try { ota.readText() } catch (_: Throwable) { null }
+      // (2) Bundled asset under assets/models/<basename>.
+      return try {
+        context.assets.open("models/$basename").bufferedReader().use { it.readText() }
+      } catch (_: Throwable) {
+        null
+      }
     }
 
     private fun parseVocab(json: String): Map<String, Int> {
