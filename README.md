@@ -1,21 +1,35 @@
-# llm-app — Gemma 4 E2B-IT on-device Android prototype
+# llm-app — VlogPilot, an on-device AI vlog generator
 
-Forked from [google-ai-edge/gallery](https://github.com/google-ai-edge/gallery) (Apache-2.0). Goal: prototype-validate Gemma 4 E2B-IT running locally via [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM) on Android, then trim to a focused chat app.
+Forked from [google-ai-edge/gallery](https://github.com/google-ai-edge/gallery) (Apache-2.0). The app this repo ships is **VlogPilot**: tap one button and Gemma 4 E2B-IT, running fully on-device via [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM), turns the last 30 days of your photo album into AI-curated vlog candidates — no upload, no cloud, no account.
+
+The 5-agent reasoning chain (Browser → Audience → Director → Editor → Critic) is ported from the [pc-pilot](pc-pilot/) Python reference. Per-asset semantic tags (scene/subjects/action/mood/salient + per-video best-moment frame index) come from a single VLM annotation call per asset. Render uses ffmpeg-kit with hardware H.264 (h264_mediacodec) on supported SoCs.
+
+Verified end-to-end on **vivo X200 Pro** (Dimensity 9400 + GPU + MTP). Two events / 12 assets / ~7 minutes wall-clock to produce two ~6 MB 1080×1920 MP4s; perception + annotation cache make subsequent runs much faster.
 
 ## Layout
 
 ```
 llm-app/
-  android/      # Gradle project copied from gallery/Android/src
-    app/        # main application module (Kotlin + Compose + Hilt)
-    ...
-  README.md     # this file
+  android/                                                    # Gradle project (Kotlin + Compose + Hilt)
+    app/src/main/java/com/google/ai/edge/gallery/
+      customtasks/vlogpilot/                                  # the VlogPilot module — see Architecture below
+        agents/                                               # Browser/Audience/Director/Editor/Critic + VlmAnnotator
+        perception/                                           # cheap signals: faces, sharpness, NSFW
+        pipeline/                                             # EventSegmenter, EventSelector, Recall, MontageBuilder, …
+        render/                                               # ffmpeg-kit shot/composite renderers
+        runtime/                                              # PowerPacer, VlogPilotModelRegistry
+        schemas/                                              # @Serializable Asset/Perception/VlmTags/Timeline/…
+        worker/                                               # PipelineOrchestrator + WorkManager Worker + breadcrumbs
+  pc-pilot/                                                    # Python reference (server-side parity, debugging)
+  README.md                                                    # this file
 ```
 
-## Local changes vs upstream
+## Local changes vs upstream gallery
 
-- `android/gradle/libs.versions.toml`: bumped `litertlm` from `0.10.0` → `0.11.0` (released 2026-05-05). v0.11.0 enables Multi-Token Prediction (MTP) for Gemma 4, claimed >2× decode speed on mobile GPUs.
-- `android/app/.../ui/llmchat/LlmChatModelHelper.kt` and `ui/common/ModelPageAppBar.kt`: **bug fix** — upstream gallery hardcodes a local `supportsSpeculativeDecoding = false` stub that (a) strips the MTP toggle from the chat config dialog, and (b) silently disables MTP at runtime even if a model declares the capability. Patched to read from `model.capabilityToTaskTypes` instead.
+- **VlogPilot module under `customtasks/vlogpilot/`** is original to this fork (not in upstream).
+- `android/gradle/libs.versions.toml`: bumped `litertlm` `0.10.0` → `0.11.0` (released 2026-05-05). v0.11.0 enables Multi-Token Prediction (MTP) for Gemma 4, >2× decode on mobile GPUs.
+- `android/app/.../ui/llmchat/LlmChatModelHelper.kt`, `ui/common/ModelPageAppBar.kt`: **bug fix** — upstream hardcodes a local `supportsSpeculativeDecoding = false` stub that strips the MTP toggle from the import dialog and silently disables MTP even when a model declares the capability. Patched to read `model.capabilityToTaskTypes` instead.
+- `ui/navigation/GalleryNavGraph.kt`: app launches directly into VlogPilot (`ROUTE_VLOGPILOT`); the gallery side-drawer is reachable but not the home screen.
 
 ## Prerequisites
 
@@ -101,7 +115,7 @@ Expected on Dimensity 9400 + GPU + MTP: 40–60 tok/s decode (extrapolating from
 
 ## Troubleshooting
 
-### Tail relevant logcat during a chat session
+### Tail relevant logcat during a pipeline run
 
 ```powershell
 adb logcat -c                                                        # clear
@@ -149,50 +163,99 @@ Use this only if you want the in-app HF login + auto-download flow to work end-t
    - `android/app/build.gradle.kts` (`manifestPlaceholders["appAuthRedirectScheme"]`)
 3. Open `android/` in Android Studio, sync, Run.
 
-## Trim plan (post-validation)
+## VlogPilot architecture
 
-Once Gemma 4 E2B-IT runs at expected speed on the X200 Pro, here are the concrete deletion targets ordered roughly by ROI (size × independence). Each item is a self-contained surgery — do them one at a time, build between, commit.
+The pipeline is one `WorkManager` `CoroutineWorker` (`VlogPipelineWorker`) hosting a `PipelineOrchestrator` that drives 7 stages. All state writes go to `filesDir/` so observers (a CLI debugger, the in-app Process tab, or a unit test) can replay any run.
 
-### Tier 1: easy & high-impact
+```
+PhotoIngest ──► EventSegmenter ──► EventSelector  (rank by content, not recency)
+                                       │
+                                       ▼
+                       (cheap perception: faces / sharpness / NSFW
+                        — no LLM, parallelizable, JSON-cached)
+                                       │
+                                       ▼
+                            Gemma 4 E2B-IT boots once
+                                       │
+                                       ▼
+                          VlmAnnotator per asset
+                          (scene / subjects / action / mood / salient
+                           + per-video best_moment_index)
+                                       │
+                                       ▼
+                       For each top-N event, runEvent():
+                         Browser  → EventMemory       (montage VLM call)
+                         Audience → AudienceBrief
+                         Director → DirectorBrief + shot blueprint
+                         Editor   → Timeline v1       (recall + per-shot VLM curate)
+                         Critic   → Critique          (up to 2 iterations)
+                         Render   → MP4 via ffmpeg-kit (hw H.264 when available)
+```
 
-**Custom tasks we don't need** (`android/app/src/main/java/com/google/ai/edge/gallery/customtasks/`):
-- `agentchat/` — Agent Skills + Skill Manager (large, ~30 files)
-- `tinygarden/` — Tiny Garden task
-- `mobileactions/` — Mobile Actions task
-- `examplecustomtask/` — example only
+Key design points:
 
-After deleting these dirs, also remove their registrations in `customtasks/CustomTasksRegistry.kt` (or wherever active tasks are listed) and any references in `data/Tasks.kt`.
+- **Method extraction is load-bearing**, not cosmetic. Inlined, `PipelineOrchestrator.run()`'s coroutine state machine exceeds ART's 64K bytecode limit and the resume-from-saved-label dispatch breaks (every progress suspension restarts run() from the top, looping forever). Per-event body lives in `runEvent()`; annotation pass lives in `runAnnotationPass()`. **If you add another pass, keep it in its own suspend function.**
+- **Caching is per-asset, two-tier**: fast perception JSON in `filesDir/perception_cache/<assetId>.json`; the VLM tags get patched into the same file once Gemma annotates. A second run over the same album skips both.
+- **Event selection is content-scored**, not recency-only — see `EventSelector.kt`. valueScore = log(asset_count) + media (videos × seconds) + story (faces, scene diversity) + travel (GPS spread, outdoor tags) + small recency tiebreaker. The zoo trip with 50 photos and 3 hours of GPS spread beats the 5-photo coffee-shop selfie session even if newer.
+- **Per-VLM-call timeout** (90s, in `AgentRuntime.ask`): a stuck Gemma call returns the partial text instead of hanging the worker forever.
 
-**Built-in tasks beyond chat** — in `data/Tasks.kt` and `data/BuiltInTaskId.kt`, drop:
-- `LLM_ASK_IMAGE` and its UI under `ui/llmaskimage/` (if exists; otherwise inside `ui/llmchat/` shared)
-- `LLM_ASK_AUDIO` and its UI
-- `LLM_PROMPT_LAB` and `ui/llmpromptlab/`
-- `IMAGE_GENERATION`, `IMAGE_CLASSIFICATION` — if present (TFLite-based, not LLM)
+## Observability — debugging on device without logcat
 
-**Skills system** — `skills/` folder at repo root (allowlist JSONs etc.) and `data/SkillAllowlist.kt`.
+Vivo OriginOS (and similar OEMs) flood logcat from `HWUI`/`SurfaceComposerClient` fast enough to overwrite the 4 MB ring buffer in ~7 minutes, drowning `Log.d` entries. To survive that, every run writes to disk:
 
-### Tier 2: dependency removals (in `app/build.gradle.kts`)
+| File (under `/data/data/com.google.aiedge.gallery/files/`) | Content |
+|---|---|
+| `_state.txt` | Single line: `<unix_millis>\t<stage>\t<detail>` — current pipeline state |
+| `_state_history.jsonl` | Append-only trail of every PipelineProgress event |
+| `_state_fatal.txt` | Stack trace if `run()` throws above the per-event catch |
+| `agent_log/agent.jsonl` | Per-LLM-call timing + outcome (`ok` / `timeout` / `error:Foo`) |
+| `decisions/<eventId>/*.json` | EventMemory / AudienceBrief / DirectorBrief / Timeline / Critique / perf |
+| `perception_cache/<assetId>.json` | Per-asset Perception (cheap signals + VLM tags) |
+| `candidates/<eventId>.mp4` | Final rendered vlog |
 
-After deleting feature code, drop these dependencies (delete the lines, sync gradle, fix any remaining references):
-- `libs.tflite` / `libs.tflite.gpu` / `libs.tflite.support` — non-LLM ML
-- `libs.camerax.*` (4 lines) — only used for image input
-- `libs.firebase.bom` / `libs.firebase.analytics` / `libs.firebase.messaging` + remove `firebaseAnalytics` references in `DownloadRepository.kt`, `GalleryEvent.kt`
-- `libs.mlkit.genai.prompt` — ML Kit prompt
-- `libs.openid.appauth` — only used for HF OAuth, irrelevant when sideloading
-- `libs.play.services.oss.licenses` + `libs.plugins.oss.licenses` — OSS license screen
+Read any of them via:
+```powershell
+adb shell run-as com.google.aiedge.gallery cat files/_state.txt
+adb shell run-as com.google.aiedge.gallery cat files/_state_history.jsonl
+adb shell run-as com.google.aiedge.gallery cat files/agent_log/agent.jsonl
+```
 
-Also remove the `google-services` plugin and Firebase manifest entries in `AndroidManifest.xml` (`com.google.firebase.messaging.default_notification_channel_id`, the firebase MESSAGING_EVENT receiver).
+Or stream live (without sleep-polling on Windows):
+```bash
+while true; do
+  adb shell run-as com.google.aiedge.gallery cat files/_state.txt
+  echo
+  sleep 2
+done
+```
 
-### Tier 3: runtime trimming
+If you have unrestricted logcat (you can verify with `adb logcat -d -t 5` returning *anything* tagged `PipelineOrchestrator`), bump the buffer first to keep our `Log.d` entries from being flushed by HWUI:
+```
+adb logcat -G 16M
+adb logcat -v threadtime PipelineOrchestrator:D AgentRuntime:D EditorAgent:D *:S
+```
 
-- `runtime/aicore/AICoreModelHelper.kt` — AICore (Gemini Nano via Android System Intelligence) path. We only use the `litert_lm` runtime, so delete this and the `RuntimeType.AICORE` branch in `runtime/ModelHelperExt.kt`.
-- HF OAuth + download flow: `data/DownloadRepository.kt`, `worker/DownloadWorker.kt`, `common/ProjectConfig.kt` (the OAuth bit), and the entire HF login UI under `ui/auth/` if it exists. Replace the model manager UI to only support import.
+## VlogPilot user flow
 
-### Tier 4: ID / branding (do last, after everything else stable)
+1. Open the app (lands directly on the VlogPilot screen, not the gallery home).
+2. Tap **生成** (Generate). Permission prompt for `READ_MEDIA_IMAGES` / `READ_MEDIA_VIDEO` if not yet granted.
+3. Watch the Process tab. Stages: download → ingest → perceive → annotate → event_start → browse / audience / director / editor / critic / render → event_done.
+4. When `all_done` lands, MP4 candidates appear in the Results tab. Tap any one to play inline.
 
-- `applicationId` in `app/build.gradle.kts` — change from `com.google.aiedge.gallery` to your own. **WARNING**: this changes the app's data dir, so any imported model on the device becomes invisible. Plan to re-import after this change. Same goes for `namespace`.
-- App icon, name, splash screen
-- Strings under `app/src/main/res/values/strings.xml`
+Cancel any time via the **取消** button (calls `WorkManager.cancelUniqueWork`).
+
+## Future cleanup (does NOT block VlogPilot working)
+
+This fork still carries upstream gallery code paths VlogPilot doesn't use. They cost APK size + build time but aren't currently broken; cleanup is an APK-size optimization, not a correctness need.
+
+- `customtasks/{agentchat,tinygarden,mobileactions,examplecustomtask}/` — other tasks the gallery shipped, dead in our app
+- `ui/{llmaskimage,llmpromptlab,auth}/` — non-VlogPilot UIs
+- `data/SkillAllowlist.kt` + `skills/` directory at repo root — Skills system
+- `runtime/aicore/AICoreModelHelper.kt` — AICore (Gemini Nano via Android System Intelligence); we only use `litert_lm`
+- HF OAuth flow (`common/ProjectConfig.kt`'s OAuth bits, `worker/DownloadWorker.kt` HF parts) — VlogPilot reuses the gallery's local-file import, not OAuth download
+- `app/build.gradle.kts` deps that fall out: `libs.tflite*`, `libs.camerax.*`, `libs.firebase.*`, `libs.openid.appauth`, `libs.play.services.oss.licenses`, the `google-services` plugin
+
+Don't do this until VlogPilot is locked in. Each removal needs a build + smoke test.
 
 ## Upstream reference
 
