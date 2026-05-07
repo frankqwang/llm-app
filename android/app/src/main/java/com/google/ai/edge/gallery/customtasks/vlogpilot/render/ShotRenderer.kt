@@ -30,8 +30,8 @@ object ShotRenderer {
   private const val OUT_W = 1080
   private const val OUT_H = 1920
   private const val FPS = 30
-  private const val MAX_SLOWMO_NORMAL = 1.5f
-  private const val MAX_SLOWMO_HIGHFPS = 2.5f
+  private const val MAX_SLOWMO_NORMAL = 1.15f
+  private const val MAX_SLOWMO_HIGHFPS = 1.75f
   private const val HIGHFPS_THRESHOLD = 48f
 
   // Video encoder is picked at runtime by EncoderProbe — prefers
@@ -76,9 +76,9 @@ object ShotRenderer {
   private fun imageCmd(input: String, output: String, spec: ShotSpec, fontPath: String?): String {
     val dur = spec.durationSec
     val kbZoomExpr = when (spec.kenBurns) {
-      "in" -> "z='min(zoom+0.0015,1.18)'"
-      "out" -> "z='if(eq(on,0),1.18,max(zoom-0.0015,1.0))'"
-      else -> "z=1.06"
+      "in" -> "z='min(zoom+0.0007,1.08)'"
+      "out" -> "z='if(eq(on,0),1.08,max(zoom-0.0007,1.0))'"
+      else -> "z=1.025"
     }
     val zoompan = "zoompan=$kbZoomExpr:d=${(dur * FPS).toInt()}:s=${OUT_W}x${OUT_H}:fps=$FPS"
     val grade = ColorGradeFilter.forGrade(spec.colorGrade).let { if (it.isEmpty()) "" else ",$it" }
@@ -112,7 +112,7 @@ object ShotRenderer {
                  else "fps=$FPS"
     // 9:16 blurred-bg compose: split, blur+scale to 1080x1920, scale fg to fit, overlay center.
     val blurredCompose = "split[bg][fg];" +
-      "[bg]scale=$OUT_W:$OUT_H:force_original_aspect_ratio=increase,crop=$OUT_W:$OUT_H,boxblur=40:1[bg2];" +
+      "[bg]scale=$OUT_W:$OUT_H:force_original_aspect_ratio=increase,crop=$OUT_W:$OUT_H,boxblur=24:1[bg2];" +
       "[fg]scale=$OUT_W:$OUT_H:force_original_aspect_ratio=decrease[fg2];" +
       "[bg2][fg2]overlay=(W-w)/2:(H-h)/2"
     val grade = ColorGradeFilter.forGrade(spec.colorGrade).let { if (it.isEmpty()) "" else ",$it" }

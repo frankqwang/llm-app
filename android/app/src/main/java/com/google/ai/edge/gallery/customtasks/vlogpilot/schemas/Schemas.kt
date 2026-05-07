@@ -65,6 +65,16 @@ data class VlmTags(
 )
 
 @Serializable
+data class VideoInsight(
+  val frameTimestampsSec: List<Float> = emptyList(), // 1-based frame index -> timestamp in source video
+  val summary: String = "",
+  val actionArc: String = "",
+  val bestMomentIndex: Int = 0,                      // 1-based index in the VLM frame sheet
+  val bestMomentSec: Float = 0f,
+  val badMomentIndices: List<Int> = emptyList(),     // 1-based indices to avoid when trimming
+)
+
+@Serializable
 data class Perception(
   val assetId: String,
   val isJunk: Boolean = false,
@@ -75,6 +85,7 @@ data class Perception(
   val nsfwScore: Float = 0f,
   /** VLM-produced tags. Empty (scene.isBlank()) = needs annotation pass. */
   val vlmTags: VlmTags = VlmTags(),
+  val videoInsight: VideoInsight = VideoInsight(),
   // video-only
   val sceneCuts: List<Float> = emptyList(), // seconds where scene changes
   val fps: Float = 0f,

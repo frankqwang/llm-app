@@ -13,5 +13,14 @@ Thumbs.db
 *.pt
 models/
 
+# VlogPilot / pc-pilot local run outputs (decisions, timelines, rendered mp4s, logs)
+.run*
+
 # Third-party repos cloned at root (not part of this project, see pc-pilot/README.md)
 ACE-Step-1.5/
+
+# Per-iteration UI dumps + screenshots from device automation
+.tmp_*.xml
+.ui*.xml
+.screen.png
+.sample_*.json

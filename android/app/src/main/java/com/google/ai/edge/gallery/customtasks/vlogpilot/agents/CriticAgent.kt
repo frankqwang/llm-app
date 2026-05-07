@@ -1,13 +1,15 @@
 /*
  * Copyright 2026 The pc-pilot v3 authors
  *
- * step6_critic. Reads a v1 timeline + DirectorBrief + EventMemory; emits a
- * Critique whose `revisedRequests` the orchestrator can replay through the
- * editor to swap individual shots. We cap to 2 critic loops so a divergent
- * model doesn't infinitely re-cut.
+ * step6_critic. Reviews a rough timeline with both text context and a visual
+ * storyboard, then emits revised shot requests that the orchestrator can replay
+ * through the editor. We cap loops in PipelineOrchestrator.
  */
 package com.google.ai.edge.gallery.customtasks.vlogpilot.agents
 
+import android.content.Context
+import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.TimelineStoryboardBuilder
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Critique
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.DirectorBrief
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.EventMemory
@@ -24,7 +26,10 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
-class CriticAgent(private val agent: AgentRuntime) {
+class CriticAgent(
+  private val context: Context,
+  private val agent: AgentRuntime,
+) {
   private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
   suspend fun review(
@@ -32,28 +37,43 @@ class CriticAgent(private val agent: AgentRuntime) {
     timeline: Timeline,
     director: DirectorBrief,
     memory: EventMemory,
+    assets: Map<String, Asset>,
   ): Critique {
-    if (looksGoodEnough(timeline, director)) {
-      return Critique(iteration, listOf("v1 already meets the bar — skipping critic"), emptyList())
-    }
+    if (timeline.shots.isEmpty()) return Critique(iteration, listOf("timeline is empty"), emptyList())
+
+    val storyboard = TimelineStoryboardBuilder.build(context, timeline, assets)
+    val cheapChecks = if (looksGoodEnough(timeline, director)) "pass" else "needs_attention"
     val timelineSummary = timeline.shots.joinToString("\n") { s ->
-      "  #${s.order} [${s.mediaType.name.lowercase()}] dur=${"%.1f".format(s.durationSec)}s caption=\"${s.caption}\" — ${s.rationale.take(40)}"
+      val trim = s.videoTrim?.let { " trim=${"%.1f".format(it.startSec)}-${"%.1f".format(it.endSec)}s" }.orEmpty()
+      "  #${s.order} [${s.mediaType.name.lowercase()}] dur=${"%.1f".format(s.durationSec)}s$trim caption=\"${s.caption}\" - ${s.rationale.take(60)}"
     }
     val userMsg = """
 DirectorBrief.title=${director.title}; tone=${director.tone}; target_duration=${director.targetDurationSec}
-narrative_arc: ${director.narrativeArc.joinToString(" → ")}
+narrative_arc: ${director.narrativeArc.joinToString(" -> ")}
+cheap_checks: $cheapChecks
 
-EventMemory.storyline: ${memory.storylineSummary.take(120)}
+EventMemory.storyline: ${memory.storylineSummary.take(160)}
 
 Timeline v$iteration shots:
 $timelineSummary
 
-请审片，输出 Critique JSON。
+The attached storyboard shows the selected shots in order; the badge number matches #order.
+Review both the text timeline and the storyboard. Focus on visual repetition, weak opening hook,
+weak climax, video trims that miss the action, pacing monotony, and whether the ending resolves.
+Return Critique JSON only.
 """.trimIndent()
-    val raw = agent.ask(systemPrompt = PromptStrings.CRITIC_SYSTEM, userText = userMsg)
-    // Gemma 4 E2B will occasionally emit malformed JSON for the critic schema
-    // (missing close-quote on a key, etc.). Treat any parse failure as "no
-    // critique available" so the event still ships v1 of the timeline.
+
+    val raw = try {
+      agent.ask(
+        systemPrompt = PromptStrings.CRITIC_SYSTEM,
+        userText = userMsg,
+        images = listOfNotNull(storyboard),
+        label = "critic_visual",
+      )
+    } finally {
+      storyboard?.recycle()
+    }
+
     val obj = try {
       JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject
     } catch (_: Throwable) {
@@ -82,7 +102,6 @@ $timelineSummary
     val total = timeline.shots.sumOf { it.durationSec.toDouble() }.toFloat()
     val ratio = total / director.targetDurationSec
     if (ratio < 0.65f || ratio > 1.25f) return false
-    // No two adjacent shots from the same asset
     for (i in 1 until timeline.shots.size) {
       if (timeline.shots[i].assetId == timeline.shots[i - 1].assetId) return false
     }

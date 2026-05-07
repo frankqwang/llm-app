@@ -31,10 +31,10 @@ object CaptionFilter {
       append("drawtext=$font:")
       append("text='$escaped'")
       append(":fontcolor=black")
-      append(":fontsize=h*0.046")
-      append(":box=1:boxcolor=white@0.92:boxborderw=24")
+      append(":fontsize=h*0.040")
+      append(":box=1:boxcolor=white@0.88:boxborderw=18")
       append(":x=(w-text_w)/2")
-      append(":y='if(lt(t,$enterEnd),h-(h-h*0.78)*(t/$enterEnd),h*0.78)'")
+      append(":y='if(lt(t,$enterEnd),h-(h-h*0.80)*(t/$enterEnd),h*0.80)'")
       append(":alpha='if(lt(t,$exitStart),1,max(0,1-(t-$exitStart)/0.3))'")
     }
   }

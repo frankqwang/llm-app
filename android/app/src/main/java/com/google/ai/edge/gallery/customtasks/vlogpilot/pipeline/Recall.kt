@@ -20,11 +20,18 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Perception
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRequest
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRole
-import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.VlmTags
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.VideoTrim
+import kotlin.math.abs
 
 object Recall {
 
-  data class Candidate(val asset: Asset, val perception: Perception, val score: Float)
+  data class Candidate(
+    val asset: Asset,
+    val perception: Perception,
+    val score: Float,
+    val videoTrim: VideoTrim? = null,
+    val windowReason: String = "",
+  )
 
   fun topK(
     request: ShotRequest,
@@ -53,9 +60,9 @@ object Recall {
       .asSequence()
       .filter { it.id !in excludedAssetIds }
       .filter { perceptions[it.id]?.isJunk != true }
-      .map { asset ->
-        val perc = perceptions[asset.id] ?: return@map Candidate(asset, blank(asset.id), 0f)
-        val tagOverlap = vlmOverlap(perc.vlmTags, requestTokens)
+      .flatMap { asset ->
+        val perc = perceptions[asset.id] ?: return@flatMap sequenceOf(Candidate(asset, blank(asset.id), 0f))
+        val tagOverlap = semanticOverlap(perc, requestTokens)
         val timeDelta = kotlin.math.abs(asset.takenEpochMs - targetMs)
         val timeFit = (1f - (timeDelta.toFloat() / windowMs.coerceAtLeast(1L).toFloat())).coerceIn(0f, 1f)
         val durationFit = durationCompat(asset, request.durationSec)
@@ -71,7 +78,7 @@ object Recall {
           perc.sharpness * 0.07f +
           faceBonus +
           if (perc.vlmTags.scene.isBlank()) -0.10f else 0f  // soft penalty: VLM didn't tag this
-        Candidate(asset, perc, score)
+        expandWindows(asset, perc, request, score).asSequence()
       }
       .sortedByDescending { it.score }
       .take(k)
@@ -82,13 +89,16 @@ object Recall {
 
   /**
    * Token-overlap score between [requestTokens] (from director's
-   * visual_requirements + mood) and the asset's VlmTags. Range [0, 1].
+   * visual_requirements + mood) and the asset's VLM semantic fields. Range [0, 1].
    * Returns 0 when tags are empty (annotation pass didn't run / failed).
    */
-  private fun vlmOverlap(tags: VlmTags, requestTokens: Set<String>): Float {
+  private fun semanticOverlap(perception: Perception, requestTokens: Set<String>): Float {
     if (requestTokens.isEmpty()) return 0f
+    val tags = perception.vlmTags
+    val video = perception.videoInsight
     if (tags.scene.isBlank() && tags.subjects.isEmpty() &&
-        tags.action.isBlank() && tags.mood.isBlank() && tags.salient.isBlank()) {
+        tags.action.isBlank() && tags.mood.isBlank() && tags.salient.isBlank() &&
+        video.summary.isBlank() && video.actionArc.isBlank()) {
       return 0f
     }
     val tagText = buildString {
@@ -98,6 +108,9 @@ object Recall {
       append(tags.mood); append(' ')
       append(tags.timeFeel); append(' ')
       append(tags.salient)
+      append(' ')
+      append(video.summary); append(' ')
+      append(video.actionArc)
     }
     val tagTokens = tokenize(tagText)
     if (tagTokens.isEmpty()) return 0f
@@ -135,11 +148,12 @@ object Recall {
       .mapNotNull { asset ->
         val perc = perceptions[asset.id] ?: return@mapNotNull null
         if (perc.isJunk) return@mapNotNull null
-        val score = vlmOverlap(perc.vlmTags, requestTokens) * 0.45f +
+        val score = semanticOverlap(perc, requestTokens) * 0.45f +
           perc.sharpness * 0.30f +
           durationCompat(asset, request.durationSec) * 0.25f
-        Candidate(asset, perc, score)
+        expandWindows(asset, perc, request, score)
       }
+      .flatten()
       .sortedByDescending { it.score }
       .take(k)
       .toList()
@@ -162,6 +176,81 @@ object Recall {
       ratio >= 0.4f -> 0.6f                         // <=2.5x slow-mo (highfps only)
       else -> 0.2f
     }
+  }
+
+  private fun expandWindows(
+    asset: Asset,
+    perception: Perception,
+    request: ShotRequest,
+    baseScore: Float,
+  ): List<Candidate> {
+    if (asset.mediaType == MediaType.IMAGE || asset.durationMs <= 0) {
+      return listOf(Candidate(asset, perception, baseScore))
+    }
+    val durSec = asset.durationMs / 1000f
+    val want = request.durationSec.coerceAtMost(durSec).coerceAtLeast(0.4f)
+    val maxStart = (durSec - want).coerceAtLeast(0f)
+    if (maxStart <= 0f) return listOf(Candidate(asset, perception, baseScore, VideoTrim(0f, durSec), "full clip"))
+
+    val starts = mutableListOf<Pair<Float, String>>()
+    fun addCentered(tSec: Float, reason: String) {
+      starts += (tSec - want / 2f).coerceIn(0f, maxStart) to reason
+    }
+    val insight = perception.videoInsight
+    if (insight.bestMomentSec > 0f) addCentered(insight.bestMomentSec, "vlm best moment")
+    else if (insight.bestMomentIndex > 0) insight.frameTimestampsSec.getOrNull(insight.bestMomentIndex - 1)?.let {
+      addCentered(it, "vlm best frame")
+    }
+    insight.frameTimestampsSec.forEachIndexed { i, sec ->
+      starts += (sec - want / 2f).coerceIn(0f, maxStart) to "sample #${i + 1}"
+    }
+    starts += (maxStart * roleTarget(request.role)).coerceIn(0f, maxStart) to "role position"
+    perception.sceneCuts.forEach { cut ->
+      starts += (cut + 0.15f).coerceIn(0f, maxStart) to "after scene cut"
+      starts += (cut - want - 0.15f).coerceIn(0f, maxStart) to "before scene cut"
+    }
+
+    val badMoments = insight.badMomentIndices.mapNotNull { insight.frameTimestampsSec.getOrNull(it - 1) }
+    return starts
+      .ifEmpty { listOf((maxStart / 2f) to "center") }
+      .map { ((it.first * 10f).toInt() / 10f).coerceIn(0f, maxStart) to it.second }
+      .distinctBy { it.first }
+      .map { (start, reason) ->
+        val end = (start + want).coerceAtMost(durSec)
+        val center = (start + end) / 2f
+        val semanticBonus = bestMomentSec(perception)?.let { best ->
+          if (best in start..end) 0.16f else (0.08f - abs(best - center) / durSec * 0.12f).coerceAtLeast(0f)
+        } ?: 0f
+        val positionNorm = center / durSec.coerceAtLeast(0.1f)
+        val positionBonus = (1f - abs(positionNorm - roleTarget(request.role)) / 0.6f).coerceIn(0f, 1f) * 0.08f
+        val badPenalty = badMoments.count { it in start..end } * 0.12f
+        val cutPenalty = perception.sceneCuts.count { it in (start + want * 0.2f)..(end - want * 0.2f) } * 0.06f
+        Candidate(
+          asset = asset,
+          perception = perception,
+          score = baseScore + semanticBonus + positionBonus - badPenalty - cutPenalty,
+          videoTrim = VideoTrim(start, end),
+          windowReason = reason,
+        )
+      }
+      .sortedByDescending { it.score }
+      .take(3)
+  }
+
+  private fun bestMomentSec(perception: Perception): Float? {
+    if (perception.videoInsight.bestMomentSec > 0f) return perception.videoInsight.bestMomentSec
+    val idx = perception.videoInsight.bestMomentIndex.takeIf { it > 0 } ?: return null
+    return perception.videoInsight.frameTimestampsSec.getOrNull(idx - 1)
+  }
+
+  private fun roleTarget(role: ShotRole): Float = when (role) {
+    ShotRole.OPENING -> 0.12f
+    ShotRole.ESTABLISHING -> 0.16f
+    ShotRole.PORTRAIT -> 0.45f
+    ShotRole.ACTION -> 0.56f
+    ShotRole.CLIMAX -> 0.70f
+    ShotRole.TRANSITION -> 0.50f
+    ShotRole.CLOSING -> 0.84f
   }
 
   /**

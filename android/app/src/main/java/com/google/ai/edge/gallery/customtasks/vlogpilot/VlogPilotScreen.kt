@@ -489,6 +489,7 @@ private fun AssetManagementCard(d: EventDecisions) {
 private fun AssetAnnotationRow(asset: Asset, perception: Perception?, usedOrders: List<Int>) {
   var expanded by remember { mutableStateOf(false) }
   val tags = perception?.vlmTags
+  val videoInsight = perception?.videoInsight
   Surface(
     modifier = Modifier
       .fillMaxWidth()
@@ -520,7 +521,7 @@ private fun AssetAnnotationRow(asset: Asset, perception: Perception?, usedOrders
             color = MaterialTheme.colorScheme.onSurfaceVariant,
           )
           Text(
-            annotationSummary(tags),
+            annotationSummary(tags, videoInsight?.summary),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = if (expanded) 4 else 2,
@@ -529,6 +530,7 @@ private fun AssetAnnotationRow(asset: Asset, perception: Perception?, usedOrders
           LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             item { InfoPill(if (tags?.scene?.isNotBlank() == true) "已标注" else "未标注", Icons.Outlined.Search, tags?.scene?.isNotBlank() == true) }
             if (usedOrders.isNotEmpty()) item { InfoPill("入片 #${usedOrders.joinToString(",")}", Icons.Outlined.CheckCircle, true) }
+            if ((videoInsight?.bestMomentSec ?: 0f) > 0f) item { InfoPill("best ${"%.1fs".format(Locale.US, videoInsight!!.bestMomentSec)}", Icons.Outlined.PlayArrow, true) }
             item { InfoPill("face ${perception?.faces?.size ?: 0}", Icons.Outlined.Person) }
           }
         }
@@ -542,6 +544,7 @@ private fun AssetAnnotationRow(asset: Asset, perception: Perception?, usedOrders
           KeyValue("过滤", if (p.isJunk) "junk: ${p.junkReason}" else "可用")
           if (p.sceneCuts.isNotEmpty()) KeyValue("切点", p.sceneCuts.take(8).joinToString(", ") { "%.1fs".format(Locale.US, it) })
           AnnotationKeyValues(p.vlmTags)
+          VideoInsightKeyValues(p)
         } ?: Text(
           "还没有 perception_cache 记录。通常是该素材还没进入感知/标注阶段，或缓存被清理。",
           style = MaterialTheme.typography.bodySmall,
@@ -565,6 +568,17 @@ private fun AnnotationKeyValues(tags: VlmTags) {
   KeyValue("time", tags.timeFeel)
   KeyValue("salient", tags.salient)
   KeyValue("role", tags.narrativeRoleHint)
+}
+
+@Composable
+private fun VideoInsightKeyValues(perception: Perception) {
+  val insight = perception.videoInsight
+  if (insight.frameTimestampsSec.isEmpty() && insight.summary.isBlank()) return
+  KeyValue("video summary", insight.summary)
+  KeyValue("action arc", insight.actionArc)
+  if (insight.bestMomentSec > 0f) KeyValue("best moment", "%.1fs (#%d)".format(Locale.US, insight.bestMomentSec, insight.bestMomentIndex))
+  if (insight.badMomentIndices.isNotEmpty()) KeyValue("avoid frames", insight.badMomentIndices.joinToString(", "))
+  if (insight.frameTimestampsSec.isNotEmpty()) KeyValue("sample frames", insight.frameTimestampsSec.joinToString(", ") { "%.1fs".format(Locale.US, it) })
 }
 
 @Composable
@@ -1167,9 +1181,15 @@ private data class PromptSpec(
 private fun promptSpecs(): List<PromptSpec> = listOf(
   PromptSpec(
     title = "VLM 单素材标注",
-    subtitle = "每张缩略图 -> VlmTags",
+    subtitle = "图片缩略图 -> VlmTags",
     systemPrompt = VlmAnnotator.SYSTEM_PROMPT,
     userTemplate = "媒体类型: <image/video/live_photo>。请输出 VlmTags JSON。",
+  ),
+  PromptSpec(
+    title = "VLM 视频多帧标注",
+    subtitle = "6 帧视频网格 -> VlmTags + VideoInsight",
+    systemPrompt = VlmAnnotator.VIDEO_SYSTEM_PROMPT,
+    userTemplate = "媒体类型: <video/live_photo>。帧编号和时间戳: 1=0.4s, 2=1.2s, ...。请输出 Video VlmTags JSON。",
   ),
   PromptSpec(
     title = "Browser / Contact Sheet",
@@ -1229,19 +1249,21 @@ previous_shot_summary: <previous_shot_summary>
   ),
   PromptSpec(
     title = "Critic",
-    subtitle = "粗剪 timeline -> 审片与修订请求",
+    subtitle = "粗剪 timeline + storyboard -> 视觉审片与修订请求",
     systemPrompt = PromptStrings.CRITIC_SYSTEM,
     userTemplate = """
 DirectorBrief.title=<title>; tone=<tone>; target_duration=<target_duration>
 narrative_arc: <arc>
+cheap_checks: <pass/needs_attention>
 
 EventMemory.storyline: <storyline>
 
 Timeline v<iteration> shots:
-  #1 [image/video] dur=<sec>s caption="<caption>" — <rationale>
+  #1 [image/video] dur=<sec>s trim=<start-end>s caption="<caption>" - <rationale>
   ...
 
-请审片，输出 Critique JSON。
+附一张 storyboard：每格对应一个 shot，左上角编号和 #order 一致。
+请同时检查文字时间线和 storyboard，输出 Critique JSON。
 """.trimIndent(),
   ),
 )
@@ -1291,7 +1313,7 @@ private fun assetMeta(asset: Asset): String {
   return "$type / $size$dur"
 }
 
-private fun annotationSummary(tags: VlmTags?): String {
+private fun annotationSummary(tags: VlmTags?, videoSummary: String? = null): String {
   if (tags == null) return "未读取到标注缓存"
   if (tags.scene.isBlank() && tags.subjects.isEmpty() && tags.action.isBlank() && tags.mood.isBlank()) {
     return "VLM 标签为空"
@@ -1302,5 +1324,6 @@ private fun annotationSummary(tags: VlmTags?): String {
     tags.action.takeIf { it.isNotBlank() },
     tags.mood.takeIf { it.isNotBlank() },
     tags.salient.takeIf { it.isNotBlank() },
+    videoSummary?.takeIf { it.isNotBlank() },
   ).joinToString(" · ")
 }

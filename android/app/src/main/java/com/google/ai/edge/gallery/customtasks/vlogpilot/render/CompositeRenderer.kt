@@ -31,18 +31,18 @@ object CompositeRenderer {
     TransitionKind.SMOOTHRIGHT to "smoothright",
   )
   private val XFADE_DUR = mapOf(
-    TransitionKind.CUT to 0.10f,
-    TransitionKind.FADE to 0.45f,
-    TransitionKind.CROSSFADE to 0.45f,
-    TransitionKind.FADEBLACK to 0.65f,
-    TransitionKind.FADEWHITE to 0.55f,
-    TransitionKind.SLIDELEFT to 0.45f,
-    TransitionKind.SLIDERIGHT to 0.45f,
-    TransitionKind.CIRCLEOPEN to 0.50f,
-    TransitionKind.CIRCLECLOSE to 0.50f,
-    TransitionKind.ZOOMIN to 0.50f,
-    TransitionKind.SMOOTHLEFT to 0.50f,
-    TransitionKind.SMOOTHRIGHT to 0.50f,
+    TransitionKind.CUT to 0.04f,
+    TransitionKind.FADE to 0.28f,
+    TransitionKind.CROSSFADE to 0.22f,
+    TransitionKind.FADEBLACK to 0.32f,
+    TransitionKind.FADEWHITE to 0.30f,
+    TransitionKind.SLIDELEFT to 0.28f,
+    TransitionKind.SLIDERIGHT to 0.28f,
+    TransitionKind.CIRCLEOPEN to 0.28f,
+    TransitionKind.CIRCLECLOSE to 0.28f,
+    TransitionKind.ZOOMIN to 0.28f,
+    TransitionKind.SMOOTHLEFT to 0.28f,
+    TransitionKind.SMOOTHRIGHT to 0.28f,
   )
 
   data class ShotInput(val path: String, val durationSec: Float, val transition: TransitionKind)
