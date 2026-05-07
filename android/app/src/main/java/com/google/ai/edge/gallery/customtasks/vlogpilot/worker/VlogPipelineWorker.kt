@@ -16,8 +16,7 @@ import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
-import com.google.ai.edge.gallery.customtasks.vlogpilot.VlogPilotTask
-import com.google.ai.edge.gallery.data.Model
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotModelRegistry
 
 class VlogPipelineWorker(
   appContext: Context,
@@ -26,7 +25,12 @@ class VlogPipelineWorker(
 
   override suspend fun doWork(): androidx.work.ListenableWorker.Result {
     setForeground(initialForegroundInfo())
-    val gemma = buildGemmaModel()
+    val gemma = VlogPilotModelRegistry.resolvedModel ?: run {
+      PipelineEventBus.publish(
+        PipelineProgress.Failed("No multimodal LLM available. Download Gemma 4 (or any image-capable LLM) first via the gallery's model manager.")
+      )
+      return androidx.work.ListenableWorker.Result.failure()
+    }
     val orch = PipelineOrchestrator(applicationContext, gemma)
     return try {
       orch.run(windowDays = 30) { progress ->
@@ -72,17 +76,6 @@ class VlogPipelineWorker(
       .setOnlyAlertOnce(true)
     return builder.build()
   }
-
-  private fun buildGemmaModel(): Model = Model(
-    name = "gemma-4-E2B-it",
-    displayName = "Gemma 4 E2B (multimodal)",
-    url = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
-    downloadFileName = "gemma-4-E2B-it.litertlm",
-    sizeInBytes = 2_590_000_000L,
-    version = "1",
-    isLlm = true,
-    bestForTaskIds = listOf(VlogPilotTask.TASK_ID),
-  )
 
   companion object {
     const val WORK_NAME = "vlog_pilot_pipeline"

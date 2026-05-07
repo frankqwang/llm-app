@@ -60,7 +60,10 @@ class VlogPilotTask @Inject constructor() : CustomTask {
   @Composable
   override fun MainScreen(data: Any) {
     val customTaskData = data as CustomTaskData
-    VlogPilotScreen(bottomPadding = customTaskData.bottomPadding)
+    VlogPilotScreen(
+      bottomPadding = customTaskData.bottomPadding,
+      modelManagerViewModel = customTaskData.modelManagerViewModel,
+    )
   }
 
   companion object {

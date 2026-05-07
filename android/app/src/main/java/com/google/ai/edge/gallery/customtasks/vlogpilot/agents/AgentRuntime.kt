@@ -13,6 +13,7 @@ import android.graphics.Bitmap
 import android.util.Log
 import com.google.ai.edge.gallery.data.Model
 import com.google.ai.edge.gallery.ui.llmchat.LlmChatModelHelper
+import com.google.ai.edge.gallery.ui.llmchat.LlmModelInstance
 import com.google.ai.edge.litertlm.Contents
 import java.io.Closeable
 import kotlin.coroutines.resume
@@ -23,11 +24,20 @@ class AgentRuntime(
   private val gemmaModel: Model,
 ) : Closeable {
 
-  @Volatile private var initialized = false
+  @Volatile private var ownedInit = false
 
-  /** Block until the engine is loaded; safe to call repeatedly. */
+  /**
+   * If the gallery already initialized this Model (e.g. user opened it from
+   * LLM Ask Image first), reuse the existing engine. Otherwise call
+   * [LlmChatModelHelper.initialize] ourselves and remember to clean it up in
+   * [close]. Idempotent.
+   */
   suspend fun ensureInitialized() = suspendCancellableCoroutine<Unit> { cont ->
-    if (initialized) { cont.resume(Unit); return@suspendCancellableCoroutine }
+    if (gemmaModel.instance is LlmModelInstance) {
+      Log.d(TAG, "Reusing existing engine for model '${gemmaModel.name}'")
+      if (cont.isActive) cont.resume(Unit)
+      return@suspendCancellableCoroutine
+    }
     LlmChatModelHelper.initialize(
       context = context,
       model = gemmaModel,
@@ -37,7 +47,7 @@ class AgentRuntime(
       systemInstruction = null,
       onDone = { error ->
         if (error.isEmpty()) {
-          initialized = true
+          ownedInit = true
           if (cont.isActive) cont.resume(Unit)
         } else {
           Log.e(TAG, "Engine init failed: $error")
@@ -57,7 +67,7 @@ class AgentRuntime(
     userText: String,
     images: List<Bitmap> = emptyList(),
   ): String = suspendCancellableCoroutine { cont ->
-    if (!initialized) { cont.resume(""); return@suspendCancellableCoroutine }
+    if (gemmaModel.instance !is LlmModelInstance) { cont.resume(""); return@suspendCancellableCoroutine }
     LlmChatModelHelper.resetConversation(
       model = gemmaModel,
       supportImage = images.isNotEmpty(),
@@ -82,20 +92,16 @@ class AgentRuntime(
     )
   }
 
+  /** Only releases the engine if WE created it; if the gallery owns it, hands-off. */
   override fun close() {
-    if (initialized) {
+    if (ownedInit) {
       try { LlmChatModelHelper.cleanUp(gemmaModel) {} } catch (_: Throwable) {}
-      initialized = false
+      ownedInit = false
     }
   }
 
   companion object {
     private const val TAG = "AgentRuntime"
     const val TASK_ID = "vlog_pilot"
-    const val GEMMA_MODEL_NAME = "gemma-4-E2B-it"
-    const val GEMMA_HF_URL =
-      "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm"
-    const val GEMMA_FILE_NAME = "gemma-4-E2B-it.litertlm"
-    const val GEMMA_SIZE_BYTES = 2_590_000_000L // ~2.59 GB
   }
 }

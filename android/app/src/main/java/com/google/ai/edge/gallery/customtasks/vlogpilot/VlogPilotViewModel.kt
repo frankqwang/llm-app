@@ -15,11 +15,13 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import com.google.ai.edge.gallery.customtasks.vlogpilot.ingest.PhotoIngest
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventSegmenter
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotModelRegistry
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineEventBus
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineProgress
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.VlogPipelineWorker
+import com.google.ai.edge.gallery.data.Model
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
@@ -68,7 +70,11 @@ class VlogPilotViewModel @Inject constructor(
     }
   }
 
-  fun runFullPipeline() {
+  fun runFullPipeline(model: Model) {
+    // The Worker can't easily inject Hilt singletons or look the Model up via task.models
+    // (that's an in-memory ViewModel state). Stash the resolved Model here, then the worker
+    // pulls it back. Single concurrent pipeline is enforced by enqueueUniqueWork+KEEP below.
+    VlogPilotModelRegistry.resolvedModel = model
     VlogPipelineWorker.ensureChannel(appContext)
     val req = OneTimeWorkRequestBuilder<VlogPipelineWorker>().build()
     WorkManager.getInstance(appContext)

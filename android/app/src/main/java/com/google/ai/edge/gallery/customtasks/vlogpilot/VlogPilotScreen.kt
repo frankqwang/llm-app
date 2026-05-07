@@ -39,6 +39,9 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
+import com.google.ai.edge.gallery.data.Model
+import com.google.ai.edge.gallery.data.ModelDownloadStatusType
+import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -46,10 +49,22 @@ import java.util.Locale
 @Composable
 fun VlogPilotScreen(
   bottomPadding: Dp,
+  modelManagerViewModel: ModelManagerViewModel,
   viewModel: VlogPilotViewModel = hiltViewModel(),
 ) {
   val state by viewModel.state.collectAsState()
+  val mmUiState by modelManagerViewModel.uiState.collectAsState()
   val context = LocalContext.current
+
+  // Pick the best already-downloaded multimodal LLM. Empty until user downloads one
+  // via any LLM task (Ask Image / Chat) — model files are shared across tasks.
+  val downloadedMultimodal: Model? = remember(mmUiState.modelDownloadStatus, mmUiState.tasks) {
+    val downloaded = modelManagerViewModel.getAllDownloadedModels()
+      .filter { it.llmSupportImage }
+    // Prefer Gemma 4 E2B (matches our prompt set), then any other image-capable LLM.
+    downloaded.firstOrNull { it.name.contains("gemma-4", ignoreCase = true) }
+      ?: downloaded.firstOrNull()
+  }
 
   val perms = remember {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -89,9 +104,18 @@ fun VlogPilotScreen(
       Text("Scan album (last 30 days)")
     }
 
-    if (state is PipelineState.Ready) {
+    Text(
+      text = if (downloadedMultimodal != null) {
+        "VLM ready: ${downloadedMultimodal.displayName.ifEmpty { downloadedMultimodal.name }}"
+      } else {
+        "VLM not downloaded — open the LLM Ask Image task and download Gemma 4 E2B (or any image-capable LLM) first."
+      },
+      style = MaterialTheme.typography.bodySmall,
+    )
+
+    if (state is PipelineState.Ready && downloadedMultimodal != null) {
       OutlinedButton(
-        onClick = { viewModel.runFullPipeline() },
+        onClick = { viewModel.runFullPipeline(downloadedMultimodal) },
         modifier = Modifier.fillMaxWidth(),
       ) { Text("Generate vlog candidates (full pipeline)") }
     }
