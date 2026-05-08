@@ -6,6 +6,8 @@ The 5-agent reasoning chain (Browser → Audience → Director → Editor → Cr
 
 Verified end-to-end on **vivo X200 Pro** (Dimensity 9400 + GPU + MTP). Two events / 12 assets / ~7 minutes wall-clock to produce two ~6 MB 1080×1920 MP4s; perception + annotation cache make subsequent runs much faster.
 
+For the engineering log of what changed and why between versions see [CHANGELOG.md](CHANGELOG.md). Project landmines and contributor notes live in [CLAUDE.md](CLAUDE.md).
+
 ## Layout
 
 ```
