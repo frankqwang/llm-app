@@ -15,6 +15,7 @@ import android.widget.MediaController
 import android.widget.VideoView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -25,10 +26,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -52,8 +55,6 @@ import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.Button
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -83,6 +84,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.PromptStrings
@@ -125,7 +127,11 @@ fun VlogPilotScreen(
   val runConfig by viewModel.runConfig.collectAsState()
   val eventSelection by viewModel.eventSelection.collectAsState()
   val context = LocalContext.current
-  var selectedTab by remember { mutableStateOf(VlogPilotTab.Results) }
+  var selectedTab by remember { mutableStateOf(VlogPilotTab.Stories) }
+  var selectedAdvancedTab by remember { mutableStateOf(VlogPilotAdvancedTab.Process) }
+  var selectedStoryCategory by remember { mutableStateOf(StoryBrowseCategory.Recommended) }
+  var selectedStorySort by remember { mutableStateOf(StorySortMode.Recommended) }
+  var selectedStoryId by remember { mutableStateOf<String?>(null) }
   var pendingPermissionAction by remember { mutableStateOf<(() -> Unit)?>(null) }
 
   val perms = remember {
@@ -173,6 +179,14 @@ fun VlogPilotScreen(
     }
   }
 
+  fun makeStory(eventId: String) {
+    requireAlbumPermission {
+      selectedModelOrReport()?.let { model ->
+        viewModel.runOnlyEvent(eventId, model)
+      }
+    }
+  }
+
   val running = state is PipelineState.Running || state is PipelineState.Scanning
   LazyColumn(
     modifier = modifier
@@ -183,124 +197,174 @@ fun VlogPilotScreen(
     verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
     item {
-      StudioStatusCard(
-        state = state,
-        decisions = decisions,
-        progress = progress,
-        runConfig = runConfig,
-        eventSelection = eventSelection,
-        running = running,
-        onRefreshClick = {
-          requireAlbumPermission {
-            selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
-          }
-        },
-        onRunClick = {
-          if (running) {
-            viewModel.cancelPipeline()
-          } else {
-            requireAlbumPermission { launchPipeline() }
-          }
-        },
-        onIntentSelect = viewModel::setIntent,
-        onPowerSelect = viewModel::setPowerProfile,
-      )
-    }
-
-    if (running) {
-      item {
-        LinearProgressIndicator(
-          modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(999.dp)),
-        )
-      }
-    }
-
-    item {
       WorkspaceTabs(selected = selectedTab, onSelect = { selectedTab = it })
     }
 
     val ready = state as? PipelineState.Ready
     when (selectedTab) {
-      VlogPilotTab.Results -> {
-        if (decisions.isEmpty()) {
-          item { EmptyProcessCard(state, "还没有生成结果", "完成生成后，这里只展示成片和最终时间线。") }
-        } else {
-          items(decisions, key = { "result-${it.eventId}" }) { decision ->
-            ResultEventCard(decision)
-          }
-        }
-      }
-
-      VlogPilotTab.Events -> {
+      VlogPilotTab.Stories -> {
         val manifest = eventSelection
-        if (manifest == null) {
-          item {
-            EmptyProcessCard(
+        when {
+          running -> item {
+            StoryProgressCard(
               state = state,
-              title = "还没有候选事件",
-              message = "点击刷新候选，只做轻量扫描和排序，不会启动 VLM 或渲染。",
+              progress = progress,
+              onCancel = viewModel::cancelPipeline,
             )
           }
-        } else {
+
+          manifest == null -> item {
+            StoryHeroCard(
+              state = state,
+              recentDecisions = decisions.take(2),
+              onStartClick = {
+                requireAlbumPermission {
+                  selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
+                }
+              },
+              onVideosClick = { selectedTab = VlogPilotTab.Videos },
+            )
+          }
+
+          else -> {
+            item {
+              StoryShelf(
+                manifest = manifest,
+                runConfig = runConfig,
+                selectedCategory = selectedStoryCategory,
+                selectedSort = selectedStorySort,
+                onCategorySelect = { selectedStoryCategory = it },
+                onSortSelect = { selectedStorySort = it },
+                onOpenStory = { selectedStoryId = it },
+                onStartClick = {
+                  requireAlbumPermission {
+                    selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
+                  }
+                },
+                onClearOnly = viewModel::clearOnlySelected,
+                onSelectStory = viewModel::onlyGenerateEvent,
+                onMakeStory = ::makeStory,
+              )
+            }
+          }
+        }
+      }
+
+      VlogPilotTab.Videos -> {
+        if (decisions.isEmpty()) {
           item {
-            EventSelectionHeader(
-              manifest = manifest,
-              runConfig = runConfig,
-              onClearOnly = viewModel::clearOnlySelected,
+            EmptyActionCard(
+              state = state,
+              title = "还没有视频",
+              message = "先去挑一组故事，我会帮你剪成一条回忆视频。",
+              actionLabel = "去挑故事",
+              onAction = { selectedTab = VlogPilotTab.Stories },
             )
           }
-          items(manifest.candidates, key = { "event-select-${it.eventId}" }) { candidate ->
-            EventCandidateCard(
-              candidate = candidate,
-              runConfig = runConfig,
-              onPin = viewModel::pinEvent,
-              onExclude = viewModel::excludeEvent,
-              onClearExcluded = viewModel::clearExcluded,
-              onOnly = viewModel::onlyGenerateEvent,
+        } else {
+          items(decisions, key = { "video-${it.eventId}" }) { decision ->
+            ResultEventCard(
+              d = decision,
               onRegenerate = viewModel::forceRegenerateEvent,
+              onChangeStory = { selectedTab = VlogPilotTab.Stories },
             )
           }
         }
       }
 
-      VlogPilotTab.Process -> {
-        if (decisions.isEmpty()) {
-          item { EmptyProcessCard(state, "还没有过程数据", "开始生成后，这里会逐步出现输入素材、Agent 输出和渲染状态。") }
-        } else {
-          items(decisions, key = { "process-${it.eventId}" }) { decision ->
-            EventDecisionCard(decision)
-          }
+      VlogPilotTab.Settings -> {
+        item {
+          SettingsCard(
+            runConfig = runConfig,
+            running = running,
+            onIntentSelect = viewModel::setIntent,
+            onPowerSelect = viewModel::setPowerProfile,
+          )
         }
       }
 
-      VlogPilotTab.Assets -> {
-        if (ready != null) {
-          item { AlbumPreviewCard(assets = ready.assets, events = ready.events) }
+      VlogPilotTab.Advanced -> {
+        item {
+          AdvancedTabPicker(selected = selectedAdvancedTab, onSelect = { selectedAdvancedTab = it })
         }
-        if (decisions.isEmpty()) {
-          item { EmptyProcessCard(state, "还没有素材清单", "事件开始处理后，这里会显示每张素材的感知分数和 VLM 标签。") }
-        } else {
-          items(decisions, key = { "assets-${it.eventId}" }) { decision ->
-            AssetManagementCard(decision)
+        when (selectedAdvancedTab) {
+          VlogPilotAdvancedTab.Process -> {
+            if (decisions.isEmpty()) {
+              item { EmptyProcessCard(state, "还没有技术过程", "开始生成后，这里会显示每一步 Agent 输出和渲染状态。") }
+            } else {
+              items(decisions, key = { "process-${it.eventId}" }) { decision ->
+                EventDecisionCard(decision)
+              }
+            }
+          }
+          VlogPilotAdvancedTab.Assets -> {
+            if (ready != null) {
+              item { AlbumPreviewCard(assets = ready.assets, events = ready.events) }
+            }
+            if (decisions.isEmpty()) {
+              item { EmptyProcessCard(state, "还没有素材详情", "故事开始处理后，这里会显示每张素材的感知分数和 VLM 标签。") }
+            } else {
+              items(decisions, key = { "assets-${it.eventId}" }) { decision ->
+                AssetManagementCard(decision)
+              }
+            }
+          }
+          VlogPilotAdvancedTab.Prompts -> {
+            item { PromptCatalog() }
           }
         }
-      }
-
-      VlogPilotTab.Prompts -> {
-        item { PromptCatalog() }
       }
     }
   }
+
+  eventSelection?.candidates
+    ?.firstOrNull { it.eventId == selectedStoryId }
+    ?.let { candidate ->
+      StoryDetailDialog(
+        candidate = candidate,
+        runConfig = runConfig,
+        onDismiss = { selectedStoryId = null },
+        onDislike = viewModel::excludeEvent,
+        onUndoDislike = viewModel::clearExcluded,
+        onMake = {
+          makeStory(it)
+          selectedStoryId = null
+        },
+        onPin = viewModel::pinEvent,
+        onRegenerate = viewModel::forceRegenerateEvent,
+      )
+    }
 }
 
 private enum class VlogPilotTab(val label: String, val icon: ImageVector) {
-  Results("生成结果", Icons.Outlined.Movie),
-  Events("事件选择", Icons.Outlined.Search),
-  Process("过程透视", Icons.Outlined.Visibility),
-  Assets("素材管理", Icons.Outlined.PhotoLibrary),
-  Prompts("Prompt", Icons.Outlined.Edit),
+  Stories("故事", Icons.Outlined.Search),
+  Videos("视频", Icons.Outlined.Movie),
+  Settings("设置", Icons.Outlined.Edit),
+  Advanced("高级", Icons.Outlined.Visibility),
+}
+
+private enum class VlogPilotAdvancedTab(val label: String) {
+  Process("技术过程"),
+  Assets("素材详情"),
+  Prompts("Prompt"),
+}
+
+private enum class StoryBrowseCategory(val label: String) {
+  Recommended("推荐"),
+  All("全部"),
+  Travel("旅行"),
+  Family("家人"),
+  Food("美食"),
+  Animal("动物"),
+  Video("视频多"),
+  Done("已生成"),
+  Hidden("不喜欢"),
+}
+
+private enum class StorySortMode(val label: String) {
+  Recommended("推荐"),
+  Newest("最新"),
+  Oldest("最早"),
 }
 
 @Composable
@@ -348,186 +412,645 @@ private fun <T> ControlSegment(
 ) {
   Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
     Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
-    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-      items(options) { option ->
-        val active = option == selected
-        Surface(
-          modifier = if (enabled) Modifier.clickable { onSelect(option) } else Modifier,
-          shape = RoundedCornerShape(999.dp),
-          color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-          contentColor = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+    if (!enabled) {
+      Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f),
+        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+      ) {
+        Row(
+          modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+          horizontalArrangement = Arrangement.SpaceBetween,
+          verticalAlignment = Alignment.CenterVertically,
         ) {
           Text(
-            optionLabel(option),
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+            optionLabel(selected),
             style = MaterialTheme.typography.labelMedium,
-            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+            fontWeight = FontWeight.SemiBold,
           )
+          Text("运行中锁定", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
         }
       }
-    }
-  }
-}
-
-@Composable
-private fun StudioStatusCard(
-  state: PipelineState,
-  decisions: List<EventDecisions>,
-  progress: ProgressSnapshot,
-  runConfig: VlogPilotRunConfig,
-  eventSelection: EventSelectionManifest?,
-  running: Boolean,
-  onRefreshClick: () -> Unit,
-  onRunClick: () -> Unit,
-  onIntentSelect: (GenerationIntent) -> Unit,
-  onPowerSelect: (PowerProfile) -> Unit,
-) {
-  val rendered = decisions.count { it.mp4Path != null }
-  val totalShots = decisions.sumOf { (it.timelineFinal ?: it.timelineV1)?.shots?.size ?: 0 }
-  val scannedAssets = decisions.sumOf { it.inputAssets.size }
-
-  ElevatedCard(
-    modifier = Modifier.fillMaxWidth(),
-    colors = CardDefaults.elevatedCardColors(
-      containerColor = MaterialTheme.colorScheme.surface,
-    ),
-  ) {
-    Column(
-      modifier = Modifier.padding(16.dp),
-      verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-      Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-      ) {
-        Surface(
-          shape = RoundedCornerShape(14.dp),
-          color = MaterialTheme.colorScheme.primaryContainer,
-          contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-        ) {
-          Icon(Icons.Outlined.Movie, contentDescription = null, modifier = Modifier.padding(10.dp))
-        }
-        Column(modifier = Modifier.weight(1f)) {
-          Text("过程透视", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-          Text(
-            statusText(state),
-            style = MaterialTheme.typography.bodySmall,
-            color = if (state is PipelineState.Error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-          )
-        }
-        if (running) {
-          FilledTonalButton(onClick = onRunClick) { Text("取消") }
-        } else {
-          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilledTonalButton(onClick = onRefreshClick) { Text("VLM浏览") }
-            Button(onClick = onRunClick) { Text("生成") }
-          }
-        }
-      }
-
-      ControlSegment(
-        label = "生成意图",
-        options = GenerationIntent.entries.toList(),
-        selected = runConfig.intent,
-        optionLabel = ::intentLabel,
-        onSelect = onIntentSelect,
-        enabled = !running,
-      )
-      ControlSegment(
-        label = "运行模式",
-        options = PowerProfile.entries.toList(),
-        selected = runConfig.powerProfile,
-        optionLabel = ::powerLabel,
-        onSelect = onPowerSelect,
-        enabled = !running,
-      )
-
-      LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        item { InfoPill("事件 ${decisions.size}", Icons.Outlined.Visibility) }
-        item { InfoPill("候选 ${eventSelection?.candidateCount ?: 0}", Icons.Outlined.Search, eventSelection != null) }
-        item { InfoPill("选中 ${eventSelection?.selectedEventIds?.size ?: 0}", Icons.Outlined.Star, eventSelection?.selectedEventIds?.isNotEmpty() == true) }
-        item { InfoPill("扫描 $scannedAssets", Icons.Outlined.PhotoLibrary) }
-        item { InfoPill("镜头 $totalShots", Icons.Outlined.Edit) }
-        item {
-          InfoPill(
-            text = "成片 $rendered",
-            icon = if (rendered > 0) Icons.Outlined.CheckCircle else Icons.Outlined.Movie,
-            accent = rendered > 0,
-          )
-        }
-      }
-
-      if (running || progress.stage != "idle") {
-        ProgressInsightPanel(progress)
-      }
-    }
-  }
-}
-
-@Composable
-private fun ProgressInsightPanel(progress: ProgressSnapshot) {
-  val fraction = remember(progress.current, progress.total) {
-    if (progress.total > 0) (progress.current.toFloat() / progress.total.toFloat()).coerceIn(0f, 1f) else null
-  }
-  Surface(
-    modifier = Modifier.fillMaxWidth(),
-    shape = RoundedCornerShape(14.dp),
-    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
-  ) {
-    Column(
-      modifier = Modifier.padding(12.dp),
-      verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-      Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.Top,
-      ) {
-        Icon(Icons.Outlined.Visibility, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-          Text(progress.headline, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
-          if (progress.detail.isNotBlank()) {
+    } else {
+      LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        items(options) { option ->
+          val active = option == selected
+          Surface(
+            modifier = Modifier.clickable { onSelect(option) },
+            shape = RoundedCornerShape(999.dp),
+            color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+          ) {
             Text(
-              progress.detail,
-              style = MaterialTheme.typography.bodySmall,
-              color = MaterialTheme.colorScheme.onSurfaceVariant,
-              maxLines = 3,
-              overflow = TextOverflow.Ellipsis,
+              optionLabel(option),
+              modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+              style = MaterialTheme.typography.labelMedium,
+              fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
             )
           }
         }
       }
+    }
+  }
+}
 
+@Composable
+private fun StoryHeroCard(
+  state: PipelineState,
+  recentDecisions: List<EventDecisions>,
+  onStartClick: () -> Unit,
+  onVideosClick: () -> Unit,
+) {
+  PanelCard {
+    Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+      SectionHeader(
+        icon = Icons.Outlined.Movie,
+        title = "帮你做一条回忆视频",
+        subtitle = "我会从最近 30 天里找出适合剪成 vlog 的几组故事。",
+      )
+      if (state is PipelineState.Error) {
+        Text(
+          state.message,
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.error,
+        )
+      } else {
+        Text(
+          "点一下开始，我会先帮你看相册，再把适合剪的视频故事放到这里。",
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+      Button(modifier = Modifier.fillMaxWidth(), onClick = onStartClick) {
+        Text("开始挑故事")
+      }
+      if (recentDecisions.isNotEmpty()) {
+        HorizontalDivider()
+        Text("最近生成", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+        recentDecisions.forEach { decision ->
+          Text(
+            storyTitle(decision),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
+        FilledTonalButton(modifier = Modifier.fillMaxWidth(), onClick = onVideosClick) {
+          Text("只看已生成的视频")
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun StoryProgressCard(
+  state: PipelineState,
+  progress: ProgressSnapshot,
+  onCancel: () -> Unit,
+) {
+  val friendly = friendlyProgress(progress, making = state is PipelineState.Running)
+  val fraction = remember(friendly.current, friendly.total) {
+    if (friendly.total > 0) (friendly.current.toFloat() / friendly.total.toFloat()).coerceIn(0f, 1f) else null
+  }
+  PanelCard {
+    Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+      SectionHeader(
+        icon = if (state is PipelineState.Running) Icons.Outlined.Movie else Icons.Outlined.Search,
+        title = friendly.title,
+        subtitle = friendly.detail,
+      )
       if (fraction != null) {
         LinearProgressIndicator(
           progress = { fraction },
           modifier = Modifier
             .fillMaxWidth()
-            .height(6.dp)
+            .height(7.dp)
             .clip(RoundedCornerShape(999.dp)),
         )
+        Text(
+          "已完成 ${friendly.current}/${friendly.total}",
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
       }
-
-      LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (progress.stage.isNotBlank()) item { InfoPill(progress.stage, Icons.Outlined.Star, progress.stage.contains("done")) }
-        if (progress.current > 0 && progress.total > 0) item { InfoPill("${progress.current}/${progress.total}", Icons.Outlined.Timer) }
-        if (progress.mediaType.isNotBlank()) item { InfoPill(progress.mediaType, Icons.Outlined.Movie) }
-        if (progress.elapsedMs > 0) item { InfoPill(formatMs(progress.elapsedMs), Icons.Outlined.Timer, true) }
-      }
-
       if (progress.recent.isNotEmpty()) {
-        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-          progress.recent.take(4).forEach { item ->
+        Text(
+          progress.recent.first(),
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
+      FilledTonalButton(modifier = Modifier.fillMaxWidth(), onClick = onCancel) {
+        Text("取消")
+      }
+    }
+  }
+}
+
+@Composable
+private fun StoryShelf(
+  manifest: EventSelectionManifest,
+  runConfig: VlogPilotRunConfig,
+  selectedCategory: StoryBrowseCategory,
+  selectedSort: StorySortMode,
+  onCategorySelect: (StoryBrowseCategory) -> Unit,
+  onSortSelect: (StorySortMode) -> Unit,
+  onOpenStory: (String) -> Unit,
+  onStartClick: () -> Unit,
+  onClearOnly: () -> Unit,
+  onSelectStory: (String) -> Unit,
+  onMakeStory: (String) -> Unit,
+) {
+  val categories = storyBrowseCategories(manifest.candidates)
+  val filtered = manifest.candidates
+    .filter { matchesStoryCategory(it, selectedCategory) }
+    .sortedWith(storySortComparator(selectedSort))
+  PanelCard(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.16f)) {
+    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+      StoryShelfHeader(
+        manifest = manifest,
+        runConfig = runConfig,
+        selectedStory = manifest.candidates.firstOrNull { it.eventId in runConfig.onlySelectedEventIds },
+        shownCount = filtered.size,
+        selectedSort = selectedSort,
+        onSortSelect = onSortSelect,
+        onStartClick = onStartClick,
+        onClearOnly = onClearOnly,
+        onMakeStory = onMakeStory,
+      )
+
+      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        StoryCategoryRail(
+          categories = categories,
+          selected = selectedCategory,
+          candidates = manifest.candidates,
+          onSelect = onCategorySelect,
+          modifier = Modifier.width(84.dp),
+        )
+
+        Surface(
+          modifier = Modifier.weight(1f),
+          shape = RoundedCornerShape(14.dp),
+          color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f)),
+        ) {
+          Column {
+            if (filtered.isEmpty()) {
+              Box(
+                modifier = Modifier
+                  .fillMaxWidth()
+                  .padding(18.dp),
+                contentAlignment = Alignment.Center,
+              ) {
+                Text("这一类暂时没有故事", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+              }
+            } else {
+              filtered.forEachIndexed { index, candidate ->
+                StoryListItem(
+                  candidate = candidate,
+                  selected = candidate.eventId in runConfig.onlySelectedEventIds,
+                  onOpen = { onOpenStory(candidate.eventId) },
+                  onSelect = { onSelectStory(candidate.eventId) },
+                )
+                if (index != filtered.lastIndex) {
+                  HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun StoryShelfHeader(
+  manifest: EventSelectionManifest,
+  runConfig: VlogPilotRunConfig,
+  selectedStory: EventCandidateSnapshot?,
+  shownCount: Int,
+  selectedSort: StorySortMode,
+  onSortSelect: (StorySortMode) -> Unit,
+  onStartClick: () -> Unit,
+  onClearOnly: () -> Unit,
+  onMakeStory: (String) -> Unit,
+) {
+  Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+    Row(
+      modifier = Modifier.fillMaxWidth(),
+      horizontalArrangement = Arrangement.spacedBy(10.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Column(modifier = Modifier.weight(1f)) {
+        Text(
+          "故事货架",
+          style = MaterialTheme.typography.titleMedium,
+          fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+          "${manifest.candidateCount} 组故事 · 当前显示 $shownCount 组 · ${friendlyIntentLabel(manifest.intent)} · ${friendlyPowerLabel(manifest.powerProfile)}",
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
+      FilledTonalButton(onClick = onStartClick) { Text("重扫") }
+    }
+
+    if (selectedStory != null) {
+      Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.82f),
+        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+      ) {
+        Row(
+          modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+          horizontalArrangement = Arrangement.spacedBy(10.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Icon(Icons.Outlined.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+          Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text("已选中", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium)
             Text(
-              item,
-              style = MaterialTheme.typography.labelSmall,
-              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              storyTitle(selectedStory),
+              style = MaterialTheme.typography.labelLarge,
+              fontWeight = FontWeight.SemiBold,
               maxLines = 1,
               overflow = TextOverflow.Ellipsis,
             )
+          }
+          Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Button(onClick = { onMakeStory(selectedStory.eventId) }) {
+              Text("开始制作")
+            }
+            Text(
+              "取消选择",
+              modifier = Modifier.clickable { onClearOnly() },
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.78f),
+              fontWeight = FontWeight.Medium,
+            )
+          }
+        }
+      }
+    }
+
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+      Text("排序", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+      StorySortMode.entries.forEach { sort ->
+        val active = sort == selectedSort
+        Surface(
+          modifier = Modifier.clickable { onSortSelect(sort) },
+          shape = RoundedCornerShape(999.dp),
+          color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+          contentColor = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (active) 0f else 0.45f)),
+        ) {
+          Text(
+            sort.label,
+            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+          )
+        }
+      }
+      Spacer(modifier = Modifier.weight(1f))
+      if (runConfig.pinnedEventIds.isNotEmpty()) {
+        Text("已优先 ${runConfig.pinnedEventIds.size}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+      }
+    }
+  }
+}
+
+@Composable
+private fun StoryCategoryRail(
+  categories: List<StoryBrowseCategory>,
+  selected: StoryBrowseCategory,
+  candidates: List<EventCandidateSnapshot>,
+  onSelect: (StoryBrowseCategory) -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  Surface(
+    modifier = modifier,
+    shape = RoundedCornerShape(14.dp),
+    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f),
+    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.36f)),
+  ) {
+    Column {
+      categories.forEach { category ->
+        val active = category == selected
+        val count = candidates.count { matchesStoryCategory(it, category) }
+        Surface(
+          modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onSelect(category) },
+          shape = RoundedCornerShape(0.dp),
+          color = if (active) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.70f) else Color.Transparent,
+          contentColor = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+        ) {
+          Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+              category.label,
+              style = MaterialTheme.typography.labelMedium,
+              fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+              "$count 组",
+              style = MaterialTheme.typography.labelSmall,
+              color = if (active) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.78f) else MaterialTheme.colorScheme.outline,
+            )
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun StoryListItem(
+  candidate: EventCandidateSnapshot,
+  selected: Boolean,
+  onOpen: () -> Unit,
+  onSelect: () -> Unit,
+) {
+  Row(
+    modifier = Modifier
+      .fillMaxWidth()
+      .clickable { onOpen() }
+      .padding(10.dp),
+    horizontalArrangement = Arrangement.spacedBy(10.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    val cover = candidate.assets.firstOrNull()
+    if (cover != null) {
+      AssetThumb(
+        asset = cover,
+        modifier = Modifier
+          .width(70.dp)
+          .height(76.dp),
+      )
+    } else {
+      Box(
+        modifier = Modifier
+          .width(70.dp)
+          .height(76.dp)
+          .clip(RoundedCornerShape(12.dp))
+          .background(MaterialTheme.colorScheme.surfaceVariant),
+        contentAlignment = Alignment.Center,
+      ) {
+        Icon(Icons.Outlined.PhotoLibrary, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+      }
+    }
+    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.Top) {
+        Text(
+          storyTitle(candidate),
+          modifier = Modifier.weight(1f),
+          style = MaterialTheme.typography.titleSmall,
+          fontWeight = FontWeight.SemiBold,
+          maxLines = 2,
+          overflow = TextOverflow.Ellipsis,
+        )
+        StoryTinyStatus(candidate.status)
+      }
+      Text(
+        compactStoryMeta(candidate),
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+      Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+          "适合度 ${(candidate.valueScore.coerceIn(0f, 1f) * 100).toInt()}",
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.primary,
+          fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+          storyListHint(candidate),
+          modifier = Modifier.weight(1f),
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.outline,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
+    }
+    Button(onClick = onSelect) {
+      Text(if (selected) "已选" else "选")
+    }
+  }
+}
+
+@Composable
+private fun StoryTinyStatus(status: EventSelectionStatus) {
+  val text = when (status) {
+    EventSelectionStatus.SELECTED -> "荐"
+    EventSelectionStatus.EXCLUDED -> "隐"
+    EventSelectionStatus.COMPLETED -> "成"
+    EventSelectionStatus.RESUME -> "续"
+    else -> "看"
+  }
+  val container = when (status) {
+    EventSelectionStatus.SELECTED -> MaterialTheme.colorScheme.primaryContainer
+    EventSelectionStatus.EXCLUDED -> MaterialTheme.colorScheme.errorContainer
+    EventSelectionStatus.COMPLETED -> MaterialTheme.colorScheme.secondaryContainer
+    else -> MaterialTheme.colorScheme.surfaceVariant
+  }
+  val content = when (status) {
+    EventSelectionStatus.SELECTED -> MaterialTheme.colorScheme.onPrimaryContainer
+    EventSelectionStatus.EXCLUDED -> MaterialTheme.colorScheme.onErrorContainer
+    EventSelectionStatus.COMPLETED -> MaterialTheme.colorScheme.onSecondaryContainer
+    else -> MaterialTheme.colorScheme.onSurfaceVariant
+  }
+  Surface(shape = RoundedCornerShape(7.dp), color = container, contentColor = content) {
+    Text(
+      text,
+      modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+      style = MaterialTheme.typography.labelSmall,
+      fontWeight = FontWeight.SemiBold,
+    )
+  }
+}
+
+@Composable
+private fun StoryDetailDialog(
+  candidate: EventCandidateSnapshot,
+  runConfig: VlogPilotRunConfig,
+  onDismiss: () -> Unit,
+  onDislike: (String) -> Unit,
+  onUndoDislike: (String) -> Unit,
+  onMake: (String) -> Unit,
+  onPin: (String) -> Unit,
+  onRegenerate: (String) -> Unit,
+) {
+  Dialog(onDismissRequest = onDismiss) {
+    Surface(
+      modifier = Modifier
+        .fillMaxWidth()
+        .heightIn(max = 720.dp),
+      shape = RoundedCornerShape(22.dp),
+      color = MaterialTheme.colorScheme.surface,
+      tonalElevation = 8.dp,
+      border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.50f)),
+    ) {
+      LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+      ) {
+        item {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.Top,
+          ) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+              Text(
+                storyTitle(candidate),
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+              )
+              Text(
+                storyMeta(candidate),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+            }
+            StoryStatusBadge(candidate.status)
+          }
+        }
+        item {
+          Text(
+            storyReason(candidate),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        }
+        item {
+          AssetStrip(assets = candidate.assets.take(12), totalCount = candidate.event.assetIds.size)
+        }
+        item {
+          Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+              modifier = Modifier.weight(1f),
+              onClick = { onMake(candidate.eventId) },
+            ) {
+              Text("开始制作")
+            }
+            FilledTonalButton(
+              modifier = Modifier.weight(1f),
+              onClick = {
+                if (candidate.status == EventSelectionStatus.EXCLUDED) {
+                  onUndoDislike(candidate.eventId)
+                } else {
+                  onDislike(candidate.eventId)
+                }
+              },
+            ) {
+              Text(if (candidate.status == EventSelectionStatus.EXCLUDED) "撤回" else "不喜欢")
+            }
+          }
+        }
+        item {
+          Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilledTonalButton(
+              modifier = Modifier.weight(1f),
+              onClick = { onPin(candidate.eventId) },
+            ) {
+              Text(if (candidate.eventId in runConfig.pinnedEventIds) "已优先" else "优先做")
+            }
+            FilledTonalButton(
+              modifier = Modifier.weight(1f),
+              onClick = { onRegenerate(candidate.eventId) },
+            ) {
+              Text("重新剪")
+            }
+          }
+        }
+        item {
+          CandidateDetails(candidate)
+        }
+        item {
+          FilledTonalButton(modifier = Modifier.fillMaxWidth(), onClick = onDismiss) {
+            Text("关闭")
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun SettingsCard(
+  runConfig: VlogPilotRunConfig,
+  running: Boolean,
+  onIntentSelect: (GenerationIntent) -> Unit,
+  onPowerSelect: (PowerProfile) -> Unit,
+) {
+  PanelCard {
+    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+      SectionHeader(
+        icon = Icons.Outlined.Edit,
+        title = "视频设置",
+        subtitle = if (running) "正在制作时会先锁定设置。" else "告诉我你想要什么样的视频。",
+      )
+      ControlSegment(
+        label = "想做什么样的视频？",
+        options = GenerationIntent.entries.toList(),
+        selected = runConfig.intent,
+        optionLabel = ::friendlyIntentLabel,
+        onSelect = onIntentSelect,
+        enabled = !running,
+      )
+      ControlSegment(
+        label = "生成偏好",
+        options = PowerProfile.entries.toList(),
+        selected = runConfig.powerProfile,
+        optionLabel = ::friendlyPowerLabel,
+        onSelect = onPowerSelect,
+        enabled = !running,
+      )
+    }
+  }
+}
+
+@Composable
+private fun AdvancedTabPicker(
+  selected: VlogPilotAdvancedTab,
+  onSelect: (VlogPilotAdvancedTab) -> Unit,
+) {
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(18.dp),
+    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+  ) {
+    Row(modifier = Modifier.padding(5.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+      VlogPilotAdvancedTab.entries.forEach { tab ->
+        val active = tab == selected
+        Surface(
+          modifier = Modifier
+            .weight(1f)
+            .clickable { onSelect(tab) },
+          shape = RoundedCornerShape(14.dp),
+          color = if (active) MaterialTheme.colorScheme.surface else Color.Transparent,
+          contentColor = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+          tonalElevation = if (active) 2.dp else 0.dp,
+        ) {
+          Box(modifier = Modifier.padding(vertical = 9.dp), contentAlignment = Alignment.Center) {
+            Text(tab.label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
           }
         }
       }
@@ -537,7 +1060,7 @@ private fun ProgressInsightPanel(progress: ProgressSnapshot) {
 
 @Composable
 private fun AlbumPreviewCard(assets: List<Asset>, events: List<Event>) {
-  ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+  PanelCard {
     Column(
       modifier = Modifier.padding(14.dp),
       verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -553,172 +1076,57 @@ private fun AlbumPreviewCard(assets: List<Asset>, events: List<Event>) {
 }
 
 @Composable
-private fun EventSelectionHeader(
-  manifest: EventSelectionManifest,
-  runConfig: VlogPilotRunConfig,
-  onClearOnly: () -> Unit,
-) {
-  ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-      SectionHeader(
-        icon = Icons.Outlined.Search,
-        title = "事件选择",
-        subtitle = "VLM 先按 3x3 contact sheet 浏览候选事件，再做语义排序",
-      )
-      LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        item { InfoPill("候选 ${manifest.candidateCount}", Icons.Outlined.Search, true) }
-        item { InfoPill("选中 ${manifest.selectedEventIds.size}", Icons.Outlined.Star, manifest.selectedEventIds.isNotEmpty()) }
-        item { InfoPill(intentLabel(manifest.intent), Icons.Outlined.Visibility) }
-        item { InfoPill(powerLabel(manifest.powerProfile), Icons.Outlined.Timer) }
-      }
-      if (runConfig.onlySelectedEventIds.isNotEmpty()) {
-        Row(
-          modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          Text(
-            "当前只生成指定事件：${runConfig.onlySelectedEventIds.joinToString { shortId(it) }}",
-            modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-          )
-          FilledTonalButton(onClick = onClearOnly) { Text("恢复自动") }
-        }
-      }
-    }
+private fun StoryStatusBadge(status: EventSelectionStatus) {
+  val text = when (status) {
+    EventSelectionStatus.SELECTED -> "推荐"
+    EventSelectionStatus.EXCLUDED -> "已忽略"
+    EventSelectionStatus.COMPLETED -> "已生成"
+    EventSelectionStatus.RESUME -> "可继续"
+    else -> "可选择"
   }
+  StatusBadge(text, status)
 }
 
 @Composable
-private fun EventCandidateCard(
-  candidate: EventCandidateSnapshot,
-  runConfig: VlogPilotRunConfig,
-  onPin: (String) -> Unit,
-  onExclude: (String) -> Unit,
-  onClearExcluded: (String) -> Unit,
-  onOnly: (String) -> Unit,
-  onRegenerate: (String) -> Unit,
-) {
-  ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-      Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.Top,
-      ) {
-        Surface(
-          shape = RoundedCornerShape(14.dp),
-          color = when (candidate.status) {
-            EventSelectionStatus.SELECTED -> MaterialTheme.colorScheme.primaryContainer
-            EventSelectionStatus.EXCLUDED -> MaterialTheme.colorScheme.errorContainer
-            EventSelectionStatus.COMPLETED -> MaterialTheme.colorScheme.secondaryContainer
-            else -> MaterialTheme.colorScheme.surfaceVariant
-          },
-          contentColor = when (candidate.status) {
-            EventSelectionStatus.SELECTED -> MaterialTheme.colorScheme.onPrimaryContainer
-            EventSelectionStatus.EXCLUDED -> MaterialTheme.colorScheme.onErrorContainer
-            EventSelectionStatus.COMPLETED -> MaterialTheme.colorScheme.onSecondaryContainer
-            else -> MaterialTheme.colorScheme.onSurfaceVariant
-          },
-        ) {
-          Icon(
-            imageVector = if (candidate.status == EventSelectionStatus.SELECTED) Icons.Outlined.Star else Icons.Outlined.Visibility,
-            contentDescription = null,
-            modifier = Modifier.padding(10.dp),
-          )
-        }
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-          Text("事件 ${shortId(candidate.eventId)}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-          Text(
-            listOfNotNull(
-              formatEventRange(candidate.event.startEpochMs, candidate.event.endEpochMs).takeIf { it.isNotBlank() },
-              "${candidate.assets.size} 个预览素材",
-              "${candidate.realVideoCount} 段视频 / ${formatSec(candidate.realVideoSeconds.toDouble())}",
-              "${"%.1f".format(Locale.US, candidate.spanHours)}h",
-            ).joinToString(" · "),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-          )
-        }
-        InfoPill(eventStatusLabel(candidate.status), Icons.Outlined.CheckCircle, candidate.status == EventSelectionStatus.SELECTED)
-      }
+private fun CandidateDetails(candidate: EventCandidateSnapshot) {
+  HorizontalDivider()
+  SectionHeader(Icons.Outlined.Star, "排序指标", "综合分会决定候选优先级")
+  ScoreMeter("综合价值", candidate.valueScore, accent = candidate.status == EventSelectionStatus.SELECTED)
+  ScoreMeter("旅行/地点", candidate.travelScore)
+  ScoreMeter("视频素材", candidate.mediaScore)
+  ScoreMeter("故事跨度", candidate.storyScore)
+  ScoreMeter("质量", candidate.qualityScore)
+  ScoreMeter("新鲜度", candidate.recencyScore)
 
-      LinearProgressIndicator(
-        progress = { candidate.valueScore.coerceIn(0f, 1f) },
-        modifier = Modifier
-          .fillMaxWidth()
-          .height(6.dp)
-          .clip(RoundedCornerShape(999.dp)),
-      )
-
-      LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        item { InfoPill("value ${(candidate.valueScore * 100).toInt()}", Icons.Outlined.Star, candidate.status == EventSelectionStatus.SELECTED) }
-        item { InfoPill(candidate.rankingMode, Icons.Outlined.Search, candidate.rankingMode == "vlm_scout") }
-        item { InfoPill("travel ${(candidate.travelScore * 100).toInt()}", Icons.Outlined.Visibility) }
-        item { InfoPill("media ${(candidate.mediaScore * 100).toInt()}", Icons.Outlined.Movie) }
-        item { InfoPill("story ${(candidate.storyScore * 100).toInt()}", Icons.Outlined.Edit) }
-        if (candidate.gpsAssetCount > 0) item { InfoPill("GPS ${candidate.gpsAssetCount}", Icons.Outlined.Search, true) }
-      }
-
-      if (candidate.scoutSummary.isNotBlank()) {
-        Surface(
-          modifier = Modifier.fillMaxWidth(),
-          shape = RoundedCornerShape(14.dp),
-          color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
-        ) {
-          Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-              item { InfoPill(candidate.scoutEventType.ifBlank { "scout" }, Icons.Outlined.Visibility, candidate.scoutRecommended) }
-              item { InfoPill("story ${(candidate.scoutStoryValue * 100).toInt()}", Icons.Outlined.Edit) }
-              item { InfoPill("visual ${(candidate.scoutVisualValue * 100).toInt()}", Icons.Outlined.PhotoLibrary) }
-              item { InfoPill("pages ${candidate.scoutPageCount}", Icons.Outlined.PhotoLibrary, candidate.scoutSampled) }
-            }
-            Text(
-              candidate.scoutSummary,
-              style = MaterialTheme.typography.bodySmall,
-              color = MaterialTheme.colorScheme.onSurfaceVariant,
-              maxLines = 3,
-              overflow = TextOverflow.Ellipsis,
-            )
-            if (candidate.scoutRejectReasons.isNotEmpty()) {
-              Text(
-                "caution: ${candidate.scoutRejectReasons.joinToString(" · ")}",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-              )
-            }
-          }
-        }
-      }
-
-      if (candidate.reasons.isNotEmpty()) {
-        Text(
-          candidate.reasons.joinToString(" · "),
-          style = MaterialTheme.typography.labelSmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
-          maxLines = 2,
-          overflow = TextOverflow.Ellipsis,
-        )
-      }
-
-      AssetStrip(assets = candidate.assets.take(12), totalCount = candidate.event.assetIds.size)
-
-      LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (candidate.status == EventSelectionStatus.EXCLUDED) {
-          item { FilledTonalButton(onClick = { onClearExcluded(candidate.eventId) }) { Text("取消排除") } }
-        } else {
-          item { FilledTonalButton(onClick = { onExclude(candidate.eventId) }) { Text("排除") } }
-        }
-        item { FilledTonalButton(onClick = { onPin(candidate.eventId) }) { Text(if (candidate.eventId in runConfig.pinnedEventIds) "已优先" else "优先生成") } }
-        item { Button(onClick = { onOnly(candidate.eventId) }) { Text("只生成此事件") } }
-        item { FilledTonalButton(onClick = { onRegenerate(candidate.eventId) }) { Text("重新生成") } }
-      }
+  if (candidate.scoutSummary.isNotBlank()) {
+    HorizontalDivider()
+    SectionHeader(
+      Icons.Outlined.Visibility,
+      "VLM scout",
+      candidate.scoutEventType.ifBlank { "contact sheet 语义判断" },
+    )
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      MetricBadge("story", (candidate.scoutStoryValue * 100).toInt().toString(), modifier = Modifier.weight(1f))
+      MetricBadge("visual", (candidate.scoutVisualValue * 100).toInt().toString(), modifier = Modifier.weight(1f))
+      MetricBadge("pages", candidate.scoutPageCount.toString(), candidate.scoutSampled, Modifier.weight(1f))
     }
+    Text(
+      candidate.scoutSummary,
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    if (candidate.scoutRejectReasons.isNotEmpty()) {
+      Text(
+        "caution: ${candidate.scoutRejectReasons.joinToString(" · ")}",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+      )
+    }
+  }
+
+  if (candidate.reasons.isNotEmpty()) {
+    HorizontalDivider()
+    KeyValue("排序理由", candidate.reasons.joinToString(" · "))
   }
 }
 
@@ -760,14 +1168,40 @@ private fun EmptyProcessCard(
 }
 
 @Composable
-private fun ResultEventCard(d: EventDecisions) {
+private fun EmptyActionCard(
+  state: PipelineState,
+  title: String,
+  message: String,
+  actionLabel: String,
+  onAction: () -> Unit,
+) {
+  PanelCard {
+    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+      SectionHeader(
+        icon = if (state is PipelineState.Error) Icons.Outlined.ErrorOutline else Icons.Outlined.Movie,
+        title = if (state is PipelineState.Error) "任务中断" else title,
+        subtitle = if (state is PipelineState.Error) state.message else message,
+      )
+      Button(modifier = Modifier.fillMaxWidth(), onClick = onAction) {
+        Text(actionLabel)
+      }
+    }
+  }
+}
+
+@Composable
+private fun ResultEventCard(
+  d: EventDecisions,
+  onRegenerate: (String) -> Unit,
+  onChangeStory: () -> Unit,
+) {
   var showTimeline by remember { mutableStateOf(false) }
   val timeline = d.timelineFinal ?: d.timelineV1
-  val title = d.director?.title?.takeIf { it.isNotBlank() } ?: "事件 ${shortId(d.eventId)}"
+  val title = storyTitle(d)
   val durationSec = timeline?.shots?.sumOf { it.durationSec.toDouble() } ?: 0.0
   val assetMap = remember(d.inputAssets) { d.inputAssets.associateBy { it.id } }
 
-  ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+  PanelCard {
     Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
       Row(
         modifier = Modifier.fillMaxWidth(),
@@ -784,7 +1218,7 @@ private fun ResultEventCard(d: EventDecisions) {
         Column(modifier = Modifier.weight(1f)) {
           Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
           Text(
-            eventSubtitle(d),
+            videoSubtitle(d),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
@@ -793,20 +1227,40 @@ private fun ResultEventCard(d: EventDecisions) {
         }
       }
 
-      LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        item { InfoPill("镜头 ${timeline?.shots?.size ?: 0}", Icons.Outlined.Edit) }
-        item { InfoPill(formatSec(durationSec), Icons.Outlined.Timer) }
-        item { InfoPill("素材 ${d.inputAssets.size}", Icons.Outlined.PhotoLibrary) }
-        item {
-          InfoPill(
-            text = if (d.mp4Path != null) "已渲染" else "等待渲染",
-            icon = if (d.mp4Path != null) Icons.Outlined.CheckCircle else Icons.Outlined.Movie,
-            accent = d.mp4Path != null,
-          )
-        }
+      MetricGrid(
+        items = listOf(
+          MetricDatum("镜头", (timeline?.shots?.size ?: 0).toString()),
+          MetricDatum("时长", formatSec(durationSec)),
+          MetricDatum("素材", d.inputAssets.size.toString()),
+          MetricDatum("渲染", if (d.mp4Path != null) "完成" else "等待", d.mp4Path != null),
+        ),
+        columns = 2,
+      )
+
+      if (d.mp4Path != null) {
+        VideoPreview(mp4Path = d.mp4Path)
+      } else {
+        Text(
+          "这组故事还没有导出视频。可以重新剪一次，或回到故事页换一组。",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
       }
 
-      d.mp4Path?.let { VideoPreview(mp4Path = it) }
+      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilledTonalButton(
+          modifier = Modifier.weight(1f),
+          onClick = { onRegenerate(d.eventId) },
+        ) {
+          Text("重新剪一次")
+        }
+        FilledTonalButton(
+          modifier = Modifier.weight(1f),
+          onClick = onChangeStory,
+        ) {
+          Text("换个故事")
+        }
+      }
 
       if (timeline != null) {
         Row(
@@ -837,12 +1291,20 @@ private fun AssetManagementCard(d: EventDecisions) {
   }
   val tagged = d.inputPerceptions.values.count { it.vlmTags.scene.isNotBlank() }
 
-  ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+  PanelCard {
     Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
       SectionHeader(
         icon = Icons.Outlined.PhotoLibrary,
         title = "事件 ${shortId(d.eventId)} 素材",
         subtitle = "${d.inputAssets.size} 个输入 / $tagged 个有 VLM 标签",
+      )
+      MetricGrid(
+        items = listOf(
+          MetricDatum("输入", d.inputAssets.size.toString()),
+          MetricDatum("已标注", tagged.toString(), tagged > 0),
+          MetricDatum("入片", usedOrders.size.toString(), usedOrders.isNotEmpty()),
+        ),
+        columns = 3,
       )
       if (d.inputAssets.isNotEmpty()) {
         AssetStrip(assets = d.inputAssets.take(24), totalCount = d.inputAssets.size)
@@ -866,10 +1328,10 @@ private fun AssetAnnotationRow(asset: Asset, perception: Perception?, usedOrders
   Surface(
     modifier = Modifier
       .fillMaxWidth()
-      .clip(RoundedCornerShape(14.dp))
+      .clip(RoundedCornerShape(12.dp))
       .clickable { expanded = !expanded },
-    shape = RoundedCornerShape(14.dp),
-    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+    shape = RoundedCornerShape(12.dp),
+    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.24f),
   ) {
     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
       Row(
@@ -901,12 +1363,18 @@ private fun AssetAnnotationRow(asset: Asset, perception: Perception?, usedOrders
             overflow = TextOverflow.Ellipsis,
           )
           LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            item { InfoPill(if (tags?.scene?.isNotBlank() == true) "已标注" else "未标注", Icons.Outlined.Search, tags?.scene?.isNotBlank() == true) }
-            if (usedOrders.isNotEmpty()) item { InfoPill("入片 #${usedOrders.joinToString(",")}", Icons.Outlined.CheckCircle, true) }
-            if ((videoInsight?.bestMomentSec ?: 0f) > 0f) item { InfoPill("best ${"%.1fs".format(Locale.US, videoInsight!!.bestMomentSec)}", Icons.Outlined.PlayArrow, true) }
-            item { InfoPill("face ${perception?.faces?.size ?: 0}", Icons.Outlined.Person) }
+            item { SignalTag(if (tags?.scene?.isNotBlank() == true) "已标注" else "未标注", Icons.Outlined.Search, tags?.scene?.isNotBlank() == true) }
+            if (usedOrders.isNotEmpty()) item { SignalTag("入片 #${usedOrders.joinToString(",")}", Icons.Outlined.CheckCircle, true) }
+            if ((videoInsight?.bestMomentSec ?: 0f) > 0f) item { SignalTag("best ${"%.1fs".format(Locale.US, videoInsight!!.bestMomentSec)}", Icons.Outlined.PlayArrow, true) }
+            item { SignalTag("face ${perception?.faces?.size ?: 0}", Icons.Outlined.Person) }
           }
         }
+        Icon(
+          imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+          contentDescription = if (expanded) "收起" else "展开",
+          modifier = Modifier.size(22.dp),
+          tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
       }
 
       if (expanded) {
@@ -965,12 +1433,7 @@ private fun EventDecisionCard(d: EventDecisions) {
   val shotCount = timeline?.shots?.size ?: 0
   val durationSec = timeline?.shots?.sumOf { it.durationSec.toDouble() } ?: 0.0
 
-  ElevatedCard(
-    modifier = Modifier.fillMaxWidth(),
-    colors = CardDefaults.elevatedCardColors(
-      containerColor = MaterialTheme.colorScheme.surface,
-    ),
-  ) {
+  PanelCard {
     Column(
       modifier = Modifier.padding(14.dp),
       verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -1008,18 +1471,15 @@ private fun EventDecisionCard(d: EventDecisions) {
         }
       }
 
-      LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        item { InfoPill("素材 ${d.inputAssets.size}", Icons.Outlined.PhotoLibrary) }
-        item { InfoPill("镜头 $shotCount", Icons.Outlined.Edit) }
-        item { InfoPill(formatSec(durationSec), Icons.Outlined.Timer) }
-        item {
-          InfoPill(
-            text = if (d.mp4Path != null) "已渲染" else "未渲染",
-            icon = if (d.mp4Path != null) Icons.Outlined.CheckCircle else Icons.Outlined.Movie,
-            accent = d.mp4Path != null,
-          )
-        }
-      }
+      MetricGrid(
+        items = listOf(
+          MetricDatum("素材", d.inputAssets.size.toString()),
+          MetricDatum("镜头", shotCount.toString()),
+          MetricDatum("时长", formatSec(durationSec)),
+          MetricDatum("渲染", if (d.mp4Path != null) "完成" else "未完成", d.mp4Path != null),
+        ),
+        columns = 2,
+      )
 
       StageRail(d)
 
@@ -1064,33 +1524,42 @@ private fun StageRail(d: EventDecisions) {
     StageUi("审片", d.critique != null || timeline?.critiqueHistory?.isNotEmpty() == true),
     StageUi("渲染", d.mp4Path != null),
   )
-  LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-    items(stages) { stage ->
-      StagePill(stage)
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(12.dp),
+    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.20f),
+  ) {
+    LazyRow(
+      modifier = Modifier.padding(8.dp),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      items(stages) { stage ->
+        StageStep(stage)
+      }
     }
   }
 }
 
 @Composable
-private fun StagePill(stage: StageUi) {
+private fun StageStep(stage: StageUi) {
   val container = if (stage.done) {
-    MaterialTheme.colorScheme.primaryContainer
+    MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
   } else {
-    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+    Color.Transparent
   }
   val content = if (stage.done) {
-    MaterialTheme.colorScheme.onPrimaryContainer
+    MaterialTheme.colorScheme.primary
   } else {
     MaterialTheme.colorScheme.onSurfaceVariant
   }
-  Surface(shape = RoundedCornerShape(999.dp), color = container, contentColor = content) {
+  Surface(shape = RoundedCornerShape(8.dp), color = container, contentColor = content) {
     Row(
-      modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+      modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
       horizontalArrangement = Arrangement.spacedBy(5.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
       Icon(
-        imageVector = if (stage.done) Icons.Outlined.CheckCircle else Icons.Outlined.Star,
+        imageVector = if (stage.done) Icons.Outlined.CheckCircle else Icons.Outlined.Timer,
         contentDescription = null,
         modifier = Modifier.size(14.dp),
       )
@@ -1393,8 +1862,8 @@ private fun DecisionSection(
 ) {
   Surface(
     modifier = Modifier.fillMaxWidth(),
-    shape = RoundedCornerShape(16.dp),
-    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
+    shape = RoundedCornerShape(12.dp),
+    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.22f),
   ) {
     Column(
       modifier = Modifier.padding(12.dp),
@@ -1462,13 +1931,134 @@ private fun PerfGrid(perf: StagePerf) {
   rows.forEach { (label, value) -> KeyValue(label, value) }
 }
 
+private data class MetricDatum(
+  val label: String,
+  val value: String,
+  val accent: Boolean = false,
+)
+
 @Composable
-private fun InfoPill(text: String, icon: ImageVector, accent: Boolean = false) {
-  val container = if (accent) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant
+private fun PanelCard(
+  modifier: Modifier = Modifier,
+  color: Color = MaterialTheme.colorScheme.surface,
+  content: @Composable () -> Unit,
+) {
+  Surface(
+    modifier = modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(18.dp),
+    color = color,
+    tonalElevation = 3.dp,
+    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.34f)),
+    content = content,
+  )
+}
+
+@Composable
+private fun MetricGrid(
+  items: List<MetricDatum>,
+  columns: Int = 3,
+) {
+  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    items.chunked(columns).forEach { rowItems ->
+      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        rowItems.forEach { item ->
+          MetricBadge(
+            label = item.label,
+            value = item.value,
+            accent = item.accent,
+            modifier = Modifier.weight(1f),
+          )
+        }
+        repeat(columns - rowItems.size) {
+          Spacer(modifier = Modifier.weight(1f))
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun MetricBadge(
+  label: String,
+  value: String,
+  accent: Boolean = false,
+  modifier: Modifier = Modifier,
+) {
+  val container = if (accent) {
+    MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.78f)
+  } else {
+    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.34f)
+  }
   val content = if (accent) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-  Surface(shape = RoundedCornerShape(999.dp), color = container, contentColor = content) {
+  Surface(
+    modifier = modifier,
+    shape = RoundedCornerShape(10.dp),
+    color = container,
+    contentColor = content,
+  ) {
+    Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+      Text(
+        label,
+        style = MaterialTheme.typography.labelSmall,
+        color = if (accent) content.copy(alpha = 0.75f) else MaterialTheme.colorScheme.outline,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+      Text(
+        value,
+        style = MaterialTheme.typography.labelLarge,
+        fontWeight = FontWeight.SemiBold,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+    }
+  }
+}
+
+@Composable
+private fun StatusBadge(text: String, status: EventSelectionStatus) {
+  val icon = when (status) {
+    EventSelectionStatus.EXCLUDED -> Icons.Outlined.ErrorOutline
+    EventSelectionStatus.SELECTED,
+    EventSelectionStatus.COMPLETED,
+    EventSelectionStatus.RESUME -> Icons.Outlined.CheckCircle
+    else -> Icons.Outlined.Timer
+  }
+  val container = when (status) {
+    EventSelectionStatus.SELECTED -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.82f)
+    EventSelectionStatus.EXCLUDED -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.82f)
+    EventSelectionStatus.COMPLETED -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.70f)
+    else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.34f)
+  }
+  val content = when (status) {
+    EventSelectionStatus.SELECTED -> MaterialTheme.colorScheme.onPrimaryContainer
+    EventSelectionStatus.EXCLUDED -> MaterialTheme.colorScheme.onErrorContainer
+    EventSelectionStatus.COMPLETED -> MaterialTheme.colorScheme.onSecondaryContainer
+    else -> MaterialTheme.colorScheme.onSurfaceVariant
+  }
+  Surface(shape = RoundedCornerShape(9.dp), color = container, contentColor = content) {
     Row(
-      modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+      modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+      horizontalArrangement = Arrangement.spacedBy(5.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Icon(icon, contentDescription = null, modifier = Modifier.size(14.dp))
+      Text(text, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
+    }
+  }
+}
+
+@Composable
+private fun SignalTag(text: String, icon: ImageVector, accent: Boolean = false) {
+  val container = if (accent) {
+    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f)
+  } else {
+    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.26f)
+  }
+  val content = if (accent) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+  Surface(shape = RoundedCornerShape(8.dp), color = container, contentColor = content) {
+    Row(
+      modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
       horizontalArrangement = Arrangement.spacedBy(6.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1479,8 +2069,40 @@ private fun InfoPill(text: String, icon: ImageVector, accent: Boolean = false) {
 }
 
 @Composable
+private fun ScoreMeter(label: String, score: Float, accent: Boolean = false) {
+  val value = (score.coerceIn(0f, 1f) * 100).toInt()
+  Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+    Row(
+      modifier = Modifier.fillMaxWidth(),
+      horizontalArrangement = Arrangement.SpaceBetween,
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Text(
+        label,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontWeight = FontWeight.Medium,
+      )
+      Text(
+        value.toString(),
+        style = MaterialTheme.typography.labelSmall,
+        color = if (accent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+        fontWeight = FontWeight.SemiBold,
+      )
+    }
+    LinearProgressIndicator(
+      progress = { score.coerceIn(0f, 1f) },
+      modifier = Modifier
+        .fillMaxWidth()
+        .height(5.dp)
+        .clip(RoundedCornerShape(999.dp)),
+    )
+  }
+}
+
+@Composable
 private fun PromptCatalog() {
-  ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+  PanelCard {
     Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
       SectionHeader(
         icon = Icons.Outlined.Edit,
@@ -1500,10 +2122,10 @@ private fun PromptCard(spec: PromptSpec) {
   Surface(
     modifier = Modifier
       .fillMaxWidth()
-      .clip(RoundedCornerShape(16.dp))
+      .clip(RoundedCornerShape(12.dp))
       .clickable { expanded = !expanded },
-    shape = RoundedCornerShape(16.dp),
-    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+    shape = RoundedCornerShape(12.dp),
+    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.22f),
   ) {
     Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
       Row(
@@ -1654,42 +2276,210 @@ Timeline v<iteration> shots:
 
 private data class StageUi(val label: String, val done: Boolean)
 
+private data class FriendlyProgress(
+  val title: String,
+  val detail: String,
+  val current: Int = 0,
+  val total: Int = 0,
+)
+
 private fun eventSubtitle(d: EventDecisions): String {
   val range = d.event?.let { formatEventRange(it.startEpochMs, it.endEpochMs) }
   val place = d.event?.placeHint?.takeIf { it.isNotBlank() }
   return listOfNotNull(range, place, d.eventId).joinToString(" · ")
 }
 
-private fun statusText(state: PipelineState): String = when (state) {
-  is PipelineState.Idle -> "等待开始"
-  is PipelineState.Scanning -> state.phase
-  is PipelineState.Ready -> "${state.assets.size} 个素材，${state.events.size} 个事件，可开始生成"
-  is PipelineState.Running -> state.message
-  is PipelineState.Done -> "完成，生成 ${state.outputs.size} 个候选视频"
-  is PipelineState.Error -> "错误：${state.message}"
+private fun videoSubtitle(d: EventDecisions): String {
+  val range = d.event?.let { formatEventRange(it.startEpochMs, it.endEpochMs) }
+  val timeline = d.timelineFinal ?: d.timelineV1
+  val duration = timeline?.shots?.sumOf { it.durationSec.toDouble() }?.let { formatSec(it) }
+  return listOfNotNull(range, "${d.inputAssets.size} 个素材", duration).joinToString(" · ")
 }
 
-private fun intentLabel(intent: GenerationIntent): String = when (intent) {
-  GenerationIntent.AUTO -> "自动"
-  GenerationIntent.TRAVEL -> "旅行"
-  GenerationIntent.ZOO -> "动物园"
-  GenerationIntent.PEOPLE -> "人物"
-  GenerationIntent.FOOD -> "美食"
+private fun storyTitle(candidate: EventCandidateSnapshot): String =
+  storyTitle(candidate.event, candidate.scoutSummary, candidate.scoutEventType)
+
+private fun storyTitle(d: EventDecisions): String {
+  d.director?.title?.takeIf { it.isNotBlank() }?.let { return it }
+  return d.event?.let { event ->
+    storyTitle(event, d.memory?.storylineSummary.orEmpty(), "")
+  } ?: "一段回忆视频"
 }
 
-private fun powerLabel(profile: PowerProfile): String = when (profile) {
-  PowerProfile.LOW_POWER -> "低功耗"
-  PowerProfile.BALANCED -> "均衡"
-  PowerProfile.HIGH_QUALITY -> "高质量"
+private fun storyTitle(event: Event, summary: String, eventType: String): String {
+  val day = storyDay(event.startEpochMs)
+  val theme = storyTheme(eventType, summary)
+  return "${day}的$theme"
 }
 
-private fun eventStatusLabel(status: EventSelectionStatus): String = when (status) {
-  EventSelectionStatus.SELECTED -> "已选中"
-  EventSelectionStatus.RESUME -> "可续跑"
-  EventSelectionStatus.FRESH -> "新候选"
-  EventSelectionStatus.COMPLETED -> "已完成"
-  EventSelectionStatus.EXCLUDED -> "已排除"
-  EventSelectionStatus.NOT_SELECTED -> "未选中"
+private fun storyMeta(candidate: EventCandidateSnapshot): String =
+  listOfNotNull(
+    formatEventRange(candidate.event.startEpochMs, candidate.event.endEpochMs).takeIf { it.isNotBlank() },
+    "${candidate.event.assetIds.size} 张/段素材",
+    "${candidate.realVideoCount} 段视频",
+    formatSec(candidate.realVideoSeconds.toDouble()).takeIf { candidate.realVideoSeconds > 0f },
+  ).joinToString(" · ")
+
+private fun compactStoryMeta(candidate: EventCandidateSnapshot): String =
+  listOfNotNull(
+    storyDay(candidate.event.startEpochMs),
+    "${candidate.event.assetIds.size}素材",
+    if (candidate.realVideoCount > 0) "${candidate.realVideoCount}视频" else null,
+    formatSec(candidate.realVideoSeconds.toDouble()).takeIf { candidate.realVideoSeconds > 0f },
+  ).joinToString(" · ")
+
+private fun storyListHint(candidate: EventCandidateSnapshot): String = when {
+  candidate.status == EventSelectionStatus.COMPLETED -> "已经剪过"
+  candidate.status == EventSelectionStatus.EXCLUDED -> "已放到不喜欢"
+  candidate.realVideoSeconds >= 180f -> "视频素材很足"
+  candidate.realVideoCount >= 8 -> "视频片段多"
+  candidate.scoutRecommended -> "画面连贯"
+  candidate.gpsAssetCount > 0 -> "有地点线索"
+  else -> storyTheme(candidate.scoutEventType, candidate.scoutSummary)
+}
+
+private fun storyReason(candidate: EventCandidateSnapshot): String {
+  val theme = storyTheme(candidate.scoutEventType, candidate.scoutSummary)
+  val videoHint = when {
+    candidate.realVideoSeconds >= 60f -> "视频素材比较充足"
+    candidate.realVideoCount > 0 -> "有可用的视频片段"
+    else -> "照片内容比较集中"
+  }
+  val scoutHint = when {
+    candidate.scoutRecommended -> "画面和内容比较适合剪成 vlog"
+    candidate.scoutSummary.isNotBlank() -> "我已经看过这组缩略图，内容有一定连贯性"
+    else -> "这组素材时间上比较接近，可以先作为一个故事看看"
+  }
+  return "这像是一组$theme，$videoHint，$scoutHint。"
+}
+
+private fun storyTheme(eventType: String, summary: String): String {
+  val text = "$eventType $summary".lowercase(Locale.ROOT)
+  return when {
+    listOf("food", "meal", "pizza", "restaurant", "dinner", "lunch", "breakfast", "餐", "美食").any { it in text } -> "美食时光"
+    listOf("travel", "trip", "street", "hotel", "beach", "outdoor", "旅行", "出游").any { it in text } -> "出游回忆"
+    listOf("zoo", "animal", "pet", "dog", "cat", "动物").any { it in text } -> "动物故事"
+    listOf("child", "kid", "people", "family", "friend", "person", "人物", "孩子", "家人").any { it in text } -> "家庭时光"
+    else -> "生活片段"
+  }
+}
+
+private fun storyDay(epochMs: Long): String {
+  if (epochMs <= 0L) return "今天"
+  val fmt = SimpleDateFormat("M月d日", Locale.getDefault())
+  return fmt.format(Date(epochMs))
+}
+
+private fun storyBrowseCategories(candidates: List<EventCandidateSnapshot>): List<StoryBrowseCategory> =
+  StoryBrowseCategory.entries.filter { category ->
+    category == StoryBrowseCategory.Recommended ||
+      category == StoryBrowseCategory.All ||
+      candidates.any { matchesStoryCategory(it, category) }
+  }
+
+private fun matchesStoryCategory(candidate: EventCandidateSnapshot, category: StoryBrowseCategory): Boolean = when (category) {
+  StoryBrowseCategory.Recommended -> candidate.status == EventSelectionStatus.SELECTED || candidate.scoutRecommended
+  StoryBrowseCategory.All -> true
+  StoryBrowseCategory.Travel -> storyTheme(candidate.scoutEventType, candidate.scoutSummary) == "出游回忆"
+  StoryBrowseCategory.Family -> storyTheme(candidate.scoutEventType, candidate.scoutSummary) == "家庭时光"
+  StoryBrowseCategory.Food -> storyTheme(candidate.scoutEventType, candidate.scoutSummary) == "美食时光"
+  StoryBrowseCategory.Animal -> storyTheme(candidate.scoutEventType, candidate.scoutSummary) == "动物故事"
+  StoryBrowseCategory.Video -> candidate.realVideoCount >= 3 || candidate.realVideoSeconds >= 45f
+  StoryBrowseCategory.Done -> candidate.status == EventSelectionStatus.COMPLETED
+  StoryBrowseCategory.Hidden -> candidate.status == EventSelectionStatus.EXCLUDED
+}
+
+private fun storySortComparator(mode: StorySortMode): Comparator<EventCandidateSnapshot> = when (mode) {
+  StorySortMode.Recommended -> compareByDescending<EventCandidateSnapshot> { if (it.status == EventSelectionStatus.SELECTED) 1 else 0 }
+    .thenByDescending { it.valueScore }
+    .thenByDescending { it.realVideoSeconds }
+    .thenByDescending { it.event.startEpochMs }
+  StorySortMode.Newest -> compareByDescending { it.event.startEpochMs }
+  StorySortMode.Oldest -> compareBy { it.event.startEpochMs }
+}
+
+private fun friendlyProgress(progress: ProgressSnapshot, making: Boolean = false): FriendlyProgress {
+  if (making) {
+    return when {
+      progress.stage == "queued" || progress.stage == "work_running" -> FriendlyProgress(
+        title = "正在准备制作",
+        detail = progress.detail.ifBlank { "我会按你选中的故事来剪，完成后会出现在“视频”里。" },
+        current = progress.current,
+        total = progress.total,
+      )
+      progress.stage == "ingest" || progress.stage == "event_scout" || progress.stage == "candidate_refresh" -> FriendlyProgress(
+        title = "正在制作视频",
+        detail = "正在确认这组故事的素材和画面顺序，不会改变你的选择。",
+        current = progress.current,
+        total = progress.total,
+      )
+      progress.stage.startsWith("perceive") || progress.stage.startsWith("annotate") -> FriendlyProgress(
+        title = "正在挑选入片画面",
+        detail = "我在给素材打分，避开模糊、重复或不适合入片的画面。",
+        current = progress.current,
+        total = progress.total,
+      )
+      progress.stage.startsWith("render") -> FriendlyProgress(
+        title = "正在导出视频",
+        detail = "马上就能在“视频”里看到成片。",
+        current = progress.current,
+        total = progress.total,
+      )
+      else -> FriendlyProgress(
+        title = progress.headline.ifBlank { "正在制作视频" },
+        detail = progress.detail.ifBlank { "制作中，完成后会出现在“视频”里。" },
+        current = progress.current,
+        total = progress.total,
+      )
+    }
+  }
+  val defaultDetail = "我在找画面清楚、故事连贯、适合剪成视频的片段。"
+  return when {
+    progress.stage == "event_scout" || progress.stage == "candidate_refresh" -> FriendlyProgress(
+      title = "正在帮你看相册",
+      detail = defaultDetail,
+      current = progress.current,
+      total = progress.total,
+    )
+    progress.stage == "download" -> FriendlyProgress(
+      title = "正在准备模型",
+      detail = "第一次使用需要先确认本地模型可以运行。",
+      current = progress.current,
+      total = progress.total,
+    )
+    progress.stage.startsWith("perceive") || progress.stage.startsWith("annotate") -> FriendlyProgress(
+      title = "正在挑清楚的画面",
+      detail = "我会避开模糊、重复或不适合入片的素材。",
+      current = progress.current,
+      total = progress.total,
+    )
+    progress.stage.startsWith("render") -> FriendlyProgress(
+      title = "正在导出视频",
+      detail = "马上就能在“视频”里看到成片。",
+      current = progress.current,
+      total = progress.total,
+    )
+    else -> FriendlyProgress(
+      title = progress.headline.ifBlank { "正在制作视频" },
+      detail = progress.detail.ifBlank { defaultDetail },
+      current = progress.current,
+      total = progress.total,
+    )
+  }
+}
+
+private fun friendlyIntentLabel(intent: GenerationIntent): String = when (intent) {
+  GenerationIntent.AUTO -> "自动帮我选"
+  GenerationIntent.TRAVEL -> "旅行回忆"
+  GenerationIntent.ZOO -> "动物园/宠物"
+  GenerationIntent.PEOPLE -> "家人朋友"
+  GenerationIntent.FOOD -> "美食日常"
+}
+
+private fun friendlyPowerLabel(profile: PowerProfile): String = when (profile) {
+  PowerProfile.LOW_POWER -> "快一点"
+  PowerProfile.BALANCED -> "平衡"
+  PowerProfile.HIGH_QUALITY -> "效果更好"
 }
 
 private fun formatEventRange(startMs: Long, endMs: Long): String {

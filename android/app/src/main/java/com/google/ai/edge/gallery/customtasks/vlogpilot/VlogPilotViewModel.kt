@@ -28,6 +28,7 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.DecisionStore
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventDecisions
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventSelectionManifest
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventSelectionPlanner
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventSelectionStatus
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventScoutRunner
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineEventBus
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineProgress
@@ -163,7 +164,7 @@ class VlogPilotViewModel @Inject constructor(
   }
 
   fun pinEvent(eventId: String) {
-    updateRunConfig(refreshCandidates = true) {
+    updateRunConfig(refreshCandidates = false) {
       copy(
         pinnedEventIds = pinnedEventIds + eventId,
         excludedEventIds = excludedEventIds - eventId,
@@ -173,7 +174,7 @@ class VlogPilotViewModel @Inject constructor(
   }
 
   fun excludeEvent(eventId: String) {
-    updateRunConfig(refreshCandidates = true) {
+    updateRunConfig(refreshCandidates = false) {
       copy(
         pinnedEventIds = pinnedEventIds - eventId,
         excludedEventIds = excludedEventIds + eventId,
@@ -184,13 +185,13 @@ class VlogPilotViewModel @Inject constructor(
   }
 
   fun clearExcluded(eventId: String) {
-    updateRunConfig(refreshCandidates = true) {
+    updateRunConfig(refreshCandidates = false) {
       copy(excludedEventIds = excludedEventIds - eventId)
     }
   }
 
   fun onlyGenerateEvent(eventId: String) {
-    updateRunConfig(refreshCandidates = true) {
+    updateRunConfig(refreshCandidates = false) {
       copy(
         onlySelectedEventIds = setOf(eventId),
         excludedEventIds = excludedEventIds - eventId,
@@ -199,7 +200,7 @@ class VlogPilotViewModel @Inject constructor(
   }
 
   fun forceRegenerateEvent(eventId: String) {
-    updateRunConfig(refreshCandidates = true) {
+    updateRunConfig(refreshCandidates = false) {
       copy(
         onlySelectedEventIds = setOf(eventId),
         forceRegenerateEventIds = forceRegenerateEventIds + eventId,
@@ -209,8 +210,19 @@ class VlogPilotViewModel @Inject constructor(
   }
 
   fun clearOnlySelected() {
-    updateRunConfig(refreshCandidates = true) {
+    updateRunConfig(refreshCandidates = false) {
       copy(onlySelectedEventIds = emptySet())
+    }
+  }
+
+  fun runOnlyEvent(eventId: String, model: Model) {
+    viewModelScope.launch {
+      val next = _runConfig.value.copy(
+        onlySelectedEventIds = setOf(eventId),
+        excludedEventIds = _runConfig.value.excludedEventIds - eventId,
+      )
+      persistRunConfig(next, refreshCandidates = false)
+      runFullPipelineInternal(model)
     }
   }
 
@@ -219,13 +231,51 @@ class VlogPilotViewModel @Inject constructor(
     transform: VlogPilotRunConfig.() -> VlogPilotRunConfig,
   ) {
     viewModelScope.launch {
-      val next = transform(_runConfig.value)
-      _runConfig.value = next
-      withContext(Dispatchers.IO) { next.save(appContext) }
-      if (refreshCandidates && _state.value !is PipelineState.Running) {
-        refreshCandidatesInternal()
+      persistRunConfig(transform(_runConfig.value), refreshCandidates)
+    }
+  }
+
+  private suspend fun persistRunConfig(next: VlogPilotRunConfig, refreshCandidates: Boolean) {
+    _runConfig.value = next
+    withContext(Dispatchers.IO) { next.save(appContext) }
+    if (!refreshCandidates) {
+      val syncedManifest = _eventSelection.value?.syncWithRunConfig(next)
+      if (syncedManifest != null) {
+        _eventSelection.value = syncedManifest
+        withContext(Dispatchers.IO) { DecisionStore.writeEventSelection(appContext, syncedManifest) }
       }
     }
+    if (refreshCandidates && _state.value !is PipelineState.Running) {
+      refreshCandidatesInternal()
+    }
+  }
+
+  private fun EventSelectionManifest.syncWithRunConfig(config: VlogPilotRunConfig): EventSelectionManifest {
+    val candidateIds = candidates.map { it.eventId }.toSet()
+    val selectedIds = if (config.onlySelectedEventIds.isNotEmpty()) {
+      config.onlySelectedEventIds.filter { it in candidateIds }
+    } else {
+      selectedEventIds.filter { it !in config.excludedEventIds }
+    }
+    val selectedSet = selectedIds.toSet()
+    val candidatesWithStatus = candidates.map { candidate ->
+      val status = when {
+        candidate.eventId in config.excludedEventIds -> EventSelectionStatus.EXCLUDED
+        candidate.eventId in selectedSet -> EventSelectionStatus.SELECTED
+        candidate.status == EventSelectionStatus.EXCLUDED && candidate.eventId !in config.excludedEventIds -> EventSelectionStatus.NOT_SELECTED
+        candidate.status == EventSelectionStatus.SELECTED && candidate.eventId !in selectedSet -> EventSelectionStatus.NOT_SELECTED
+        else -> candidate.status
+      }
+      candidate.copy(status = status)
+    }
+    return copy(
+      pinnedEventIds = config.pinnedEventIds.sorted(),
+      excludedEventIds = config.excludedEventIds.sorted(),
+      forceRegenerateEventIds = config.forceRegenerateEventIds.sorted(),
+      onlySelectedEventIds = config.onlySelectedEventIds.sorted(),
+      selectedEventIds = selectedIds,
+      candidates = candidatesWithStatus,
+    )
   }
 
   private suspend fun refreshCandidatesInternal(windowDays: Int = 30, model: Model? = null): EventSelectionManifest? {
@@ -317,58 +367,62 @@ class VlogPilotViewModel @Inject constructor(
 
   fun runFullPipeline(model: Model) {
     viewModelScope.launch {
-      StateBreadcrumb.mark(appContext, "ui_run_request", "model=${model.name}")
-      val active = withContext(Dispatchers.IO) { activeWorkInfo() }
-      if (active != null && !isStaleWork()) {
-        StateBreadcrumb.mark(appContext, "ui_run_existing", "id=${active.id} state=${active.state}")
-        _state.value = PipelineState.Running("已有后台任务正在运行")
-        _progress.value = progressWithRecent(
-          ProgressSnapshot(
-            "已有后台任务正在运行",
-            "没有重新入队，避免再次点击生成把当前 Worker 取消；需要重跑请先点取消",
-            "work_running",
-          ),
-        )
-        return@launch
-      }
+      runFullPipelineInternal(model)
+    }
+  }
 
-      val cachedManifest = withContext(Dispatchers.IO) { DecisionStore.loadEventSelection(appContext) }
-      val currentConfig = _runConfig.value
-      val manifest = if (cachedManifest == null || cachedManifest.needsGenerationRefresh(currentConfig)) {
-        refreshCandidatesInternal(30, model)
-      } else {
-        cachedManifest
-      }
-      if (manifest == null) return@launch
-      if (manifest.selectedEventIds.isEmpty()) {
-        val existing = listExistingCandidates().map { (id, path) -> EventResult(id, path) }
-        _state.value = PipelineState.Done(existing)
-        _progress.value = progressWithRecent(
-          ProgressSnapshot(
-            "没有待生成事件",
-            "当前候选都已完成或被排除；需要重跑时请在事件选择里点“重新生成”。",
-            "no_selected_event",
-          ),
-        )
-        return@launch
-      }
-
-      collectedOutputs.clear()
-      VlogPilotModelRegistry.stash(appContext, model)
-      VlogPipelineWorker.ensureChannel(appContext)
-      val req = OneTimeWorkRequestBuilder<VlogPipelineWorker>().build()
-      val policy = if (active != null) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP
-      StateBreadcrumb.mark(appContext, "ui_enqueue", "policy=$policy request=${req.id}")
-      workManager.enqueueUniqueWork(VlogPipelineWorker.WORK_NAME, policy, req)
-      _state.value = PipelineState.Running("任务已加入后台队列")
+  private suspend fun runFullPipelineInternal(model: Model) {
+    StateBreadcrumb.mark(appContext, "ui_run_request", "model=${model.name}")
+    val active = withContext(Dispatchers.IO) { activeWorkInfo() }
+    if (active != null && !isStaleWork()) {
+      StateBreadcrumb.mark(appContext, "ui_run_existing", "id=${active.id} state=${active.state}")
+      _state.value = PipelineState.Running("已有后台任务正在运行")
       _progress.value = progressWithRecent(
         ProgressSnapshot(
-          "任务已入队",
-          if (policy == ExistingWorkPolicy.REPLACE) "检测到旧后台任务长时间无心跳，已重置并重新开始" else "等待 WorkManager 启动前台任务",
-          "queued",
+          "已有后台任务正在运行",
+          "没有重新入队，避免再次点击生成把当前 Worker 取消；需要重跑请先点取消",
+          "work_running",
         ),
       )
+      return
     }
+
+    val cachedManifest = withContext(Dispatchers.IO) { DecisionStore.loadEventSelection(appContext) }
+    val currentConfig = _runConfig.value
+    val manifest = if (cachedManifest == null || cachedManifest.needsGenerationRefresh(currentConfig)) {
+      refreshCandidatesInternal(30, model)
+    } else {
+      cachedManifest.syncWithRunConfig(currentConfig)
+    }
+    if (manifest == null) return
+    if (manifest.selectedEventIds.isEmpty()) {
+      val existing = listExistingCandidates().map { (id, path) -> EventResult(id, path) }
+      _state.value = PipelineState.Done(existing)
+      _progress.value = progressWithRecent(
+        ProgressSnapshot(
+          "没有待制作的故事",
+          "先在故事页选一组故事，再点“开始制作”。",
+          "no_selected_event",
+        ),
+      )
+      return
+    }
+
+    collectedOutputs.clear()
+    VlogPilotModelRegistry.stash(appContext, model)
+    VlogPipelineWorker.ensureChannel(appContext)
+    val req = OneTimeWorkRequestBuilder<VlogPipelineWorker>().build()
+    val policy = if (active != null) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP
+    StateBreadcrumb.mark(appContext, "ui_enqueue", "policy=$policy request=${req.id}")
+    workManager.enqueueUniqueWork(VlogPipelineWorker.WORK_NAME, policy, req)
+    _state.value = PipelineState.Running("任务已加入后台队列")
+    _progress.value = progressWithRecent(
+      ProgressSnapshot(
+        "开始制作视频",
+        "我会按你选中的故事来剪，完成后会出现在“视频”里。",
+        "queued",
+      ),
+    )
   }
 
   private fun EventSelectionManifest.needsGenerationRefresh(config: VlogPilotRunConfig): Boolean {
