@@ -13,6 +13,7 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventSelector
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotRunConfig
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.EventScout
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Perception
 import java.io.File
 
@@ -30,6 +31,7 @@ object EventSelectionPlanner {
     assets: List<Asset>,
     events: List<Event>,
     runConfig: VlogPilotRunConfig,
+    scouts: Map<String, EventScout> = emptyMap(),
     maxEvents: Int = 2,
     manifestLimit: Int = 12,
     nowMs: Long = System.currentTimeMillis(),
@@ -43,6 +45,7 @@ object EventSelectionPlanner {
       events = events,
       assetMap = assetMap,
       perceptionFor = ::selectionPerception,
+      scoutFor = { scouts[it] },
       intent = runConfig.intent,
       nowMs = nowMs,
     )
@@ -154,6 +157,17 @@ object EventSelectionPlanner {
       gpsAssetCount = gpsAssetCount,
       spanHours = spanHours,
       reasons = (stateReasons + reasons).distinct(),
+      rankingMode = if (scout != null) "vlm_scout" else "metadata_only",
+      scoutEventType = scout?.eventType.orEmpty(),
+      scoutSummary = scout?.summary.orEmpty(),
+      scoutStoryValue = scout?.storyValue ?: 0f,
+      scoutVisualValue = scout?.visualValue ?: 0f,
+      scoutSubjectValue = scout?.subjectValue ?: 0f,
+      scoutRecommended = scout?.recommended == true,
+      scoutBestAssetIds = scout?.bestAssetIds.orEmpty(),
+      scoutRejectReasons = scout?.rejectReasons.orEmpty(),
+      scoutPageCount = scout?.pageCount ?: 0,
+      scoutSampled = scout?.sampled == true,
     )
   }
 

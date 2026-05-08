@@ -14,8 +14,10 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.AgentRuntime
 import com.google.ai.edge.gallery.customtasks.vlogpilot.ingest.PhotoIngest
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventSegmenter
+import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventScoutSheetBuilder
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.GenerationIntent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.PowerProfile
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotRunConfig
@@ -26,6 +28,7 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.DecisionStore
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventDecisions
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventSelectionManifest
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventSelectionPlanner
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventScoutRunner
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineEventBus
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineProgress
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.StateBreadcrumb
@@ -141,9 +144,9 @@ class VlogPilotViewModel @Inject constructor(
     }
   }
 
-  fun refreshCandidates(windowDays: Int = 30) {
+  fun refreshCandidates(model: Model, windowDays: Int = 30) {
     viewModelScope.launch {
-      refreshCandidatesInternal(windowDays)
+      refreshCandidatesInternal(windowDays, model)
     }
   }
 
@@ -225,12 +228,12 @@ class VlogPilotViewModel @Inject constructor(
     }
   }
 
-  private suspend fun refreshCandidatesInternal(windowDays: Int = 30): EventSelectionManifest? {
+  private suspend fun refreshCandidatesInternal(windowDays: Int = 30, model: Model? = null): EventSelectionManifest? {
     _state.value = PipelineState.Scanning("正在刷新候选事件")
     _progress.value = progressWithRecent(
       ProgressSnapshot(
         "正在刷新候选事件",
-        "只读取 MediaStore、事件切分、缓存感知和事件排序，不启动 VLM 或渲染",
+        if (model == null) "读取 MediaStore、事件切分和已有 scout 缓存" else "Gemma 将按 3x3 contact sheet 浏览候选事件",
         "candidate_refresh",
       ),
     )
@@ -238,11 +241,44 @@ class VlogPilotViewModel @Inject constructor(
       val result = withContext(Dispatchers.IO) {
         val assets = PhotoIngest.loadRecent(appContext, windowDays)
         val events = EventSegmenter.segment(assets)
+        val coarsePlan = EventSelectionPlanner.plan(
+          context = appContext,
+          assets = assets,
+          events = events,
+          runConfig = _runConfig.value,
+        )
+        val scouts = if (model != null && coarsePlan.rankedCandidates.isNotEmpty()) {
+          AgentRuntime(appContext, model).use { agent ->
+            agent.ensureInitialized()
+            EventScoutRunner.scout(
+              context = appContext,
+              agentRuntime = agent,
+              candidates = coarsePlan.rankedCandidates,
+              runConfig = _runConfig.value,
+            ) { scout ->
+              _progress.value = progressWithRecent(
+                ProgressSnapshot(
+                  "VLM 浏览候选事件 ${scout.eventIndex}/${scout.eventCount}",
+                  "${scout.eventId} · 3x3 第 ${scout.pageIndex}/${scout.pageCount} 页 · ${if (scout.cacheHit) "读取 scout 缓存" else "Gemma 正在看 contact sheet"}",
+                  "event_scout",
+                  current = scout.pageIndex,
+                  total = scout.pageCount,
+                ),
+              )
+            }
+          }
+        } else {
+          coarsePlan.rankedCandidates.mapNotNull { candidate ->
+            val signature = EventScoutSheetBuilder.signature(candidate.assets, _runConfig.value.powerProfile)
+            DecisionStore.loadEventScout(appContext, candidate.eventId, signature)?.let { candidate.eventId to it }
+          }.toMap()
+        }
         val plan = EventSelectionPlanner.plan(
           context = appContext,
           assets = assets,
           events = events,
           runConfig = _runConfig.value,
+          scouts = scouts,
         )
         DecisionStore.writeEventSelection(appContext, plan.manifest)
         CandidateRefreshResult(assets, events, plan.manifest)
@@ -362,6 +398,7 @@ class VlogPilotViewModel @Inject constructor(
   private fun shouldRefreshDecisions(p: PipelineProgress): Boolean = when (p) {
     is PipelineProgress.DownloadingModels,
     PipelineProgress.Ingesting,
+    is PipelineProgress.ScoutingEvents,
     is PipelineProgress.Perceiving,
     is PipelineProgress.Annotating -> false
     else -> true
@@ -376,6 +413,13 @@ class VlogPilotViewModel @Inject constructor(
       total = 100,
     )
     PipelineProgress.Ingesting -> ProgressSnapshot("扫描相册", "读取 MediaStore，过滤非相机目录和过大文件", "ingest")
+    is PipelineProgress.ScoutingEvents -> ProgressSnapshot(
+      headline = "VLM 浏览候选事件 ${p.currentEvent}/${p.totalEvents}",
+      detail = "${p.eventId} · 3x3 第 ${p.currentPage}/${p.totalPages} 页 · ${if (p.cacheHit) "读取 scout 缓存" else "Gemma 正在看 contact sheet"}",
+      stage = "event_scout",
+      current = p.currentPage,
+      total = p.totalPages,
+    )
     is PipelineProgress.SelectingEvents -> ProgressSnapshot(
       headline = "筛选高价值事件 ${p.selectedCount}/${p.candidateCount}",
       detail = p.detail,

@@ -44,7 +44,10 @@ class EditorAgent(
     perceptions: Map<String, Perception>,
     excludedAssetIds: Set<String>,
     previousShot: String,
+    /** Director's tone string (used as a fallback for ColorGrade if directorColorGrade is NEUTRAL). */
     directorTone: String = "",
+    /** Director's chosen ColorGrade enum. NEUTRAL means "use ColorGradeFromTone keyword inference on directorTone". */
+    directorColorGrade: ColorGrade = ColorGrade.NEUTRAL,
   ): ShotSpec? {
     val candidates = Recall.topK(
       request = request,
@@ -54,7 +57,8 @@ class EditorAgent(
       excludedAssetIds = excludedAssetIds,
       k = 8,
     )
-    val grade = ColorGradeFromTone.pick(directorTone)
+    val grade = if (directorColorGrade != ColorGrade.NEUTRAL) directorColorGrade
+                else ColorGradeFromTone.pick(directorTone)
     if (candidates.isEmpty()) return null
     if (candidates.size == 1) return composeSpec(order, request, candidates[0], "only candidate", grade)
 
@@ -88,18 +92,30 @@ previous_shot_summary: $previousShot
 $tagSummary
 
 请综合标签 + 缩略图视觉，从 ${thumbs.size} 张候选中选 1 张（编号 1..${thumbs.size}）。
+图和标签矛盾时以图为准。
 """.trimIndent()
     val raw = try {
-      agent.ask(systemPrompt = PromptStrings.EDITOR_SYSTEM, userText = userMsg, images = thumbs)
+      agent.ask(systemPrompt = PromptStrings.EDITOR_SYSTEM, userText = userMsg, images = thumbs, label = "editor")
     } finally {
       // Free thumbnail bitmaps once they've been encoded into the inference request.
       thumbs.forEach { runCatching { it.recycle() } }
     }
     val obj = try { JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject } catch (_: Throwable) { null }
-    val idx = obj?.get("chosen_index")?.jsonPrimitive?.intOrNull?.minus(1) ?: 0
+    // Coerce chosen_index into [0, size-1] before using it. Gemma 4 E2B occasionally
+    // emits 0 (which would underflow to -1) or numbers larger than the candidate set
+    // when it hallucinates entries. Clamping keeps runner-up de-dup logic correct.
+    val rawChosen = obj?.get("chosen_index")?.jsonPrimitive?.intOrNull?.minus(1) ?: 0
+    val idx = rawChosen.coerceIn(0, visualCandidates.lastIndex.coerceAtLeast(0))
     val rationale = obj?.get("rationale")?.jsonPrimitive?.contentOrNull.orEmpty()
+    val runnerUpIdx = obj?.get("runner_up_index")?.jsonPrimitive?.intOrNull?.let { it - 1 }?.takeIf { it in visualCandidates.indices && it != idx }
+    val whyNot = obj?.get("why_not_others")?.jsonPrimitive?.contentOrNull.orEmpty()
     val chosen = visualCandidates.getOrNull(idx)?.first ?: visualCandidates.first().first
-    return composeSpec(order, request, chosen, rationale, grade)
+    val combinedRationale = listOfNotNull(
+      rationale.ifBlank { null },
+      runnerUpIdx?.let { "runner-up=#${it + 1}" },
+      whyNot.takeIf { it.isNotBlank() }?.let { "排除其它: $it" },
+    ).joinToString(" / ")
+    return composeSpec(order, request, chosen, combinedRationale, grade)
   }
 
   private fun loadCandidateBitmap(candidate: Recall.Candidate) =

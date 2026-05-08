@@ -15,6 +15,7 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Critique
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.DirectorBrief
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.EventScout
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.EventMemory
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Perception
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Timeline
@@ -98,6 +99,33 @@ object DecisionStore {
       json.decodeFromString<EventSelectionManifest>(file.readText())
     } catch (t: Throwable) {
       Log.w(TAG, "failed to read $EVENT_SELECTION_FILE: ${t.message}")
+      null
+    }
+  }
+
+  fun writeEventScout(context: Context, scout: EventScout) {
+    try {
+      val root = File(context.filesDir, "event_scouts").apply { mkdirs() }
+      File(root, "${scout.eventId}.json").writeText(json.encodeToString(scout))
+    } catch (t: Throwable) {
+      Log.w(TAG, "failed to persist event scout ${scout.eventId}: ${t.message}")
+    }
+  }
+
+  fun loadEventScout(context: Context, eventId: String, expectedSignature: String? = null): EventScout? {
+    val file = File(File(context.filesDir, "event_scouts"), "$eventId.json")
+    if (!file.isFile) return null
+    return try {
+      val scout = json.decodeFromString<EventScout>(file.readText())
+      if (expectedSignature != null && scout.assetSignature != expectedSignature) {
+        file.delete()
+        null
+      } else {
+        scout
+      }
+    } catch (t: Throwable) {
+      Log.w(TAG, "failed to read event scout $eventId: ${t.message}")
+      file.delete()
       null
     }
   }

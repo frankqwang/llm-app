@@ -86,6 +86,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.PromptStrings
+import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.EventScoutAgent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.VlmAnnotator
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.MediaLoader
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.GenerationIntent
@@ -135,14 +136,18 @@ fun VlogPilotScreen(
     }
   }
 
-  fun launchPipeline() {
-    val downloaded = modelManagerViewModel.getAllDownloadedModels()
-    val model = downloaded.firstOrNull { it.name.contains("gemma-4", ignoreCase = true) }
-      ?: downloaded.firstOrNull()
-    if (model == null) {
-      viewModel.reportError("没有找到已导入的 LLM。请先在 Models 中导入本地模型文件。")
-      return
+  fun selectedModelOrReport() =
+    modelManagerViewModel.getAllDownloadedModels().let { downloaded ->
+      downloaded.firstOrNull { it.name.contains("gemma-4", ignoreCase = true) }
+        ?: downloaded.firstOrNull()
+    }.also { model ->
+      if (model == null) {
+        viewModel.reportError("没有找到已导入的 LLM。请先在 Models 中导入本地模型文件。")
+      }
     }
+
+  fun launchPipeline() {
+    val model = selectedModelOrReport() ?: return
     viewModel.runFullPipeline(model)
   }
 
@@ -186,7 +191,9 @@ fun VlogPilotScreen(
         eventSelection = eventSelection,
         running = running,
         onRefreshClick = {
-          requireAlbumPermission { viewModel.refreshCandidates() }
+          requireAlbumPermission {
+            selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
+          }
         },
         onRunClick = {
           if (running) {
@@ -415,7 +422,7 @@ private fun StudioStatusCard(
           FilledTonalButton(onClick = onRunClick) { Text("取消") }
         } else {
           Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilledTonalButton(onClick = onRefreshClick) { Text("刷新候选") }
+            FilledTonalButton(onClick = onRefreshClick) { Text("VLM浏览") }
             Button(onClick = onRunClick) { Text("生成") }
           }
         }
@@ -556,7 +563,7 @@ private fun EventSelectionHeader(
       SectionHeader(
         icon = Icons.Outlined.Search,
         title = "事件选择",
-        subtitle = "轻量候选榜：不触发 VLM、不渲染，只解释为什么选这些事件",
+        subtitle = "VLM 先按 3x3 contact sheet 浏览候选事件，再做语义排序",
       )
       LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         item { InfoPill("候选 ${manifest.candidateCount}", Icons.Outlined.Search, true) }
@@ -649,10 +656,44 @@ private fun EventCandidateCard(
 
       LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         item { InfoPill("value ${(candidate.valueScore * 100).toInt()}", Icons.Outlined.Star, candidate.status == EventSelectionStatus.SELECTED) }
+        item { InfoPill(candidate.rankingMode, Icons.Outlined.Search, candidate.rankingMode == "vlm_scout") }
         item { InfoPill("travel ${(candidate.travelScore * 100).toInt()}", Icons.Outlined.Visibility) }
         item { InfoPill("media ${(candidate.mediaScore * 100).toInt()}", Icons.Outlined.Movie) }
         item { InfoPill("story ${(candidate.storyScore * 100).toInt()}", Icons.Outlined.Edit) }
         if (candidate.gpsAssetCount > 0) item { InfoPill("GPS ${candidate.gpsAssetCount}", Icons.Outlined.Search, true) }
+      }
+
+      if (candidate.scoutSummary.isNotBlank()) {
+        Surface(
+          modifier = Modifier.fillMaxWidth(),
+          shape = RoundedCornerShape(14.dp),
+          color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
+        ) {
+          Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+              item { InfoPill(candidate.scoutEventType.ifBlank { "scout" }, Icons.Outlined.Visibility, candidate.scoutRecommended) }
+              item { InfoPill("story ${(candidate.scoutStoryValue * 100).toInt()}", Icons.Outlined.Edit) }
+              item { InfoPill("visual ${(candidate.scoutVisualValue * 100).toInt()}", Icons.Outlined.PhotoLibrary) }
+              item { InfoPill("pages ${candidate.scoutPageCount}", Icons.Outlined.PhotoLibrary, candidate.scoutSampled) }
+            }
+            Text(
+              candidate.scoutSummary,
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              maxLines = 3,
+              overflow = TextOverflow.Ellipsis,
+            )
+            if (candidate.scoutRejectReasons.isNotEmpty()) {
+              Text(
+                "caution: ${candidate.scoutRejectReasons.joinToString(" · ")}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+              )
+            }
+          }
+        }
       }
 
       if (candidate.reasons.isNotEmpty()) {
@@ -1514,14 +1555,25 @@ private fun promptSpecs(): List<PromptSpec> = listOf(
   PromptSpec(
     title = "VLM 单素材标注",
     subtitle = "图片缩略图 -> VlmTags",
-    systemPrompt = VlmAnnotator.SYSTEM_PROMPT,
+    systemPrompt = PromptStrings.VLM_IMAGE_SYSTEM,
     userTemplate = "媒体类型: <image/video/live_photo>。请输出 VlmTags JSON。",
   ),
   PromptSpec(
     title = "VLM 视频多帧标注",
     subtitle = "自适应多帧视频网格 -> VlmTags + VideoInsight",
-    systemPrompt = VlmAnnotator.VIDEO_SYSTEM_PROMPT,
+    systemPrompt = PromptStrings.VLM_VIDEO_SYSTEM,
     userTemplate = "媒体类型: <video/live_photo>。帧编号和时间戳: 1=0.4s, 2=1.2s, ...。请输出 Video VlmTags JSON。",
+  ),
+  PromptSpec(
+    title = "Event Scout",
+    subtitle = "3x3 候选事件 contact sheet -> EventScout",
+    systemPrompt = EventScoutAgent.SCOUT_SYSTEM_PROMPT,
+    userTemplate = """
+Event id: <eventId>
+Page: <page>/<pages>
+Cells are numbered 1..9. Each cell is one image or one sampled video frame.
+Return EventPageScout JSON only.
+""".trimIndent(),
   ),
   PromptSpec(
     title = "Browser / Contact Sheet",

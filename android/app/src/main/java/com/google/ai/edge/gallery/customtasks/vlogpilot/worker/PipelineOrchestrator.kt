@@ -31,6 +31,8 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.render.VideoRenderer
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.PowerPacer
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotRunConfig
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.CriticVerdict
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.DirectorBrief
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Perception
@@ -90,91 +92,121 @@ class PipelineOrchestrator(
     val assets = PhotoIngest.loadRecent(context, windowDays, ingestFilter)
     val allEvents = EventSegmenter.segment(assets)
     val assetMap = assets.associateBy { it.id }
-    val selectionPlan = EventSelectionPlanner.plan(
+    val coarsePlan = EventSelectionPlanner.plan(
       context = context,
       assets = assets,
       events = allEvents,
       runConfig = runConfig,
       maxEvents = maxEvents,
     )
-    DecisionStore.writeEventSelection(context, selectionPlan.manifest)
-    val rankedCandidates = selectionPlan.rankedCandidates
-    val events = selectionPlan.selectedEvents
-    val keptAssetIds = events.flatMap { it.assetIds }.toSet()
-    val candidateSummary = rankedCandidates.take(8).joinToString(" | ") { it.compactSummary() }
-    val selectedSummary = selectionPlan.manifest.candidates
-      .filter { it.eventId in selectionPlan.manifest.selectedEventIds }
-      .joinToString(" | ") { "${it.eventId}:value=${(it.valueScore * 100).toInt()} reason=${it.reasons.joinToString("+")}" }
-    Log.d(TAG, "events: selected=${events.size} resume=${selectionPlan.resumeEventIds.size} candidates=${rankedCandidates.size} intent=${runConfig.intent.name} power=${runConfig.powerProfile.name}")
-    StateBreadcrumb.mark(context, "event_candidates", candidateSummary.ifBlank { "none" })
-    StateBreadcrumb.mark(
-      context,
-      "event_select",
-      selectedSummary.ifBlank { "none" },
-    )
-    progress(PipelineProgress.SelectingEvents(rankedCandidates.size, events.size, selectedSummary.ifBlank { "none" }))
-    if (events.isEmpty()) {
+    DecisionStore.writeEventSelection(context, coarsePlan.manifest)
+    if (coarsePlan.rankedCandidates.isEmpty()) {
+      progress(PipelineProgress.SelectingEvents(0, 0, "none"))
       progress(PipelineProgress.AllDone)
       return Result(emptyMap())
     }
-    // Make the Process tab useful immediately. Perception + VLM annotation can
-    // take minutes, especially on the first run; if we only write event_inputs
-    // inside the per-event loop below, DecisionStore.loadAll() sees an empty
-    // decisions/ directory during the whole pre-agent phase.
-    for (event in events) {
-      DecisionStore.writeEventInputs(context, event, event.assetIds.mapNotNull { assetMap[it] })
-    }
-    progress(PipelineProgress.IngestDone(keptAssetIds.size, events.size))
 
-    // 3. Perception over every asset that's actually used by a kept event.
-    //    Per-asset Perception is JSON-cached; identical asset on a re-run skips
-    //    the model calls entirely (~1-2s saved per asset).
-    val perception = PerceptionEngine(context)
-    val perceptions = HashMap<String, Perception>(keptAssetIds.size)
-    var perceptionMs = 0L
-    var cacheHits = 0
-    var perceptionCount = 0
-    try {
-      val toAnalyze = assets.filter { it.id in keptAssetIds }
-      perceptionCount = toAnalyze.size
-      val perceptionStart = System.nanoTime()
-      for ((i, asset) in toAnalyze.withIndex()) {
-        val cached = PerceptionCache.get(context, asset)
-        if (cached != null) {
-          perceptions[asset.id] = cached
-          cacheHits++
-        } else {
-          val fresh = perception.analyze(asset)
-          perceptions[asset.id] = fresh
-          PerceptionCache.put(context, asset, fresh)
-        }
-        if (i % 5 == 0 || i == toAnalyze.size - 1) {
-          progress(
-            PipelineProgress.Perceiving(
-              current = i + 1,
-              total = toAnalyze.size,
-              assetName = asset.displayName,
-              mediaType = asset.mediaType.name.lowercase(),
-              cacheHit = cached != null,
-            ),
-          )
-        }
-        PowerPacer.afterPerceptionAsset(cacheHit = cached != null)
-      }
-      perceptionMs = (System.nanoTime() - perceptionStart) / 1_000_000
-      Log.d(TAG, "perception: ${toAnalyze.size} assets in ${perceptionMs}ms (cache hits: $cacheHits)")
-    } finally {
-      perception.close()
-    }
-
-    // 4. Boot Gemma 4 (cold start ~5-15s; the actual model weights live in the gallery's
+    // 3. Boot Gemma 4 before final event selection. The VLM scout reads 3x3
+    //    event contact sheets and supplies the semantic signal for valueScore.
     //    LlmChatModelHelper which the user already imported separately).
     val agent = AgentRuntime(context, gemmaModel)
-    val outputs = HashMap<String, String>(events.size)
+    val outputs = HashMap<String, String>()
     try {
       StateBreadcrumb.mark(context, "init", "starting agent.ensureInitialized")
       agent.ensureInitialized()
       StateBreadcrumb.mark(context, "init_done", "agent ready")
+      val scoutMap = EventScoutRunner.scout(
+        context = context,
+        agentRuntime = agent,
+        candidates = coarsePlan.rankedCandidates,
+        runConfig = runConfig,
+      ) { scout ->
+        progress(
+          PipelineProgress.ScoutingEvents(
+            currentEvent = scout.eventIndex,
+            totalEvents = scout.eventCount,
+            eventId = scout.eventId,
+            currentPage = scout.pageIndex,
+            totalPages = scout.pageCount,
+            cacheHit = scout.cacheHit,
+          ),
+        )
+      }
+      val selectionPlan = EventSelectionPlanner.plan(
+        context = context,
+        assets = assets,
+        events = allEvents,
+        runConfig = runConfig,
+        scouts = scoutMap,
+        maxEvents = maxEvents,
+      )
+      DecisionStore.writeEventSelection(context, selectionPlan.manifest)
+      val rankedCandidates = selectionPlan.rankedCandidates
+      val events = selectionPlan.selectedEvents
+      val keptAssetIds = events.flatMap { it.assetIds }.toSet()
+      val candidateSummary = rankedCandidates.take(8).joinToString(" | ") { it.compactSummary() }
+      val selectedSummary = selectionPlan.manifest.candidates
+        .filter { it.eventId in selectionPlan.manifest.selectedEventIds }
+        .joinToString(" | ") { "${it.eventId}:value=${(it.valueScore * 100).toInt()} reason=${it.reasons.joinToString("+")}" }
+      Log.d(TAG, "events: selected=${events.size} resume=${selectionPlan.resumeEventIds.size} candidates=${rankedCandidates.size} intent=${runConfig.intent.name} power=${runConfig.powerProfile.name}")
+      StateBreadcrumb.mark(context, "event_candidates", candidateSummary.ifBlank { "none" })
+      StateBreadcrumb.mark(context, "event_select", selectedSummary.ifBlank { "none" })
+      progress(PipelineProgress.SelectingEvents(rankedCandidates.size, events.size, selectedSummary.ifBlank { "none" }))
+      if (events.isEmpty()) {
+        progress(PipelineProgress.AllDone)
+        return Result(emptyMap())
+      }
+
+      // Make the Process tab useful immediately. Perception + VLM annotation can
+      // take minutes, especially on the first run; if we only write event_inputs
+      // inside the per-event loop below, DecisionStore.loadAll() sees an empty
+      // decisions/ directory during the whole pre-agent phase.
+      for (event in events) {
+        DecisionStore.writeEventInputs(context, event, event.assetIds.mapNotNull { assetMap[it] })
+      }
+      progress(PipelineProgress.IngestDone(keptAssetIds.size, events.size))
+
+      // 4. Perception over every asset that's actually used by a kept event.
+      //    Per-asset Perception is JSON-cached; identical asset on a re-run skips
+      //    the model calls entirely (~1-2s saved per asset).
+      val perceptions = HashMap<String, Perception>(keptAssetIds.size)
+      var perceptionMs = 0L
+      var cacheHits = 0
+      var perceptionCount = 0
+      val perception = PerceptionEngine(context)
+      try {
+        val toAnalyze = assets.filter { it.id in keptAssetIds }
+        perceptionCount = toAnalyze.size
+        val perceptionStart = System.nanoTime()
+        for ((i, asset) in toAnalyze.withIndex()) {
+          val cached = PerceptionCache.get(context, asset)
+          if (cached != null) {
+            perceptions[asset.id] = cached
+            cacheHits++
+          } else {
+            val fresh = perception.analyze(asset)
+            perceptions[asset.id] = fresh
+            PerceptionCache.put(context, asset, fresh)
+          }
+          if (i % 5 == 0 || i == toAnalyze.size - 1) {
+            progress(
+              PipelineProgress.Perceiving(
+                current = i + 1,
+                total = toAnalyze.size,
+                assetName = asset.displayName,
+                mediaType = asset.mediaType.name.lowercase(),
+                cacheHit = cached != null,
+              ),
+            )
+          }
+          PowerPacer.afterPerceptionAsset(cacheHit = cached != null)
+        }
+        perceptionMs = (System.nanoTime() - perceptionStart) / 1_000_000
+        Log.d(TAG, "perception: ${toAnalyze.size} assets in ${perceptionMs}ms (cache hits: $cacheHits)")
+      } finally {
+        perception.close()
+      }
+
       StateBreadcrumb.mark(context, "agent_objects", "creating agents")
       val montage = MontageAgent(context, agent)
       val audience = AudienceAgent(agent)
@@ -251,201 +283,15 @@ class PipelineOrchestrator(
 
   // ---- helpers ----
 
-  private suspend fun runAnnotationPass(
-    perceptions: MutableMap<String, Perception>,
-    assetMap: Map<String, Asset>,
-    annotator: VlmAnnotator,
-    progress: suspend (PipelineProgress) -> Unit,
-  ) {
-    StateBreadcrumb.mark(context, "annotate_plan", "planning annotation pass")
-    val needsAnnotation = perceptions.values
-      .mapNotNull { perc -> assetMap[perc.assetId]?.let { perc to it } }
-      .filter { (perc, asset) -> !perc.isJunk && needsVlmAnnotation(perc, asset) }
-    StateBreadcrumb.mark(context, "annotate_plan_done", "needs=${needsAnnotation.size}")
-    if (needsAnnotation.isEmpty()) return
+  // (NB: the live runAnnotationPass / annotateAsset / runEvent overloads are
+  // further down — they take HashMap rather than MutableMap so the orchestrator
+  // body's HashMap call sites resolve to those. Earlier copies of this file had
+  // both overloads coexisting; the MutableMap-typed copies were dead and have
+  // been removed.)
 
-    val annotateStart = System.nanoTime()
-    var annotatedCount = 0
-    for ((idx, pair) in needsAnnotation.withIndex()) {
-      val (perc, asset) = pair
-      progress(
-        PipelineProgress.Annotating(
-          current = idx + 1,
-          total = needsAnnotation.size,
-          assetName = asset.displayName,
-          mediaType = asset.mediaType.name.lowercase(),
-          phase = "start",
-        ),
-      )
-      val assetAnnotateStart = System.nanoTime()
-      val annotation = try {
-        annotateAsset(annotator, asset, perc.sceneCuts)
-      } catch (t: CancellationException) {
-        throw t
-      } catch (t: Throwable) {
-        Log.w(TAG, "annotate failed for ${asset.id}: ${t.message}")
-        null
-      }
-      if (annotation != null && annotation.hasSignal()) {
-        val updated = perc.copy(
-          vlmTags = annotation.tags,
-          videoInsight = annotation.videoInsight,
-        )
-        perceptions[perc.assetId] = updated
-        PerceptionCache.put(context, asset, updated)
-        annotatedCount++
-      }
-      progress(
-        PipelineProgress.Annotating(
-          current = idx + 1,
-          total = needsAnnotation.size,
-          assetName = asset.displayName,
-          mediaType = asset.mediaType.name.lowercase(),
-          phase = if (annotation?.hasSignal() == true) "done" else "skipped",
-          elapsedMs = (System.nanoTime() - assetAnnotateStart) / 1_000_000,
-        ),
-      )
-      PowerPacer.afterVlmAsset()
-    }
-    val annotateMs = (System.nanoTime() - annotateStart) / 1_000_000
-    Log.d(TAG, "annotate: $annotatedCount/${needsAnnotation.size} assets in ${annotateMs}ms")
-    progress(PipelineProgress.AnnotationDone(annotatedCount, needsAnnotation.size, annotateMs))
-  }
-
-  private suspend fun annotateAsset(
-    annotator: VlmAnnotator,
-    asset: Asset,
-    sceneCutsSec: List<Float> = emptyList(),
-  ): VlmAnnotator.Annotation? =
-    if (asset.mediaType == MediaType.IMAGE) {
-      val thumb = MediaLoader.loadImage(context, asset, maxSide = 512) ?: return null
-      try {
-        annotator.annotate(thumb, asset.mediaType.name.lowercase())
-      } finally {
-        runCatching { thumb.recycle() }
-      }
-    } else {
-      val sheet = VideoFrameSheetBuilder.build(context, asset, sceneCutsSec)
-      if (sheet != null) {
-        try {
-          annotator.annotateVideo(sheet.bitmap, sheet.frameTimestampsSec, asset.mediaType.name.lowercase())
-        } finally {
-          runCatching { sheet.bitmap.recycle() }
-        }
-      } else {
-        val thumb = MediaLoader.loadImage(context, asset, maxSide = 512) ?: return null
-        try {
-          annotator.annotate(thumb, asset.mediaType.name.lowercase())
-        } finally {
-          runCatching { thumb.recycle() }
-        }
-      }
-    }
-
-  private suspend fun runEvent(
-    event: Event,
-    eventIdx: Int,
-    eventsTotal: Int,
-    assetMap: Map<String, Asset>,
-    resumeIds: Set<String>,
-    cachedDecisions: Map<String, EventDecisions>,
-    perceptions: Map<String, Perception>,
-    perceptionCount: Int,
-    perceptionMs: Long,
-    cacheHits: Int,
-    montage: MontageAgent,
-    audience: AudienceAgent,
-    director: DirectorAgent,
-    editor: EditorAgent,
-    critic: CriticAgent,
-    renderer: VideoRenderer,
-    outputs: MutableMap<String, String>,
-    progress: suspend (PipelineProgress) -> Unit,
-  ) {
-    StateBreadcrumb.mark(context, "event_loop", "${event.eventId} ${eventIdx + 1}/$eventsTotal")
-    progress(PipelineProgress.EventStart(event.eventId, eventIdx + 1, eventsTotal))
-    val eventAssets = event.assetIds.mapNotNull { assetMap[it] }
-    DecisionStore.writeEventInputs(context, event, eventAssets)
-    val timer = PerfTimer(event.eventId)
-    try {
-      if (event.eventId in resumeIds) {
-        val cached = cachedDecisions[event.eventId]
-        val cachedFinal = cached?.timelineFinal
-        val cachedTone = cached?.director?.tone ?: "neutral"
-        if (cachedFinal != null) {
-          progress(PipelineProgress.EventStage(event.eventId, "render (resume from cache)", "timeline already exists; rendering cached cut"))
-          val out = timer.render { renderer.render(cachedFinal, assetMap, cachedTone) }
-          timer.finalize(context, perceptionCount, perceptionMs, cacheHits)
-          if (out != null) {
-            DecisionStore.writeTimelineFinal(context, event.eventId, out.timeline)
-            outputs[event.eventId] = out.outputPath
-            progress(PipelineProgress.EventDone(event.eventId, out.outputPath))
-          } else {
-            progress(PipelineProgress.EventFailed(event.eventId, "render returned null (resume)"))
-          }
-          return
-        }
-      }
-
-      if (!isProcessableEvent(eventAssets)) {
-        progress(PipelineProgress.EventFailed(event.eventId, "too few usable assets"))
-        return
-      }
-
-      progress(PipelineProgress.EventStage(event.eventId, "browse", "building event contact sheet and EventMemory"))
-      val memory = timer.browse { montage.browse(event.eventId, eventAssets) }
-      DecisionStore.writeMemory(context, event.eventId, memory)
-
-      progress(PipelineProgress.EventStage(event.eventId, "audience", "deriving viewer hook, payoff, and pacing"))
-      val brief = timer.audience { audience.write(memory) }
-      DecisionStore.writeAudience(context, event.eventId, brief)
-
-      progress(PipelineProgress.EventStage(event.eventId, "director", "writing narrative arc and shot blueprint"))
-      val plan = timer.director { director.draft(memory, brief, eventAssets.size) }
-      DecisionStore.writeDirector(context, event.eventId, plan)
-
-      progress(PipelineProgress.EventStage(event.eventId, "editor", "recalling candidates and selecting shot windows"))
-      val v1 = timer.editor { buildTimeline(plan.shotBlueprint, plan.tone, event, eventAssets, perceptions, editor) }
-      DecisionStore.writeTimelineV1(context, event.eventId, v1)
-
-      progress(PipelineProgress.EventStage(event.eventId, "critic", "reviewing storyboard and requesting fixes"))
-      val critiques = mutableListOf<com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Critique>()
-      var working = v1
-      var lastCritique: com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Critique? = null
-      for (it in 1..MAX_CRITIC_ITER) {
-        val crit = timer.critic { critic.review(it, working, plan, memory, assetMap) }
-        critiques += crit
-        lastCritique = crit
-        if (crit.revisedRequests.isEmpty()) break
-        working = applyRevisions(working, crit.revisedRequests, plan.tone, event, eventAssets, perceptions, editor)
-      }
-      lastCritique?.let { DecisionStore.writeCritique(context, event.eventId, it) }
-      val finalTl = working.copy(critiqueHistory = critiques.toList())
-      DecisionStore.writeTimelineFinal(context, event.eventId, finalTl)
-
-      progress(PipelineProgress.EventStage(event.eventId, "render", "rendering shots, transitions, captions, and BGM"))
-      val out = timer.render { renderer.render(finalTl, assetMap, plan.tone) }
-      val perf = timer.finalize(context, perceptionCount, perceptionMs, cacheHits)
-      Log.d(TAG, "perf ${event.eventId}: encoder=${com.google.ai.edge.gallery.customtasks.vlogpilot.render.EncoderProbe.selectedEncoderName()} total=${perf.totalMs}ms browse=${perf.browseMs} audience=${perf.audienceMs} director=${perf.directorMs} editor=${perf.editorMs} critic=${perf.criticMs} render=${perf.renderMs}")
-      if (out != null) {
-        DecisionStore.writeTimelineFinal(context, event.eventId, out.timeline)
-        outputs[event.eventId] = out.outputPath
-        progress(PipelineProgress.EventDone(event.eventId, out.outputPath))
-      } else {
-        progress(PipelineProgress.EventFailed(event.eventId, "render returned null"))
-      }
-    } catch (t: CancellationException) {
-      throw t
-    } catch (t: Throwable) {
-      Log.e(TAG, "event ${event.eventId} failed", t)
-      StateBreadcrumb.mark(context, "event_exception", "${event.eventId} ${t::class.java.simpleName}: ${t.message}")
-      progress(PipelineProgress.EventFailed(event.eventId, t.message ?: t::class.java.simpleName))
-    }
-  }
-
-  private suspend fun buildTimeline(
+private suspend fun buildTimeline(
     blueprint: List<ShotRequest>,
-    directorTone: String,
+    director: DirectorBrief,
     event: Event,
     eventAssets: List<Asset>,
     perceptions: Map<String, Perception>,
@@ -464,7 +310,8 @@ class PipelineOrchestrator(
         perceptions = perceptions,
         excludedAssetIds = used,
         previousShot = prevSummary,
-        directorTone = directorTone,
+        directorTone = director.tone,
+        directorColorGrade = director.colorGrade,
       )
       if (spec == null && used.isNotEmpty()) {
         // Last-resort fill: allow reuse rather than silently dropping a required
@@ -478,7 +325,8 @@ class PipelineOrchestrator(
           perceptions = perceptions,
           excludedAssetIds = emptySet(),
           previousShot = prevSummary,
-          directorTone = directorTone,
+          directorTone = director.tone,
+          directorColorGrade = director.colorGrade,
         )
       }
       if (spec == null) {
@@ -495,39 +343,142 @@ class PipelineOrchestrator(
   private fun isProcessableEvent(assets: List<Asset>): Boolean =
     assets.size >= 3 || assets.any { it.mediaType == MediaType.VIDEO && it.durationMs >= 15_000L }
 
+  /**
+   * Compact "what does this event actually contain" summary fed into the
+   * Director prompt so its `visual_requirements` stay grounded in real
+   * footage. Without this, Director hallucinates shot ideas (e.g.
+   * "举杯特写") that recall can't satisfy and the Editor falls back to
+   * reusing already-picked assets.
+   *
+   * Format (≤ ~25 lines):
+   *   场景 户外烧烤聚会: 3 张 / 0 段视频
+   *   场景 室内厨房:    4 张 / 0 段视频
+   *   长视频片段:        1 段（25s, 户外打闹）
+   *   人物子集:          黑长发女士=#1,3,5; 戴眼镜男士=#2,4,8
+   */
+  private fun buildAvailableSignals(
+    eventAssets: List<Asset>,
+    perceptions: Map<String, Perception>,
+  ): String {
+    if (eventAssets.isEmpty()) return ""
+    val nonJunk = eventAssets.filter { perceptions[it.id]?.isJunk != true }
+    if (nonJunk.isEmpty()) return ""
+
+    // Group by VLM scene tag (or "未分类" when annotation hasn't filled in yet)
+    val byScene = nonJunk.groupBy { perceptions[it.id]?.vlmTags?.scene?.takeIf { s -> s.isNotBlank() } ?: "未分类" }
+    val sceneLines = byScene.entries
+      .sortedByDescending { it.value.size }
+      .take(8)
+      .map { (scene, group) ->
+        val photos = group.count { it.mediaType != MediaType.VIDEO }
+        val videos = group.count { it.mediaType == MediaType.VIDEO }
+        val totalVideoSec = group.filter { it.mediaType == MediaType.VIDEO }
+          .sumOf { it.durationMs.coerceAtLeast(0L) } / 1000
+        val seg = if (videos > 0) "$photos 张 / $videos 段视频(${totalVideoSec}s)" else "$photos 张"
+        "  场景「$scene」: $seg"
+      }
+
+    val longVideos = nonJunk.filter { it.mediaType == MediaType.VIDEO && it.durationMs >= 12_000L }
+    val longVideoLine = if (longVideos.isEmpty()) null else
+      "  长视频片段: ${longVideos.size} 段（${longVideos.joinToString("; ") { v ->
+        val tags = perceptions[v.id]?.vlmTags
+        val label = listOfNotNull(tags?.scene?.takeIf { it.isNotBlank() }, tags?.action?.takeIf { it.isNotBlank() }).joinToString(" ").ifBlank { "无标签" }
+        "${v.durationMs / 1000}s $label"
+      }}）"
+
+    // Salient highlights — pick a few of the brightest VLM tags so the director
+    // sees concrete moments (e.g. "中间男士笑容自然") not just scene names.
+    val salientLine = nonJunk.mapNotNull { perceptions[it.id]?.vlmTags?.salient?.takeIf { s -> s.isNotBlank() } }
+      .distinct()
+      .take(5)
+      .takeIf { it.isNotEmpty() }
+      ?.let { "  亮点提示: " + it.joinToString(" / ") }
+
+    return (sceneLines + listOfNotNull(longVideoLine, salientLine)).joinToString("\n")
+  }
+
   private suspend fun applyRevisions(
     base: Timeline,
     revisions: List<RevisedRequest>,
-    directorTone: String,
+    director: DirectorBrief,
     event: Event,
     eventAssets: List<Asset>,
     perceptions: Map<String, Perception>,
     editor: EditorAgent,
   ): Timeline {
     val byOrder = base.shots.associateBy { it.order }.toMutableMap()
-    // Keep ALL current picks in `used` so revised recall is forced to find a DIFFERENT asset;
-    // pc-pilot/step6_critic.py:175 made the same call. Removing the original from `used` first
-    // would let the editor re-pick the asset critic just flagged.
+    // Keep ALL current picks in `used` so revised recall is forced to find a DIFFERENT asset.
     val used = base.shots.map { it.assetId }.toMutableSet()
     val nBlueprint = base.shots.size
+    val originalRequests = director.shotBlueprint.associateBy { it.position }
     for (rev in revisions) {
       val original = byOrder[rev.shotOrder] ?: continue
+      // Build the effective request by either:
+      //  (1) using rev.newRequest if the model emitted a full ShotRequest (legacy path), OR
+      //  (2) applying rev.patches as field-level updates on the director's original request
+      //      for that slot (preferred patch path — much smaller, more reliable on Gemma 4 E2B).
+      val effective = rev.newRequest
+        ?: rev.patches.takeIf { it.isNotEmpty() }
+          ?.let { patches -> originalRequests[rev.shotOrder]?.let { applyPatches(it, patches) } }
+        ?: continue
       val replaced = editor.pickShot(
         order = rev.shotOrder,
-        request = rev.newRequest,
+        request = effective,
         nBlueprint = nBlueprint,
         eventAssets = eventAssets,
         perceptions = perceptions,
         excludedAssetIds = used,
         previousShot = "(revised slot)",
-        directorTone = directorTone,
+        directorTone = director.tone,
+        directorColorGrade = director.colorGrade,
       )
-      if (replaced == null || replaced.assetId == original.assetId) continue  // no different candidate, keep original
+      if (replaced == null || replaced.assetId == original.assetId) continue
       used.remove(original.assetId)
       used += replaced.assetId
       byOrder[rev.shotOrder] = replaced
     }
     return base.copy(shots = byOrder.values.sortedBy { it.order })
+  }
+
+  /**
+   * Apply field-level patches to a ShotRequest. Unknown keys are ignored.
+   * Defensive against Gemma 4 E2B quirks: blank strings on narrative fields
+   * (mood / visual_requirements) are skipped — those would silently degrade
+   * the spec; the model usually means "leave it" when it omits a field but
+   * sometimes still emits an empty value. Cosmetic fields (caption / transition
+   * / ken_burns) honor blanks because empty IS a valid "remove this" intent.
+   */
+  private fun applyPatches(base: ShotRequest, patches: Map<String, String>): ShotRequest {
+    var role = base.role
+    var moodTarget = base.moodTarget
+    var visualReq = base.visualRequirements
+    var dur = base.durationSec
+    var person = base.personConstraint
+    var caption = base.captionText
+    var kenBurns = base.kenBurnsHint
+    var transitionIn = base.transitionInHint
+    for ((k, v) in patches) {
+      when (k.trim().lowercase()) {
+        "role" -> if (v.isNotBlank()) runCatching { role = com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRole.valueOf(v.uppercase()) }
+        "mood_target", "mood" -> if (v.isNotBlank()) moodTarget = v
+        "visual_requirements", "visual" -> if (v.isNotBlank()) visualReq = v
+        "duration_sec", "duration" -> v.toFloatOrNull()?.let { dur = it.coerceIn(0.4f, 8f) }
+        "person_constraint", "person" -> person = v.takeIf { it.isNotBlank() && it.lowercase() != "null" }
+        "caption_text", "caption" -> caption = v
+        "ken_burns_hint", "ken_burns" -> kenBurns = v
+        "transition_in_hint", "transition_in", "transition" -> transitionIn = v
+      }
+    }
+    return base.copy(
+      role = role,
+      moodTarget = moodTarget,
+      visualRequirements = visualReq,
+      durationSec = dur,
+      personConstraint = person,
+      captionText = caption,
+      kenBurnsHint = kenBurns,
+      transitionInHint = transitionIn,
+    )
   }
 
   private fun needsVlmAnnotation(perception: Perception, asset: Asset): Boolean {
@@ -686,25 +637,63 @@ class PipelineOrchestrator(
       DecisionStore.writeAudience(context, event.eventId, brief)
 
       progress(PipelineProgress.EventStage(event.eventId, "director", "writing narrative arc and shot blueprint"))
-      val plan = timer.director { director.draft(memory, brief, eventAssets.size) }
+      val plan = timer.director {
+        director.draft(
+          memory = memory,
+          audience = brief,
+          assetCount = eventAssets.size,
+          availableSignals = buildAvailableSignals(eventAssets, perceptions),
+        )
+      }
       DecisionStore.writeDirector(context, event.eventId, plan)
 
       progress(PipelineProgress.EventStage(event.eventId, "editor", "recalling candidates and selecting shot windows"))
-      val v1 = timer.editor { buildTimeline(plan.shotBlueprint, plan.tone, event, eventAssets, perceptions, editor) }
+      val v1 = timer.editor { buildTimeline(plan.shotBlueprint, plan, event, eventAssets, perceptions, editor) }
       DecisionStore.writeTimelineV1(context, event.eventId, v1)
 
       progress(PipelineProgress.EventStage(event.eventId, "critic", "reviewing storyboard and requesting fixes"))
       val critiques = mutableListOf<com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Critique>()
       var working = v1
       var lastCritique: com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Critique? = null
-      for (it in 1..MAX_CRITIC_ITER) {
+      var aborted = false
+      critic_loop@ for (it in 1..MAX_CRITIC_ITER) {
         val crit = timer.critic { critic.review(it, working, plan, memory, assetMap) }
         critiques += crit
         lastCritique = crit
-        if (crit.revisedRequests.isEmpty()) break
-        working = applyRevisions(working, crit.revisedRequests, plan.tone, event, eventAssets, perceptions, editor)
+        when (crit.verdict) {
+          CriticVerdict.ACCEPT -> break@critic_loop
+          CriticVerdict.ABORT -> {
+            // Critic believes patches can't fix this. Ship the latest `working`
+            // (we have nothing better) but stop iterating so we don't burn
+            // additional model calls on a known dead end.
+            aborted = true
+            StateBreadcrumb.mark(
+              context,
+              "critic_abort",
+              "${event.eventId} iter=$it issues=${crit.issues.take(3).joinToString("; ")}",
+            )
+            Log.w(TAG, "critic abort on ${event.eventId} iter=$it: ${crit.issues.joinToString(" / ")}")
+            break@critic_loop
+          }
+          CriticVerdict.REVISE -> {
+            if (crit.revisedRequests.isEmpty()) {
+              // Malformed: model said REVISE but emitted no patches. Treat as
+              // accept-with-warning rather than spinning the loop forever.
+              StateBreadcrumb.mark(
+                context,
+                "critic_revise_empty",
+                "${event.eventId} iter=$it verdict=REVISE but no requests",
+              )
+              break@critic_loop
+            }
+            working = applyRevisions(working, crit.revisedRequests, plan, event, eventAssets, perceptions, editor)
+          }
+        }
       }
       lastCritique?.let { DecisionStore.writeCritique(context, event.eventId, it) }
+      if (aborted) {
+        progress(PipelineProgress.EventStage(event.eventId, "critic", "abort verdict; rendering current cut anyway"))
+      }
       val finalTl = working.copy(critiqueHistory = critiques.toList())
       DecisionStore.writeTimelineFinal(context, event.eventId, finalTl)
 

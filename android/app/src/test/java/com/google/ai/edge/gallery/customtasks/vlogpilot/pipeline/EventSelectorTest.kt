@@ -6,6 +6,7 @@ package com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.GenerationIntent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.EventScout
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -60,6 +61,41 @@ class EventSelectorTest {
 
     assertTrue(candidate.reasons.contains("gps"))
     assertTrue(candidate.reasons.contains("intent-travel") || candidate.reasons.contains("travel"))
+  }
+
+  @Test fun scoutSignalCanDriveRankingBeforePerAssetTagsExist() {
+    val now = 1_700_000_000_000L
+    val weak = asset("weak", "random clip", 20_000L, now - 1_000_000L)
+    val zoo = asset("zoo", "clip", 20_000L, now - 1_000_000L)
+    val ranked = EventSelector.rank(
+      events = listOf(event("weak-event", weak), event("zoo-event", zoo)),
+      assetMap = listOf(weak, zoo).associateBy { it.id },
+      perceptionFor = { null },
+      scoutFor = { id ->
+        if (id == "zoo-event") {
+          EventScout(
+            eventId = id,
+            scoutVersion = 1,
+            assetSignature = "test",
+            generatedAtMs = now,
+            eventType = "zoo",
+            summary = "animals in a zoo",
+            storyValue = 0.8f,
+            visualValue = 0.8f,
+            subjectValue = 0.9f,
+            zooScore = 0.95f,
+            recommended = true,
+          )
+        } else {
+          null
+        }
+      },
+      intent = GenerationIntent.ZOO,
+      nowMs = now,
+    )
+
+    assertEquals("zoo-event", ranked.first().eventId)
+    assertTrue(ranked.first().reasons.contains("vlm-scout"))
   }
 
   private fun event(id: String, asset: Asset): Event =

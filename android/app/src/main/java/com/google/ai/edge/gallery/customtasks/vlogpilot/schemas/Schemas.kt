@@ -71,6 +71,12 @@ data class VideoInsight(
   val actionArc: String = "",
   val bestMomentIndex: Int = 0,                      // 1-based index in the VLM frame sheet
   val bestMomentSec: Float = 0f,
+  /** Inclusive 1-based window of frame indices flagged as the action peak.
+   *  Used by Recall.expandWindows to seed multiple trim candidates spanning
+   *  the model-identified peak. Both default to bestMomentIndex for legacy
+   *  videoInsight JSONs that pre-date this field. */
+  val bestMomentWindowStart: Int = 0,
+  val bestMomentWindowEnd: Int = 0,
   val badMomentIndices: List<Int> = emptyList(),     // 1-based indices to avoid when trimming
 )
 
@@ -124,12 +130,21 @@ data class EventMemory(
 // ---------------- step3b audience ----------------
 
 @Serializable
+enum class Pace {
+  @SerialName("snappy") SNAPPY,
+  @SerialName("balanced") BALANCED,
+  @SerialName("lingering") LINGERING,
+}
+
+@Serializable
 data class AudienceBrief(
   val eventId: String,
   val emotionalPayoff: String,
   val hookStrategy: String,
   val povVoice: String,
   val pacingGuidance: String,
+  /** Discrete pacing handle the Director can map to target_duration_sec. */
+  val pace: Pace = Pace.BALANCED,
   val avoidList: List<String> = emptyList(),
 )
 
@@ -166,6 +181,9 @@ data class DirectorBrief(
   val tagline: String? = null,
   val targetDurationSec: Float,
   val tone: String,
+  /** Director-chosen color grade enum. NEUTRAL when the model didn't pick one;
+   *  ColorGradeFromTone falls back to keyword inference on `tone` in that case. */
+  val colorGrade: ColorGrade = ColorGrade.NEUTRAL,
   val narrativeArc: List<String>,
   val shotBlueprint: List<ShotRequest>,
 )
@@ -217,14 +235,34 @@ data class ShotSpec(
 )
 
 @Serializable
+enum class CriticVerdict {
+  @SerialName("accept") ACCEPT,         // ship as-is
+  @SerialName("revise") REVISE,         // fix the listed shots and re-cut
+  @SerialName("abort") ABORT,           // timeline is unsalvageable; downgrade
+}
+
+@Serializable
 data class Critique(
   val iteration: Int,
   val issues: List<String>,
+  val verdict: CriticVerdict = CriticVerdict.ACCEPT,
   val revisedRequests: List<RevisedRequest> = emptyList(),
 )
 
+/**
+ * Critic revision. The model can either:
+ *  - return a full `newRequest` (legacy v3 format), OR
+ *  - return `patches` — a small map of just the fields it wants to change,
+ *    applied on top of the existing ShotRequest at `shotOrder`. Patch mode
+ *    is much cheaper for the LLM (no need to re-emit 10 fields) and
+ *    correspondingly more reliable on Gemma 4 E2B.
+ */
 @Serializable
-data class RevisedRequest(val shotOrder: Int, val newRequest: ShotRequest)
+data class RevisedRequest(
+  val shotOrder: Int,
+  val newRequest: ShotRequest? = null,
+  val patches: Map<String, String> = emptyMap(),
+)
 
 @Serializable
 data class Timeline(

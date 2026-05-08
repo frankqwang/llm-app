@@ -9,6 +9,14 @@ package com.google.ai.edge.gallery.customtasks.vlogpilot.worker
 sealed interface PipelineProgress {
   data class DownloadingModels(val percent: Int, val label: String) : PipelineProgress
   data object Ingesting : PipelineProgress
+  data class ScoutingEvents(
+    val currentEvent: Int,
+    val totalEvents: Int,
+    val eventId: String,
+    val currentPage: Int,
+    val totalPages: Int,
+    val cacheHit: Boolean = false,
+  ) : PipelineProgress
   data class SelectingEvents(val candidateCount: Int, val selectedCount: Int, val detail: String) : PipelineProgress
   data class IngestDone(val assetCount: Int, val eventCount: Int) : PipelineProgress
   data class Perceiving(

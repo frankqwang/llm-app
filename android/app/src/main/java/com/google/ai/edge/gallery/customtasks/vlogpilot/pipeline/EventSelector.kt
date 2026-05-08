@@ -9,6 +9,7 @@ package com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline
 
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.EventScout
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Perception
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.GenerationIntent
@@ -34,6 +35,7 @@ object EventSelector {
     val gpsAssetCount: Int,
     val spanHours: Float,
     val reasons: List<String>,
+    val scout: EventScout? = null,
   ) {
     val eventId: String get() = event.eventId
 
@@ -60,12 +62,13 @@ object EventSelector {
     events: List<Event>,
     assetMap: Map<String, Asset>,
     perceptionFor: (String) -> Perception?,
+    scoutFor: (String) -> EventScout? = { null },
     intent: GenerationIntent = GenerationIntent.AUTO,
     nowMs: Long = System.currentTimeMillis(),
   ): List<Candidate> =
     events.map { event ->
       val assets = event.assetIds.mapNotNull { assetMap[it] }
-      score(event, assets, perceptionFor, intent, nowMs)
+      score(event, assets, perceptionFor, scoutFor(event.eventId), intent, nowMs)
     }.sortedWith(
       compareByDescending<Candidate> { it.valueScore }
         .thenByDescending { it.mediaScore }
@@ -77,6 +80,7 @@ object EventSelector {
     event: Event,
     assets: List<Asset>,
     perceptionFor: (String) -> Perception?,
+    scout: EventScout?,
     intent: GenerationIntent,
     nowMs: Long,
   ): Candidate {
@@ -96,6 +100,7 @@ object EventSelector {
         gpsAssetCount = 0,
         spanHours = 0f,
         reasons = listOf("empty"),
+        scout = scout,
       )
     }
 
@@ -116,6 +121,7 @@ object EventSelector {
     val storyScore = storyScore(assets, spanHours)
     val qualityScore = qualityScore(perceptions.values.filterNotNull())
     val intentScore = intentScore(intent, assets, perceptions)
+    val scoutScore = scoutScore(intent, scout)
     val ageDays = ((nowMs - event.endEpochMs).coerceAtLeast(0L) / 86_400_000f)
     val recencyScore = (1f - ageDays / 30f).coerceIn(0f, 1f)
     val gpsAssetCount = assets.count { it.latitude != null && it.longitude != null }
@@ -133,7 +139,9 @@ object EventSelector {
         recencyScore * 0.10f -
         lowSignalPenalty
       ).coerceIn(0f, 1f)
-    val valueScore = if (intent == GenerationIntent.AUTO) {
+    val valueScore = if (scout != null) {
+      (baseScore * 0.42f + scoutScore * 0.58f).coerceIn(0f, 1f)
+    } else if (intent == GenerationIntent.AUTO) {
       baseScore
     } else {
       (baseScore * 0.78f + intentScore * 0.22f).coerceIn(0f, 1f)
@@ -160,10 +168,12 @@ object EventSelector {
         storyScore = storyScore,
         intent = intent,
         intentScore = intentScore,
+        scout = scout,
         realVideoSeconds = realVideoSeconds,
         longVideoCount = longVideoCount,
         gpsAssetCount = gpsAssetCount,
       ),
+      scout = scout,
     )
   }
 
@@ -234,11 +244,20 @@ object EventSelector {
     storyScore: Float,
     intent: GenerationIntent,
     intentScore: Float,
+    scout: EventScout?,
     realVideoSeconds: Float,
     longVideoCount: Int,
     gpsAssetCount: Int,
   ): List<String> {
     val out = mutableListOf<String>()
+    if (scout != null) {
+      out += "vlm-scout"
+      if (scout.eventType.isNotBlank() && scout.eventType != "unknown") out += scout.eventType
+      if (scout.sampled) out += "sampled-scout"
+      if (!scout.recommended) out += "scout-caution"
+    } else {
+      out += "metadata-only"
+    }
     if (travelScore >= 0.35f) out += "travel"
     if (gpsAssetCount > 0) out += "gps"
     if (realVideoSeconds >= 30f) out += "video"
@@ -253,6 +272,36 @@ object EventSelector {
     }
     if (mediaScore < 0.08f && travelScore < 0.15f && gpsAssetCount == 0) out += "low-signal"
     return out
+  }
+
+  private fun scoutScore(intent: GenerationIntent, scout: EventScout?): Float {
+    if (scout == null) return 0f
+    if (scout.eventType.equals("junk", ignoreCase = true)) return 0f
+    val typeScore = when (intent) {
+      GenerationIntent.AUTO -> maxOf(
+        scout.travelScore,
+        scout.zooScore,
+        scout.peopleScore,
+        scout.foodScore,
+        if (scout.eventType.equals("daily", ignoreCase = true)) 0.35f else 0f,
+      )
+      GenerationIntent.TRAVEL -> scout.travelScore
+      GenerationIntent.ZOO -> scout.zooScore
+      GenerationIntent.PEOPLE -> scout.peopleScore
+      GenerationIntent.FOOD -> scout.foodScore
+    }
+    val base = (
+      scout.storyValue * 0.34f +
+        scout.visualValue * 0.30f +
+        scout.subjectValue * 0.18f +
+        typeScore * 0.18f
+      ).coerceIn(0f, 1f)
+    val recommendation = when {
+      scout.recommended -> 0.10f
+      scout.rejectReasons.isNotEmpty() -> -0.12f
+      else -> 0f
+    }
+    return (base + recommendation).coerceIn(0f, 1f)
   }
 
   private fun intentScore(

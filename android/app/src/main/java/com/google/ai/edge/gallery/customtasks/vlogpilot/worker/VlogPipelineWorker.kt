@@ -96,6 +96,7 @@ class VlogPipelineWorker(
     val text = when (p) {
       is PipelineProgress.DownloadingModels -> "download ${p.percent}% ${p.label}"
       PipelineProgress.Ingesting -> "scanning album"
+      is PipelineProgress.ScoutingEvents -> "VLM scout ${p.currentEvent}/${p.totalEvents} page ${p.currentPage}/${p.totalPages}"
       is PipelineProgress.SelectingEvents -> "selecting events ${p.selectedCount}/${p.candidateCount}"
       is PipelineProgress.IngestDone -> "${p.assetCount} assets / ${p.eventCount} events"
       is PipelineProgress.Perceiving -> "perceive ${p.current}/${p.total} ${p.assetName.ifBlank { p.mediaType }}"

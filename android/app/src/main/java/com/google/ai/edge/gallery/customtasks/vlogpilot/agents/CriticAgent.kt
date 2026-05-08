@@ -11,6 +11,7 @@ import android.content.Context
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.TimelineStoryboardBuilder
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Critique
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.CriticVerdict
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.DirectorBrief
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.EventMemory
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.RevisedRequest
@@ -39,7 +40,13 @@ class CriticAgent(
     memory: EventMemory,
     assets: Map<String, Asset>,
   ): Critique {
-    if (timeline.shots.isEmpty()) return Critique(iteration, listOf("timeline is empty"), emptyList())
+    if (timeline.shots.isEmpty()) {
+      return Critique(
+        iteration = iteration,
+        issues = listOf("timeline is empty"),
+        verdict = CriticVerdict.ABORT,
+      )
+    }
 
     val storyboard = TimelineStoryboardBuilder.build(context, timeline, assets)
     val cheapChecks = if (looksGoodEnough(timeline, director)) "pass" else "needs_attention"
@@ -78,15 +85,38 @@ Return Critique JSON only.
       JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject
     } catch (_: Throwable) {
       null
-    } ?: return Critique(iteration, emptyList(), emptyList())
+    } ?: return Critique(iteration = iteration, issues = emptyList())
     val issues = obj["issues"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+    // Accept either patch-mode `patches: {field: value}` or legacy `new_request: {...full ShotRequest...}`.
+    // Patch mode is much cheaper for the LLM and correspondingly more reliable on Gemma 4 E2B.
     val revs = obj["revised_requests"]?.jsonArray?.mapNotNull { el ->
       val r = el.jsonObject
       val ord = r["shot_order"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
-      val newReq = parseShot(r["new_request"]?.jsonObject ?: return@mapNotNull null) ?: return@mapNotNull null
-      RevisedRequest(shotOrder = ord, newRequest = newReq)
+      val patchesObj = r["patches"]?.jsonObject
+      val patches = patchesObj?.entries?.associate { (k, v) -> k to (v.jsonPrimitive.contentOrNull ?: "") }
+        ?.filterValues { it.isNotBlank() }
+        ?: emptyMap()
+      val newReq = r["new_request"]?.jsonObject?.let { parseShot(it) }
+      if (patches.isEmpty() && newReq == null) return@mapNotNull null
+      RevisedRequest(shotOrder = ord, newRequest = newReq, patches = patches)
     } ?: emptyList()
-    return Critique(iteration, issues, revs.take(3))
+    val verdictStr = obj["verdict"]?.jsonPrimitive?.contentOrNull?.trim()?.lowercase()
+    val verdict = when (verdictStr) {
+      "accept" -> CriticVerdict.ACCEPT
+      "revise" -> CriticVerdict.REVISE
+      "abort" -> CriticVerdict.ABORT
+      else -> if (revs.isEmpty()) CriticVerdict.ACCEPT else CriticVerdict.REVISE
+    }
+    return Critique(
+      iteration = iteration,
+      issues = issues,
+      verdict = verdict,
+      revisedRequests = revs.take(MAX_REVISIONS),
+    )
+  }
+
+  companion object {
+    private const val MAX_REVISIONS = 5
   }
 
   private fun looksGoodEnough(timeline: Timeline, director: DirectorBrief): Boolean {

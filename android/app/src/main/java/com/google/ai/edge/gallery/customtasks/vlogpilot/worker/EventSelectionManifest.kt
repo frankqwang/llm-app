@@ -39,6 +39,17 @@ data class EventCandidateSnapshot(
   val gpsAssetCount: Int,
   val spanHours: Float,
   val reasons: List<String> = emptyList(),
+  val rankingMode: String = "metadata_only",
+  val scoutEventType: String = "",
+  val scoutSummary: String = "",
+  val scoutStoryValue: Float = 0f,
+  val scoutVisualValue: Float = 0f,
+  val scoutSubjectValue: Float = 0f,
+  val scoutRecommended: Boolean = false,
+  val scoutBestAssetIds: List<String> = emptyList(),
+  val scoutRejectReasons: List<String> = emptyList(),
+  val scoutPageCount: Int = 0,
+  val scoutSampled: Boolean = false,
 ) {
   val eventId: String get() = event.eventId
 }

@@ -37,6 +37,7 @@ object StateBreadcrumb {
     when (p) {
       is PipelineProgress.DownloadingModels -> mark(context, "download", "${p.percent}% ${p.label}")
       PipelineProgress.Ingesting -> mark(context, "ingest", "")
+      is PipelineProgress.ScoutingEvents -> mark(context, "event_scout", "${p.currentEvent}/${p.totalEvents} ${p.eventId} page=${p.currentPage}/${p.totalPages} cache=${p.cacheHit}")
       is PipelineProgress.SelectingEvents -> mark(context, "event_select_progress", "candidates=${p.candidateCount} selected=${p.selectedCount} ${p.detail}")
       is PipelineProgress.IngestDone -> mark(context, "ingest_done", "assets=${p.assetCount} events=${p.eventCount}")
       is PipelineProgress.Perceiving -> mark(context, "perceive", "${p.current}/${p.total} ${p.mediaType} ${p.assetName} cache=${p.cacheHit}")
