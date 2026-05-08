@@ -6,6 +6,289 @@ to find it in the tree.
 
 ---
 
+## v4.4 — 5-agent prompt audit (3-loop pass) + EventScout 2-pass selection (2026-05-08)
+
+Pushed as commit [`f22ba50`](https://github.com/frankqwang/llm-app/commit/f22ba50).
+
+The selected events were "都很垃圾" (all junk) on real albums even after
+the EventSelector content scoring landed — coarse signals (asset count,
+GPS spread, faces) are the right shape but can't tell apart "kid's
+birthday party" from "kitchen breakfast" without semantic context. And
+the 5 agent prompts had drifted: each one had grown free-form over
+multiple iterations, with worked examples that contradicted the schema,
+fields the parser ignored, and missing constraints (Director picking
+durations outside the audience's pace band; Editor never explaining
+why_not_others; Critic emitting full ShotRequest rewrites that Gemma 4
+E2B got wrong about half the time).
+
+Two threads landed in one commit:
+
+### EventScout — 2-pass event selection with VLM signal
+
+- **Before:** EventSelector ranks all candidate events using cheap
+  signals (asset/video count, GPS spread, faces, scene diversity) and
+  picks the top `maxEvents`. Two events with identical coarse stats —
+  one being "晨练公园" (good vlog material) and one being "外卖等餐"
+  (stationary indoor selfies) — score the same.
+- **After:** Two-pass.
+  1. Coarse pre-rank: same EventSelector with no VLM signal. Top 4-6
+     events go to scout.
+  2. Scout pass: each top-K event gets a 3×3 contact sheet from its
+     non-junk assets; Gemma 4 reads it and returns a `value`/`signal`
+     pair (story arc strength, person presence, pacing potential).
+  3. Final rank: EventSelector reruns with `scoutMap` injected,
+     re-ranks, and picks `maxEvents`.
+- **Cost:** 1 Gemma call per pre-ranked candidate (~3-5s on D9400 GPU),
+  amortized via JSON cache in `filesDir/event_scout_cache/<eventId>.json`.
+- **Files:** new
+  [agents/EventScoutAgent.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/agents/EventScoutAgent.kt),
+  [pipeline/EventScoutSheetBuilder.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/EventScoutSheetBuilder.kt),
+  [schemas/EventScout.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/schemas/EventScout.kt),
+  [worker/EventScoutRunner.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/EventScoutRunner.kt) +
+  modified
+  [worker/EventSelectionPlanner.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/EventSelectionPlanner.kt),
+  [pipeline/EventSelector.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/EventSelector.kt).
+
+### Prompt audit — 3-loop pass
+
+All 7 prompts (VLM image, VLM video, Browser, Audience, Director,
+Editor, Critic) were rewritten ground-up with:
+
+- **One concrete worked example per prompt.** Gemma 4 E2B's in-context
+  conformance to a fully-filled JSON example is much higher than to
+  schema descriptions of `<placeholder>`. The example uses a concrete
+  event (烧烤聚会) so the model can't safely copy it.
+- **Tighter schema constraints.** Char limits for every string field,
+  enum lists for every closed-set field, fallback-to-empty rules for
+  optional fields.
+- **Cross-stage signal flow:**
+  - Audience emits `pace` enum (`snappy`/`balanced`/`lingering`).
+  - Director's `target_duration_sec` is clamped to the corresponding
+    pace band (15-18 / 18-22 / 22-28 sec) — Gemma can no longer pick
+    20s for a "snappy" brief.
+  - Director consumes `available_signals` (orchestrator-built summary
+    of what assets actually exist by VLM scene/long-video/salient) so
+    `visual_requirements` stays grounded in real footage instead of
+    hallucinated.
+  - Director emits `color_grade` enum directly; Editor/renderer use it
+    as-is, falling back to `ColorGradeFromTone.pick(tone)` only when
+    NEUTRAL.
+  - Editor emits `chosen_index` + `runner_up_index` + `why_not_others`;
+    rationale combines all three for richer breadcrumbs.
+  - Critic emits `verdict` (`accept`/`revise`/`abort`) + `patches` (a
+    small `field → value` map) instead of full `new_request` rewrites.
+    Patch mode is much smaller per-token and Gemma handles it ~3× more
+    reliably.
+
+### Schema additions
+
+- `Pace` enum, `CriticVerdict` enum, `RevisedRequest.patches:
+  Map<String, String>`, `DirectorBrief.colorGrade: ColorGrade`,
+  `VideoInsight.bestMomentWindowStart/End` (Editor.expandWindows uses
+  this to seed candidate trim windows spanning the model-identified
+  peak action, not just a single frame).
+- All new fields have defaults — existing perception_cache JSONs
+  deserialize cleanly, no cache wipe needed.
+
+### Orchestrator changes
+
+- `runEvent`'s critic loop now branches on verdict: `ACCEPT` breaks,
+  `ABORT` writes a `critic_abort` breadcrumb and breaks (don't burn
+  more model calls on a known dead end), `REVISE` applies patches.
+- New `applyPatches(base, patches)` applies field-level updates: blank
+  values are skipped for narrative fields (mood/visual_requirements)
+  but honored for cosmetic fields (caption/transition/ken_burns) since
+  empty IS a valid "remove this" intent.
+- New `buildAvailableSignals(eventAssets, perceptions)` produces the
+  scene-grouped + long-video + salient summary fed into the Director
+  prompt.
+- Removed 192 lines of dead duplicate (MutableMap-typed) overloads of
+  `runAnnotationPass` / `annotateAsset` / `runEvent`. The HashMap
+  variants were the live ones; the MutableMap copies were
+  build-tolerated dead code.
+
+### Defensive parsing hardening
+
+- `AudienceAgent`: partial JSON ({"hook_strategy":"X",
+  "emotional_payoff":""}) gets blank fields patched from the fallback
+  rather than propagating empty strings into the Director prompt.
+- `EditorAgent`: `chosen_index` is clamped to `[0, candidates.size-1]`
+  before use — Gemma occasionally emits 0 (which would underflow to
+  -1) or out-of-range numbers when it hallucinates entries.
+- `CriticAgent`: revised requests with empty patches AND null
+  newRequest are filtered out via `mapNotNull`.
+
+### Verified
+
+- Build green (`compileDebugKotlin` 4s).
+- Tests green (13/13: 10 JsonExtractor + 3 EventSelector).
+- Schema-cache compatible (no required fields added without defaults).
+
+---
+
+## v4.3 — Event selection: intent + power profile + pinned/excluded events + manifest (2026-05-08)
+
+Pushed as commit [`d20e190`](https://github.com/frankqwang/llm-app/commit/d20e190).
+
+The user wanted to bias event selection ("only travel events" / "skip
+the kitchen ones I didn't like") and to throttle for thermal headroom
+on long runs. Added:
+
+- **`VlogPilotRunConfig`** — runtime knobs: `intent` (NORMAL / TRAVEL /
+  KIDS / FOOD / etc.), `powerProfile` (BALANCED / EFFICIENT / TURBO),
+  `pinnedEventIds` (always include), `excludedEventIds` (never
+  include). Persisted to filesDir between runs so the UI can remember.
+- **`PowerPacer`** — Inserts paced sleeps after perception batches and
+  VLM calls. EFFICIENT adds ~200ms after each VLM call (smoother
+  thermal); TURBO removes pacing; BALANCED is the middle.
+- **Intent-aware EventSelector** — `intent.eventBias()` adjusts
+  `valueScore` per event based on heuristics (TRAVEL boosts GPS
+  spread + outdoor scene tags, KIDS boosts face count, FOOD boosts
+  stationary-indoor + close-range scene tags).
+- **EventSelectionManifest** — Persisted JSON manifest of every
+  selection decision: which events were considered, their valueScore
+  breakdown, why each was selected/excluded, plus the run config.
+  Lives at `filesDir/decisions/_event_selection.json`. Lets the UI
+  show "why these events" without re-running selection.
+- **DecisionStore.writeEventSelection** — atomic write to the manifest
+  path; surfaces "Selecting events..." progress to the UI.
+- **Files:** new
+  [runtime/VlogPilotRunConfig.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/runtime/VlogPilotRunConfig.kt),
+  [runtime/PowerPacer.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/runtime/PowerPacer.kt),
+  [worker/EventSelectionPlanner.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/EventSelectionPlanner.kt),
+  [worker/EventSelectionManifest.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/EventSelectionManifest.kt) +
+  modified [pipeline/EventSelector.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/EventSelector.kt).
+
+---
+
+## v4.2 — Content-scored event selection + thermal pacing (2026-05-08)
+
+Pushed as commit [`2f05f66`](https://github.com/frankqwang/llm-app/commit/2f05f66).
+
+Replaced recency-only `events.take(maxEvents)` with content-scored
+`EventSelector.rank()`. valueScore weights:
+
+- Asset count (log-scaled — a 30-photo trip > a 100-burst-shot session)
+- Video presence (count + total duration in seconds)
+- Time span (8h trip > 30min coffee)
+- GPS spread (real travel vs at-home)
+- Story signals (face count, scene-cut diversity)
+- Recency only as small tiebreaker
+
+Plus thermal pacing — Dimensity 9400 GPU heat-throttles past ~7 min
+sustained inference. Inserts ~150-200ms paced sleeps in the perception
+loop and after each VLM call to keep junction temp below 80°C.
+
+- **Files:** new
+  [pipeline/EventSelector.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/EventSelector.kt) +
+  test
+  [pipeline/EventSelectorTest.kt](android/app/src/test/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/EventSelectorTest.kt) +
+  modified
+  [worker/PipelineOrchestrator.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/PipelineOrchestrator.kt).
+
+---
+
+## v4.0 / v4.1 — VLM-only perception architecture + 64K bytecode fix (2026-05-08)
+
+Pushed as commits
+[`35a1ed9`](https://github.com/frankqwang/llm-app/commit/35a1ed9),
+[`4ab249e`](https://github.com/frankqwang/llm-app/commit/4ab249e),
+[`1ccb38f`](https://github.com/frankqwang/llm-app/commit/1ccb38f).
+
+### v4.0 — VLM annotation replaces CLIP/YOLO/FaceNet TFLite stack
+
+The TFLite small-model stack (CLIP, YOLO, MobileFaceNet) was always a
+known gap from v3.0 — the public sub-50MB int8 sources we wanted to
+ship never materialized. Switched to one Gemma VLM call per asset.
+
+- **VlmAnnotator** runs once per asset, produces `VlmTags` (scene,
+  subjects, action, mood, time_feel, salient, narrative_role_hint).
+  Per-video also produces `VideoInsight` (frame timestamps, summary,
+  action_arc, best_moment_index, bad_moment_indices).
+- **Recall.kt** scores via `semanticOverlap()` on tags rather than
+  cosine over CLIP embeddings. Comparable signal, much richer
+  context (model can reason about the tags during curate).
+- **Cost:** ~3-5s/asset on D9400 GPU + MTP. Per-asset Perception is
+  JSON-cached in `filesDir/perception_cache/<assetId>.json` — repeat
+  runs over the same album are essentially free.
+- **VideoFrameSheetBuilder** builds N-frame contact sheets per video
+  (uniform sampling + scene-cut anchors), Gemma annotates the sheet
+  in one call.
+- **`Workspace` tabs** — `Process` / `Decisions` / `Results` UI for
+  watching the run and inspecting per-event outputs. Polls
+  `decisions/<eventId>/` every 3s on Dispatchers.IO.
+- **Deleted:** `ClipEmbedder`, `ClipTokenizer`, `YoloDetector`,
+  `YoloObj`, `FaceEmbedder`, `FaceClusterer`, `TfliteLoader`,
+  `SharpestWindowPicker`. Don't re-add them. The semantic signal
+  CLIP was supposed to provide now comes from VlmAnnotator.
+
+### v4.1 — Pipeline restart loop fix (the real "v4 ships" milestone)
+
+- **Symptom:** A single `doWork()` invocation ran download → ingest →
+  perceive → init → download → ... in a tight 2-second loop on the
+  same worker. JobScheduler showed ONE WorkSpec, run_attempt_count=1.
+  Three wrong theories burned an hour: "Gemma 5min cold start" (false,
+  it's ~15s), "vivo logcat ACL" (false, just HWUI overflow), "vivo BTM
+  kills FGS" (false, not even a kill).
+- **Root cause:** `PipelineOrchestrator.run()`'s coroutine state
+  machine exceeded ART's 64K bytecode limit. The line was in logcat
+  the whole time: `Method exceeds compiler instruction limit: 64126`.
+  Past 64K, ART falls back to interpreter mode and the
+  resume-from-saved-label dispatch silently breaks — every
+  `progress(...)` suspension resumes at label 0 = the start of
+  `run()`.
+- **Fix:** Extract per-event body into `runEvent()` and per-asset
+  annotation into `runAnnotationPass()` — each suspend point now
+  lives in its own state machine, none individually exceeds 64K.
+  **This rule is permanent: keep `run()` thin.** The compile warning
+  (`Method exceeds compiler instruction limit: NNNNN`) is just a
+  warning, not an error, so the build still passes — watch for it.
+- **Files:** [worker/PipelineOrchestrator.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/PipelineOrchestrator.kt).
+
+### Observability — disk-backed breadcrumbs
+
+vivo OriginOS HWUI / SurfaceComposerClient floods the 4MB logcat ring
+buffer fast enough to overwrite our `Log.d` entries within ~7 minutes.
+To survive that, every state transition writes to disk:
+
+- `_state.txt` — single-line current pipeline state
+- `_state_history.jsonl` — append-only trail of every PipelineProgress
+- `_state_fatal.txt` — stack trace if `run()` throws above the
+  per-event catch
+- `agent_log/agent.jsonl` — per-LLM-call timing + outcome
+- `decisions/<eventId>/*.json` — every agent's structured output
+- `perception_cache/<assetId>.json` — per-asset Perception
+- `candidates/<eventId>.mp4` — final rendered vlogs
+
+Read via `adb shell run-as com.google.aiedge.gallery cat files/<path>`.
+Survives logcat overflow AND process death.
+
+---
+
+## v3.2 — Recall time-window, Critic 2-iter, ColorGrade, Sharpest-window picker (2026-05-08)
+
+Pushed as commit [`0f797d0`](https://github.com/frankqwang/llm-app/commit/0f797d0).
+
+Targeted audit pass on the 5-agent chain after v3.1 went end-to-end.
+
+- **Recall time-window** — Per-shot recall is constrained to
+  ±1.5 hours from the slot's predicted timestamp (instead of "any
+  asset in the event"). Stops the Editor from picking the same
+  morning shot for every slot in an evening event.
+- **Critic 2-iter cap** — Was 3, now 2. The third iteration almost
+  never improved the cut on Gemma 4 E2B; it just shuffled assets.
+  `MAX_CRITIC_ITER = 2` in PipelineOrchestrator.
+- **ColorGrade** — Director picks one of {warm, cool, vibrant, muted,
+  cinematic, vintage, neutral}, applied via ffmpeg `colorchannelmixer`
+  / `eq` chains in ColorGradeFilter. (v4.4 made this explicit-emit
+  rather than keyword-inferred.)
+- **Sharpest-window picker** — Video shot trims pick the sharpest
+  N-second window inside the asset's duration, not "first N seconds".
+  (v4.0 superseded this with VideoWindowPicker that consumes VLM
+  best_moment_index + window hints.)
+
+---
+
 ## v3.1 — c-end UX + reliability + perf pass (2026-05-07)
 
 Pushed as commit [`ef3ecb3`](https://github.com/frankqwang/llm-app/commit/ef3ecb3).

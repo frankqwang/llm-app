@@ -14,7 +14,9 @@ MP4 vlog candidates. No upload, no cloud, no account.
 The 5-agent reasoning chain (Browser → Audience → Director → Editor → Critic) is
 ported from the Python reference under `pc-pilot/`. Per-asset semantic tagging
 uses one Gemma VLM call per asset (`VlmAnnotator`); the cheap perception layer
-(faces, sharpness, NSFW) is no-LLM and parallelizable.
+(faces, sharpness, NSFW) is no-LLM and parallelizable. Event selection is itself
+a **two-pass VLM workflow** — coarse rank → EventScout (3×3 contact sheet read
+by Gemma per top-K candidate) → final rank — see landmine #4.
 
 End-to-end verified on **vivo X200 Pro** (Dimensity 9400, GPU + MTP). 12 assets /
 2 events / ~7 min wall-clock for two MP4s. Cache makes repeat runs much faster.
@@ -24,6 +26,8 @@ End-to-end verified on **vivo X200 Pro** (Dimensity 9400, GPU + MTP). 12 assets 
 `README.md` has the layout, sideload flow, **Architecture** section with the
 pipeline diagram, **Observability** section with the breadcrumb file paths,
 and the **Future cleanup** list of upstream-gallery code we still carry.
+`CHANGELOG.md` is the version-by-version engineering log — read the most recent
+entry for what shipped last.
 
 ## Project landmines
 
@@ -41,8 +45,9 @@ WorkManager retrying, NOT vivo BTM, NOT FGS. It's a Kotlin compiler edge case.
 
 **Rule:** keep `run()` thin. Each per-event / per-asset / per-stage block lives
 in its own `private suspend fun`. Currently extracted: `runEvent`, `runAnnotationPass`,
-`annotateAsset`. The compile error you see when you exceed the limit is just
-a warning (`Method exceeds compiler instruction limit: NNNNN`), not an error,
+`annotateAsset`, `buildTimeline`, `applyRevisions`, `applyPatches`,
+`buildAvailableSignals`. The compile error you see when you exceed the limit is
+just a warning (`Method exceeds compiler instruction limit: NNNNN`), not an error,
 so the build still passes. Watch for that line in logcat.
 
 ### 2. Vivo logcat appears suppressed but isn't
@@ -69,13 +74,30 @@ provide now comes from `VlmAnnotator` (single Gemma call per asset, output store
 in `Perception.vlmTags` + `Perception.videoInsight`). Recall is tag-based via
 `semanticOverlap()` in `Recall.kt`.
 
-### 4. Event selection is content-scored, not recency-only
+### 4. Event selection is two-pass and content-scored, not recency-only
 
 `PipelineOrchestrator` does NOT just `.take(maxEvents)` of the most-recent events.
-It calls `EventSelector.rank()` first. valueScore weights asset count (log-scaled),
-video count + seconds, time span, GPS spread, story signals (faces + scene
-diversity), recency only as small tiebreaker. If users complain "the system
-picked junk", check `EventSelector` logic, not `EventSegmenter`.
+It runs **two passes** through `EventSelectionPlanner`:
+
+1. **Coarse rank** (no VLM signal). `EventSelector.rank()` weights asset count
+   (log-scaled), video count + seconds, time span, GPS spread, story signals
+   (faces + scene diversity), `intent.eventBias()`, recency only as small
+   tiebreaker. Top-K (default 6) candidates pass to step 2.
+2. **EventScout** (one Gemma VLM call per coarse candidate). Reads a 3×3 contact
+   sheet of the candidate's non-junk assets and returns story-arc strength /
+   person presence / pacing potential. JSON-cached at
+   `filesDir/event_scout_cache/<eventId>.json`.
+3. **Final rank.** EventSelector reruns with `scoutMap` injected, picks
+   `maxEvents`. The scout signal lets the system tell apart "kid's birthday"
+   (good) from "kitchen breakfast" (bad) when the coarse stats look the same.
+
+If users complain "the system picked junk":
+- First check the manifest at `filesDir/decisions/_event_selection.json` to see
+  which events scored what.
+- Check `EventSelector` weights (`pipeline/EventSelector.kt`).
+- Check that `EventScoutRunner.scout()` actually ran — the manifest's
+  `scoutSignal` field is non-null on real runs and null when scout was skipped
+  (e.g. early-exit on empty cache + cancelled).
 
 ### 5. LlmChatModelHelper has a hardcoded MTP stub upstream
 
@@ -98,6 +120,33 @@ caches may fail to deserialize — `kotlinx.serialization Json { ignoreUnknownKe
 helps for unknown keys but not missing required keys. Always default new fields.
 If you change semantics of an existing field, document it and either: bump a
 schema version, or delete `filesDir/perception_cache/` in the migration path.
+
+### 8. Prompt-audit signal flow (Pace / ColorGrade / patches)
+
+The 7 prompts (`PromptStrings.*`) and their parsers in the agents are tightly
+coupled — adding a field requires changes in BOTH the prompt and the parser, or
+the field is silently dropped. Specific cross-stage flows:
+
+- **`Pace` enum** (`AudienceBrief.pace`) → Director's `target_duration_sec` must
+  fall in the corresponding band (snappy 15-18s / balanced 18-22s / lingering
+  22-28s). `DirectorAgent.clampToPaceBand()` enforces this even if the model
+  picks outside the band.
+- **`ColorGrade` enum** (`DirectorBrief.colorGrade`) → Editor uses it as-is when
+  not NEUTRAL; falls back to `ColorGradeFromTone.pick(directorTone)` only when
+  NEUTRAL. Don't reintroduce keyword-only inference.
+- **Critic patches** (`RevisedRequest.patches: Map<String, String>`) → preferred
+  over `newRequest`. `PipelineOrchestrator.applyPatches()` honors blank values
+  for cosmetic fields (caption / transition / ken_burns) but skips blanks for
+  narrative fields (mood / visual_requirements) — Gemma occasionally emits
+  empty strings as model error, not as intentional clear.
+- **`CriticVerdict.ABORT`** → `runEvent`'s critic loop logs a `critic_abort`
+  breadcrumb and breaks (no more model calls), but ships the working timeline.
+  Don't add "skip the event entirely on ABORT" — abort means "patches won't fix
+  this", not "don't ship anything".
+- **Director's `available_signals`** → built by `buildAvailableSignals()` from
+  the orchestrator. Director prompt requires `visual_requirements` to match
+  something in this summary. If you change `buildAvailableSignals` output
+  format, update the prompt's example accordingly or Gemma will drift.
 
 ## Working effectively in this codebase
 
@@ -152,8 +201,16 @@ Git Bash translates `/sdcard/foo` and `/data/data/...` to Windows paths
 
 ## Test infrastructure
 
-There's exactly one unit test: `agents/JsonExtractorTest.kt`. The agent JSON
-extractor is the single hot path that has actual coverage. Every other
-component is tested only by end-to-end runs on a real device. **If you add new
-JSON-parsing logic, add cases there.** If you change recall scoring, ideally
-add an `EventSelectorTest`, but the codebase has no precedent yet.
+Two unit-test files, 13 cases total:
+
+- `agents/JsonExtractorTest.kt` (10 cases) — the agent JSON extractor is the
+  hot path covering every prompt parse. Cases cover: clean object, nested
+  braces, code-fence wrapper, `<think>` tag, prose prefix/suffix, escaped
+  quotes inside strings, unclosed braces, garbage, array extraction.
+  **If you add new JSON-parsing logic, add cases here.**
+- `pipeline/EventSelectorTest.kt` (3 cases) — covers content-scored event
+  ranking with intent bias. Add cases here if you change weights in
+  `valueScore` / `eventBias` / `EventScoutRunner` integration.
+
+Run: `./gradlew :app:testDebugUnitTest`. Every other component is tested only
+by end-to-end runs on a real device.

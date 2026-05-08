@@ -167,38 +167,58 @@ Use this only if you want the in-app HF login + auto-download flow to work end-t
 
 ## VlogPilot architecture
 
-The pipeline is one `WorkManager` `CoroutineWorker` (`VlogPipelineWorker`) hosting a `PipelineOrchestrator` that drives 7 stages. All state writes go to `filesDir/` so observers (a CLI debugger, the in-app Process tab, or a unit test) can replay any run.
+The pipeline is one `WorkManager` `CoroutineWorker` (`VlogPipelineWorker`) hosting a `PipelineOrchestrator` that drives 7+ stages. All state writes go to `filesDir/` so observers (a CLI debugger, the in-app Process tab, or a unit test) can replay any run.
 
 ```
-PhotoIngest ──► EventSegmenter ──► EventSelector  (rank by content, not recency)
-                                       │
-                                       ▼
-                       (cheap perception: faces / sharpness / NSFW
-                        — no LLM, parallelizable, JSON-cached)
+PhotoIngest ──► EventSegmenter ──► EventSelectionPlanner (coarse rank)
                                        │
                                        ▼
                             Gemma 4 E2B-IT boots once
                                        │
                                        ▼
-                          VlmAnnotator per asset
-                          (scene / subjects / action / mood / salient
-                           + per-video best_moment_index)
+                       EventScout (3×3 contact sheet → VLM signal,
+                        story arc / person / pacing per top-K event)
+                                       │
+                                       ▼
+                       EventSelectionPlanner reruns with scoutMap,
+                        picks top-N events
+                                       │
+                                       ▼
+                       Cheap perception on assets in selected events
+                        (faces / sharpness / NSFW — no LLM, JSON-cached)
+                                       │
+                                       ▼
+                       VlmAnnotator per asset
+                        (scene / subjects / action / mood / salient
+                         + per-video best_moment_index + window)
                                        │
                                        ▼
                        For each top-N event, runEvent():
                          Browser  → EventMemory       (montage VLM call)
-                         Audience → AudienceBrief
-                         Director → DirectorBrief + shot blueprint
-                         Editor   → Timeline v1       (recall + per-shot VLM curate)
-                         Critic   → Critique          (up to 2 iterations)
-                         Render   → MP4 via ffmpeg-kit (hw H.264 when available)
+                         Audience → AudienceBrief + pace
+                                    (snappy / balanced / lingering)
+                         Director → DirectorBrief + shot blueprint + color_grade
+                                    (target_duration clamped to pace band;
+                                     visual_requirements grounded in
+                                     buildAvailableSignals output)
+                         Editor   → Timeline v1
+                                    (tag-based recall + per-shot VLM curate
+                                     with runner-up + why-not-others)
+                         Critic   → Critique
+                                    (verdict accept/revise/abort + patches;
+                                     up to 2 iterations)
+                         Render   → MP4 via ffmpeg-kit
+                                    (h264_mediacodec when available)
 ```
 
 Key design points:
 
-- **Method extraction is load-bearing**, not cosmetic. Inlined, `PipelineOrchestrator.run()`'s coroutine state machine exceeds ART's 64K bytecode limit and the resume-from-saved-label dispatch breaks (every progress suspension restarts run() from the top, looping forever). Per-event body lives in `runEvent()`; annotation pass lives in `runAnnotationPass()`. **If you add another pass, keep it in its own suspend function.**
-- **Caching is per-asset, two-tier**: fast perception JSON in `filesDir/perception_cache/<assetId>.json`; the VLM tags get patched into the same file once Gemma annotates. A second run over the same album skips both.
-- **Event selection is content-scored**, not recency-only — see `EventSelector.kt`. valueScore = log(asset_count) + media (videos × seconds) + story (faces, scene diversity) + travel (GPS spread, outdoor tags) + small recency tiebreaker. The zoo trip with 50 photos and 3 hours of GPS spread beats the 5-photo coffee-shop selfie session even if newer.
+- **Method extraction is load-bearing**, not cosmetic. Inlined, `PipelineOrchestrator.run()`'s coroutine state machine exceeds ART's 64K bytecode limit and the resume-from-saved-label dispatch breaks (every progress suspension restarts run() from the top, looping forever). Per-event body lives in `runEvent()`; annotation pass lives in `runAnnotationPass()`. **If you add another pass, keep it in its own suspend function.** See [CHANGELOG.md v4.1](CHANGELOG.md) for the full debug story.
+- **Two-pass event selection** (v4.4). EventSelectionPlanner ranks twice — once on cheap signals (asset count, video, GPS spread, faces, scene diversity, intent bias) to pick top-K candidates, then EventScout reads each top-K event's contact sheet and Gemma returns story-arc / person / pacing signals. Final rank uses both. Coarse signals alone confused "kid's birthday party" vs "kitchen breakfast"; the scout pass disambiguates with one ~3-5s VLM call per candidate, JSON-cached.
+- **Caching is per-asset, two-tier**: cheap perception JSON in `filesDir/perception_cache/<assetId>.json`; the VLM tags get patched into the same file once Gemma annotates. EventScout has its own `event_scout_cache/<eventId>.json`. A second run over the same album skips all VLM work.
+- **Pace + color flow from Audience → Director → renderer.** Audience emits a `pace` enum; Director's `target_duration_sec` is clamped to that pace's band (snappy 15-18s / balanced 18-22s / lingering 22-28s). Director also emits `color_grade` enum directly so the Editor + renderer don't have to keyword-infer from `tone`.
+- **Critic uses patches, not rewrites** (v4.4). Instead of re-emitting full ShotRequest objects, Critic returns `{shot_order, patches: {field: value}}` — much smaller per-token and ~3× more reliable on Gemma 4 E2B. Verdict is explicit: `accept` ships as-is, `revise` applies patches, `abort` writes a breadcrumb and ships the working timeline (no more wasted critic iterations on dead-end events).
+- **Available signals fed to Director.** Before Director writes the shot blueprint, the orchestrator computes a scene-grouped + long-video + salient summary of what assets actually exist. Director's prompt requires `visual_requirements` to match a real available scene — stops hallucinated shots like "举杯特写" when no such asset exists in the event.
 - **Per-VLM-call timeout** (90s, in `AgentRuntime.ask`): a stuck Gemma call returns the partial text instead of hanging the worker forever.
 
 ## Observability — debugging on device without logcat
