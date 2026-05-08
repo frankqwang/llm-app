@@ -168,6 +168,25 @@ the field is silently dropped. Specific cross-stage flows:
   `until` loop for a single notification, or `Monitor` for streaming. The user
   notices and complains when you sleep.
 
+## Debug scratch goes under `.debug/`, not repo root
+
+Anything pulled from the device or generated during debugging — `adb pull`
+of `decisions/` / `perception_cache/`, `uiautomator dump` XMLs, device
+screenshots, logcat captures, ad-hoc perception JSON samples — goes under
+`.debug/` (gitignored). Suggested layout:
+
+```
+.debug/
+  runs/<run_id>/      # decisions/timeline/perf JSON pulls per session
+  logs/<tag>.log      # logcat or scripted captures
+  ui/<tag>.xml        # uiautomator dumps + screenshots
+```
+
+Do NOT drop `.run*`, `.ui*.xml`, `.screen.png`, `.sample_*.json` at repo
+root. The user complained about that and we cleaned it up — keep it
+clean. The .gitignore matches `.debug/` only; per-pattern root rules are
+gone.
+
 ## ADB on Windows
 
 The bash environment doesn't have `adb` on PATH. Use:
