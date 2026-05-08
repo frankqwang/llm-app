@@ -11,8 +11,10 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Perception
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.GenerationIntent
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 object EventSelector {
@@ -58,11 +60,12 @@ object EventSelector {
     events: List<Event>,
     assetMap: Map<String, Asset>,
     perceptionFor: (String) -> Perception?,
+    intent: GenerationIntent = GenerationIntent.AUTO,
     nowMs: Long = System.currentTimeMillis(),
   ): List<Candidate> =
     events.map { event ->
       val assets = event.assetIds.mapNotNull { assetMap[it] }
-      score(event, assets, perceptionFor, nowMs)
+      score(event, assets, perceptionFor, intent, nowMs)
     }.sortedWith(
       compareByDescending<Candidate> { it.valueScore }
         .thenByDescending { it.mediaScore }
@@ -74,6 +77,7 @@ object EventSelector {
     event: Event,
     assets: List<Asset>,
     perceptionFor: (String) -> Perception?,
+    intent: GenerationIntent,
     nowMs: Long,
   ): Candidate {
     if (assets.isEmpty()) {
@@ -111,6 +115,7 @@ object EventSelector {
     val spanHours = ((event.endEpochMs - event.startEpochMs).coerceAtLeast(0L) / 3_600_000f)
     val storyScore = storyScore(assets, spanHours)
     val qualityScore = qualityScore(perceptions.values.filterNotNull())
+    val intentScore = intentScore(intent, assets, perceptions)
     val ageDays = ((nowMs - event.endEpochMs).coerceAtLeast(0L) / 86_400_000f)
     val recencyScore = (1f - ageDays / 30f).coerceIn(0f, 1f)
     val gpsAssetCount = assets.count { it.latitude != null && it.longitude != null }
@@ -120,7 +125,7 @@ object EventSelector {
       realVideoSeconds = realVideoSeconds,
       gpsAssetCount = gpsAssetCount,
     )
-    val valueScore = (
+    val baseScore = (
       travelScore * 0.30f +
         mediaScore * 0.30f +
         storyScore * 0.18f +
@@ -128,6 +133,11 @@ object EventSelector {
         recencyScore * 0.10f -
         lowSignalPenalty
       ).coerceIn(0f, 1f)
+    val valueScore = if (intent == GenerationIntent.AUTO) {
+      baseScore
+    } else {
+      (baseScore * 0.78f + intentScore * 0.22f).coerceIn(0f, 1f)
+    }
 
     return Candidate(
       event = event,
@@ -148,6 +158,8 @@ object EventSelector {
         travelScore = travelScore,
         mediaScore = mediaScore,
         storyScore = storyScore,
+        intent = intent,
+        intentScore = intentScore,
         realVideoSeconds = realVideoSeconds,
         longVideoCount = longVideoCount,
         gpsAssetCount = gpsAssetCount,
@@ -220,6 +232,8 @@ object EventSelector {
     travelScore: Float,
     mediaScore: Float,
     storyScore: Float,
+    intent: GenerationIntent,
+    intentScore: Float,
     realVideoSeconds: Float,
     longVideoCount: Int,
     gpsAssetCount: Int,
@@ -231,9 +245,86 @@ object EventSelector {
     if (longVideoCount > 0) out += "long-video"
     if (assets.size >= 10) out += "many-assets"
     if (storyScore >= 0.65f) out += "story-span"
+    when {
+      intent == GenerationIntent.ZOO && intentScore >= 0.25f -> out += "zoo"
+      intent == GenerationIntent.PEOPLE && intentScore >= 0.25f -> out += "people"
+      intent == GenerationIntent.FOOD && intentScore >= 0.25f -> out += "food"
+      intent == GenerationIntent.TRAVEL && intentScore >= 0.25f -> out += "intent-travel"
+    }
     if (mediaScore < 0.08f && travelScore < 0.15f && gpsAssetCount == 0) out += "low-signal"
     return out
   }
+
+  private fun intentScore(
+    intent: GenerationIntent,
+    assets: List<Asset>,
+    perceptions: Map<String, Perception?>,
+  ): Float {
+    if (intent == GenerationIntent.AUTO || assets.isEmpty()) return 0f
+    val text = assets.joinToString(" ") { asset -> semanticText(asset, perceptions[asset.id]) }
+    val keywordScore = when (intent) {
+      GenerationIntent.AUTO -> 0f
+      GenerationIntent.TRAVEL -> keywordScore(text, travelKeywords)
+      GenerationIntent.ZOO -> keywordScore(text, zooKeywords)
+      GenerationIntent.PEOPLE -> keywordScore(text, peopleKeywords)
+      GenerationIntent.FOOD -> keywordScore(text, foodKeywords)
+    }
+    val faceScore = if (intent == GenerationIntent.PEOPLE) {
+      (perceptions.values.filterNotNull().sumOf { it.faces.size } / 4f).coerceIn(0f, 1f)
+    } else {
+      0f
+    }
+    val videoSeconds = assets.filter { it.mediaType == MediaType.VIDEO }
+      .sumOf { it.durationMs.coerceAtLeast(0L) }
+      .toFloat() / 1000f
+    val videoBonus = when (intent) {
+      GenerationIntent.ZOO, GenerationIntent.TRAVEL -> (videoSeconds / 90f).coerceIn(0f, 0.28f)
+      GenerationIntent.PEOPLE, GenerationIntent.FOOD -> (videoSeconds / 60f).coerceIn(0f, 0.18f)
+      GenerationIntent.AUTO -> 0f
+    }
+    val gpsBonus = if (intent == GenerationIntent.TRAVEL && assets.any { it.latitude != null && it.longitude != null }) 0.18f else 0f
+    return (keywordScore + faceScore * 0.45f + videoBonus + gpsBonus).coerceIn(0f, 1f)
+  }
+
+  private fun keywordScore(text: String, keywords: List<String>): Float {
+    val hits = keywords.count { it in text }
+    return if (hits == 0) 0f else (0.18f + min(hits, 5) * 0.12f).coerceAtMost(1f)
+  }
+
+  private fun semanticText(asset: Asset, perception: Perception?): String {
+    val tags = perception?.vlmTags
+    val video = perception?.videoInsight
+    return buildString {
+      append(asset.displayName); append(' ')
+      append(tags?.scene.orEmpty()); append(' ')
+      tags?.subjects.orEmpty().forEach { append(it); append(' ') }
+      append(tags?.action.orEmpty()); append(' ')
+      append(tags?.mood.orEmpty()); append(' ')
+      append(tags?.salient.orEmpty()); append(' ')
+      append(video?.summary.orEmpty()); append(' ')
+      append(video?.actionArc.orEmpty())
+    }.lowercase(Locale.ROOT)
+  }
+
+  private val travelKeywords = listOf(
+    "旅行", "旅游", "景区", "景点", "风景", "户外", "城市", "街景", "机场", "车站",
+    "酒店", "行李", "路牌", "landmark", "travel", "scenery", "outdoor",
+  )
+
+  private val zooKeywords = listOf(
+    "动物园", "野生动物", "海洋馆", "水族馆", "动物", "熊猫", "长颈鹿", "大象",
+    "猴子", "zoo", "safari", "animal", "wildlife", "aquarium", "panda",
+  )
+
+  private val peopleKeywords = listOf(
+    "人", "朋友", "孩子", "小孩", "家人", "合影", "互动", "笑", "表情", "跳舞",
+    "portrait", "people", "friend", "family", "child", "smile",
+  )
+
+  private val foodKeywords = listOf(
+    "美食", "餐厅", "菜", "饭", "咖啡", "甜点", "火锅", "烧烤", "聚餐", "桌面",
+    "food", "restaurant", "meal", "coffee", "dessert", "dinner",
+  )
 
   private fun percent(v: Float): String =
     String.format(Locale.ROOT, "%02d", (v.coerceIn(0f, 1f) * 100f).roundToInt())

@@ -17,6 +17,8 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.MediaLoader
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.SceneCutDetector
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.PowerPacer
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.PowerProfile
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
 import java.util.Locale
@@ -27,7 +29,8 @@ object VideoFrameSheetBuilder {
 
   private const val CELL_W = 320
   private const val CELL_H = 426
-  private const val MAX_FRAME_COUNT = 16
+  private const val MAX_LOW_POWER_FRAME_COUNT = 16
+  private const val MAX_HIGH_QUALITY_FRAME_COUNT = 20
 
   data class Sheet(
     val bitmap: Bitmap,
@@ -58,9 +61,14 @@ object VideoFrameSheetBuilder {
     return Sheet(sheet, frames.map { it.first })
   }
 
-  fun targetFrameCount(asset: Asset): Int {
+  fun targetFrameCount(asset: Asset, powerProfile: PowerProfile = PowerPacer.currentProfile()): Int {
     val durSec = asset.durationMs / 1000f
     if (durSec <= 0f) return 0
+    val maxFrames = if (powerProfile == PowerProfile.HIGH_QUALITY) {
+      MAX_HIGH_QUALITY_FRAME_COUNT
+    } else {
+      MAX_LOW_POWER_FRAME_COUNT
+    }
     return when {
       asset.mediaType == MediaType.LIVE_PHOTO && durSec <= 4f -> 4
       asset.mediaType == MediaType.LIVE_PHOTO -> 6
@@ -68,8 +76,8 @@ object VideoFrameSheetBuilder {
       durSec <= 15f -> 6
       durSec <= 30f -> 8
       durSec <= 60f -> 10
-      durSec <= 180f -> 12
-      else -> MAX_FRAME_COUNT
+      durSec <= 180f -> if (powerProfile == PowerProfile.HIGH_QUALITY) 14 else 12
+      else -> maxFrames
     }
   }
 

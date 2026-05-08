@@ -88,6 +88,9 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.PromptStrings
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.VlmAnnotator
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.MediaLoader
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.GenerationIntent
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.PowerProfile
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotRunConfig
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
@@ -96,6 +99,9 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotSpec
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Timeline
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.VlmTags
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventDecisions
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventCandidateSnapshot
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventSelectionManifest
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventSelectionStatus
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.StagePerf
 import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
 import java.io.File
@@ -115,8 +121,11 @@ fun VlogPilotScreen(
   val state by viewModel.state.collectAsState()
   val decisions by viewModel.decisions.collectAsState()
   val progress by viewModel.progress.collectAsState()
+  val runConfig by viewModel.runConfig.collectAsState()
+  val eventSelection by viewModel.eventSelection.collectAsState()
   val context = LocalContext.current
   var selectedTab by remember { mutableStateOf(VlogPilotTab.Results) }
+  var pendingPermissionAction by remember { mutableStateOf<(() -> Unit)?>(null) }
 
   val perms = remember {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -139,9 +148,25 @@ fun VlogPilotScreen(
 
   val permLauncher =
     rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
-      if (grants.values.all { it }) launchPipeline()
+      if (grants.values.all { it }) {
+        val action = pendingPermissionAction
+        pendingPermissionAction = null
+        action?.invoke() ?: launchPipeline()
+      }
       else viewModel.reportError("没有相册权限，无法扫描素材。")
     }
+
+  fun requireAlbumPermission(action: () -> Unit) {
+    val ungranted = perms.filter {
+      ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+    }
+    if (ungranted.isEmpty()) {
+      action()
+    } else {
+      pendingPermissionAction = action
+      permLauncher.launch(ungranted.toTypedArray())
+    }
+  }
 
   val running = state is PipelineState.Running || state is PipelineState.Scanning
   LazyColumn(
@@ -157,17 +182,21 @@ fun VlogPilotScreen(
         state = state,
         decisions = decisions,
         progress = progress,
+        runConfig = runConfig,
+        eventSelection = eventSelection,
         running = running,
+        onRefreshClick = {
+          requireAlbumPermission { viewModel.refreshCandidates() }
+        },
         onRunClick = {
           if (running) {
             viewModel.cancelPipeline()
           } else {
-            val ungranted = perms.filter {
-              ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
-            }
-            if (ungranted.isEmpty()) launchPipeline() else permLauncher.launch(ungranted.toTypedArray())
+            requireAlbumPermission { launchPipeline() }
           }
         },
+        onIntentSelect = viewModel::setIntent,
+        onPowerSelect = viewModel::setPowerProfile,
       )
     }
 
@@ -193,6 +222,38 @@ fun VlogPilotScreen(
         } else {
           items(decisions, key = { "result-${it.eventId}" }) { decision ->
             ResultEventCard(decision)
+          }
+        }
+      }
+
+      VlogPilotTab.Events -> {
+        val manifest = eventSelection
+        if (manifest == null) {
+          item {
+            EmptyProcessCard(
+              state = state,
+              title = "还没有候选事件",
+              message = "点击刷新候选，只做轻量扫描和排序，不会启动 VLM 或渲染。",
+            )
+          }
+        } else {
+          item {
+            EventSelectionHeader(
+              manifest = manifest,
+              runConfig = runConfig,
+              onClearOnly = viewModel::clearOnlySelected,
+            )
+          }
+          items(manifest.candidates, key = { "event-select-${it.eventId}" }) { candidate ->
+            EventCandidateCard(
+              candidate = candidate,
+              runConfig = runConfig,
+              onPin = viewModel::pinEvent,
+              onExclude = viewModel::excludeEvent,
+              onClearExcluded = viewModel::clearExcluded,
+              onOnly = viewModel::onlyGenerateEvent,
+              onRegenerate = viewModel::forceRegenerateEvent,
+            )
           }
         }
       }
@@ -229,6 +290,7 @@ fun VlogPilotScreen(
 
 private enum class VlogPilotTab(val label: String, val icon: ImageVector) {
   Results("生成结果", Icons.Outlined.Movie),
+  Events("事件选择", Icons.Outlined.Search),
   Process("过程透视", Icons.Outlined.Visibility),
   Assets("素材管理", Icons.Outlined.PhotoLibrary),
   Prompts("Prompt", Icons.Outlined.Edit),
@@ -269,12 +331,49 @@ private fun WorkspaceTabs(selected: VlogPilotTab, onSelect: (VlogPilotTab) -> Un
 }
 
 @Composable
+private fun <T> ControlSegment(
+  label: String,
+  options: List<T>,
+  selected: T,
+  optionLabel: (T) -> String,
+  onSelect: (T) -> Unit,
+  enabled: Boolean,
+) {
+  Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+      items(options) { option ->
+        val active = option == selected
+        Surface(
+          modifier = if (enabled) Modifier.clickable { onSelect(option) } else Modifier,
+          shape = RoundedCornerShape(999.dp),
+          color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+          contentColor = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+        ) {
+          Text(
+            optionLabel(option),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+          )
+        }
+      }
+    }
+  }
+}
+
+@Composable
 private fun StudioStatusCard(
   state: PipelineState,
   decisions: List<EventDecisions>,
   progress: ProgressSnapshot,
+  runConfig: VlogPilotRunConfig,
+  eventSelection: EventSelectionManifest?,
   running: Boolean,
+  onRefreshClick: () -> Unit,
   onRunClick: () -> Unit,
+  onIntentSelect: (GenerationIntent) -> Unit,
+  onPowerSelect: (PowerProfile) -> Unit,
 ) {
   val rendered = decisions.count { it.mp4Path != null }
   val totalShots = decisions.sumOf { (it.timelineFinal ?: it.timelineV1)?.shots?.size ?: 0 }
@@ -315,12 +414,34 @@ private fun StudioStatusCard(
         if (running) {
           FilledTonalButton(onClick = onRunClick) { Text("取消") }
         } else {
-          Button(onClick = onRunClick) { Text("生成") }
+          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilledTonalButton(onClick = onRefreshClick) { Text("刷新候选") }
+            Button(onClick = onRunClick) { Text("生成") }
+          }
         }
       }
 
+      ControlSegment(
+        label = "生成意图",
+        options = GenerationIntent.entries.toList(),
+        selected = runConfig.intent,
+        optionLabel = ::intentLabel,
+        onSelect = onIntentSelect,
+        enabled = !running,
+      )
+      ControlSegment(
+        label = "运行模式",
+        options = PowerProfile.entries.toList(),
+        selected = runConfig.powerProfile,
+        optionLabel = ::powerLabel,
+        onSelect = onPowerSelect,
+        enabled = !running,
+      )
+
       LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         item { InfoPill("事件 ${decisions.size}", Icons.Outlined.Visibility) }
+        item { InfoPill("候选 ${eventSelection?.candidateCount ?: 0}", Icons.Outlined.Search, eventSelection != null) }
+        item { InfoPill("选中 ${eventSelection?.selectedEventIds?.size ?: 0}", Icons.Outlined.Star, eventSelection?.selectedEventIds?.isNotEmpty() == true) }
         item { InfoPill("扫描 $scannedAssets", Icons.Outlined.PhotoLibrary) }
         item { InfoPill("镜头 $totalShots", Icons.Outlined.Edit) }
         item {
@@ -420,6 +541,142 @@ private fun AlbumPreviewCard(assets: List<Asset>, events: List<Event>) {
         subtitle = "${assets.size} 个素材，${events.size} 个事件",
       )
       AssetStrip(assets = assets.take(18), totalCount = assets.size)
+    }
+  }
+}
+
+@Composable
+private fun EventSelectionHeader(
+  manifest: EventSelectionManifest,
+  runConfig: VlogPilotRunConfig,
+  onClearOnly: () -> Unit,
+) {
+  ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+      SectionHeader(
+        icon = Icons.Outlined.Search,
+        title = "事件选择",
+        subtitle = "轻量候选榜：不触发 VLM、不渲染，只解释为什么选这些事件",
+      )
+      LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        item { InfoPill("候选 ${manifest.candidateCount}", Icons.Outlined.Search, true) }
+        item { InfoPill("选中 ${manifest.selectedEventIds.size}", Icons.Outlined.Star, manifest.selectedEventIds.isNotEmpty()) }
+        item { InfoPill(intentLabel(manifest.intent), Icons.Outlined.Visibility) }
+        item { InfoPill(powerLabel(manifest.powerProfile), Icons.Outlined.Timer) }
+      }
+      if (runConfig.onlySelectedEventIds.isNotEmpty()) {
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Text(
+            "当前只生成指定事件：${runConfig.onlySelectedEventIds.joinToString { shortId(it) }}",
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+          FilledTonalButton(onClick = onClearOnly) { Text("恢复自动") }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun EventCandidateCard(
+  candidate: EventCandidateSnapshot,
+  runConfig: VlogPilotRunConfig,
+  onPin: (String) -> Unit,
+  onExclude: (String) -> Unit,
+  onClearExcluded: (String) -> Unit,
+  onOnly: (String) -> Unit,
+  onRegenerate: (String) -> Unit,
+) {
+  ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.Top,
+      ) {
+        Surface(
+          shape = RoundedCornerShape(14.dp),
+          color = when (candidate.status) {
+            EventSelectionStatus.SELECTED -> MaterialTheme.colorScheme.primaryContainer
+            EventSelectionStatus.EXCLUDED -> MaterialTheme.colorScheme.errorContainer
+            EventSelectionStatus.COMPLETED -> MaterialTheme.colorScheme.secondaryContainer
+            else -> MaterialTheme.colorScheme.surfaceVariant
+          },
+          contentColor = when (candidate.status) {
+            EventSelectionStatus.SELECTED -> MaterialTheme.colorScheme.onPrimaryContainer
+            EventSelectionStatus.EXCLUDED -> MaterialTheme.colorScheme.onErrorContainer
+            EventSelectionStatus.COMPLETED -> MaterialTheme.colorScheme.onSecondaryContainer
+            else -> MaterialTheme.colorScheme.onSurfaceVariant
+          },
+        ) {
+          Icon(
+            imageVector = if (candidate.status == EventSelectionStatus.SELECTED) Icons.Outlined.Star else Icons.Outlined.Visibility,
+            contentDescription = null,
+            modifier = Modifier.padding(10.dp),
+          )
+        }
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+          Text("事件 ${shortId(candidate.eventId)}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+          Text(
+            listOfNotNull(
+              formatEventRange(candidate.event.startEpochMs, candidate.event.endEpochMs).takeIf { it.isNotBlank() },
+              "${candidate.assets.size} 个预览素材",
+              "${candidate.realVideoCount} 段视频 / ${formatSec(candidate.realVideoSeconds.toDouble())}",
+              "${"%.1f".format(Locale.US, candidate.spanHours)}h",
+            ).joinToString(" · "),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
+        InfoPill(eventStatusLabel(candidate.status), Icons.Outlined.CheckCircle, candidate.status == EventSelectionStatus.SELECTED)
+      }
+
+      LinearProgressIndicator(
+        progress = { candidate.valueScore.coerceIn(0f, 1f) },
+        modifier = Modifier
+          .fillMaxWidth()
+          .height(6.dp)
+          .clip(RoundedCornerShape(999.dp)),
+      )
+
+      LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        item { InfoPill("value ${(candidate.valueScore * 100).toInt()}", Icons.Outlined.Star, candidate.status == EventSelectionStatus.SELECTED) }
+        item { InfoPill("travel ${(candidate.travelScore * 100).toInt()}", Icons.Outlined.Visibility) }
+        item { InfoPill("media ${(candidate.mediaScore * 100).toInt()}", Icons.Outlined.Movie) }
+        item { InfoPill("story ${(candidate.storyScore * 100).toInt()}", Icons.Outlined.Edit) }
+        if (candidate.gpsAssetCount > 0) item { InfoPill("GPS ${candidate.gpsAssetCount}", Icons.Outlined.Search, true) }
+      }
+
+      if (candidate.reasons.isNotEmpty()) {
+        Text(
+          candidate.reasons.joinToString(" · "),
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          maxLines = 2,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
+
+      AssetStrip(assets = candidate.assets.take(12), totalCount = candidate.event.assetIds.size)
+
+      LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (candidate.status == EventSelectionStatus.EXCLUDED) {
+          item { FilledTonalButton(onClick = { onClearExcluded(candidate.eventId) }) { Text("取消排除") } }
+        } else {
+          item { FilledTonalButton(onClick = { onExclude(candidate.eventId) }) { Text("排除") } }
+        }
+        item { FilledTonalButton(onClick = { onPin(candidate.eventId) }) { Text(if (candidate.eventId in runConfig.pinnedEventIds) "已优先" else "优先生成") } }
+        item { Button(onClick = { onOnly(candidate.eventId) }) { Text("只生成此事件") } }
+        item { FilledTonalButton(onClick = { onRegenerate(candidate.eventId) }) { Text("重新生成") } }
+      }
     }
   }
 }
@@ -1262,7 +1519,7 @@ private fun promptSpecs(): List<PromptSpec> = listOf(
   ),
   PromptSpec(
     title = "VLM 视频多帧标注",
-    subtitle = "6 帧视频网格 -> VlmTags + VideoInsight",
+    subtitle = "自适应多帧视频网格 -> VlmTags + VideoInsight",
     systemPrompt = VlmAnnotator.VIDEO_SYSTEM_PROMPT,
     userTemplate = "媒体类型: <video/live_photo>。帧编号和时间戳: 1=0.4s, 2=1.2s, ...。请输出 Video VlmTags JSON。",
   ),
@@ -1358,6 +1615,29 @@ private fun statusText(state: PipelineState): String = when (state) {
   is PipelineState.Running -> state.message
   is PipelineState.Done -> "完成，生成 ${state.outputs.size} 个候选视频"
   is PipelineState.Error -> "错误：${state.message}"
+}
+
+private fun intentLabel(intent: GenerationIntent): String = when (intent) {
+  GenerationIntent.AUTO -> "自动"
+  GenerationIntent.TRAVEL -> "旅行"
+  GenerationIntent.ZOO -> "动物园"
+  GenerationIntent.PEOPLE -> "人物"
+  GenerationIntent.FOOD -> "美食"
+}
+
+private fun powerLabel(profile: PowerProfile): String = when (profile) {
+  PowerProfile.LOW_POWER -> "低功耗"
+  PowerProfile.BALANCED -> "均衡"
+  PowerProfile.HIGH_QUALITY -> "高质量"
+}
+
+private fun eventStatusLabel(status: EventSelectionStatus): String = when (status) {
+  EventSelectionStatus.SELECTED -> "已选中"
+  EventSelectionStatus.RESUME -> "可续跑"
+  EventSelectionStatus.FRESH -> "新候选"
+  EventSelectionStatus.COMPLETED -> "已完成"
+  EventSelectionStatus.EXCLUDED -> "已排除"
+  EventSelectionStatus.NOT_SELECTED -> "未选中"
 }
 
 private fun formatEventRange(startMs: Long, endMs: Long): String {

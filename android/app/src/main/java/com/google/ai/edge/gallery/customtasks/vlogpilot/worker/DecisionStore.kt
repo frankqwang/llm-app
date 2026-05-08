@@ -48,6 +48,7 @@ data class EventDecisions(
 object DecisionStore {
 
   private const val TAG = "DecisionStore"
+  private const val EVENT_SELECTION_FILE = "_event_selection.json"
   private val json = Json { prettyPrint = true; encodeDefaults = true }
 
   fun dirFor(context: Context, eventId: String): File =
@@ -81,6 +82,26 @@ object DecisionStore {
     return root.listFiles()?.filter { it.isDirectory }?.map { it.name }?.sorted().orEmpty()
   }
 
+  fun writeEventSelection(context: Context, manifest: EventSelectionManifest) {
+    try {
+      val root = File(context.filesDir, "decisions").apply { mkdirs() }
+      File(root, EVENT_SELECTION_FILE).writeText(json.encodeToString(manifest))
+    } catch (t: Throwable) {
+      Log.w(TAG, "failed to persist $EVENT_SELECTION_FILE: ${t.message}")
+    }
+  }
+
+  fun loadEventSelection(context: Context): EventSelectionManifest? {
+    val file = File(File(context.filesDir, "decisions"), EVENT_SELECTION_FILE)
+    if (!file.isFile) return null
+    return try {
+      json.decodeFromString<EventSelectionManifest>(file.readText())
+    } catch (t: Throwable) {
+      Log.w(TAG, "failed to read $EVENT_SELECTION_FILE: ${t.message}")
+      null
+    }
+  }
+
   /** Read every event's persisted decisions into a list, sorted by eventId. Any
    *  partially-completed event (e.g. browse done but not director) just has the
    *  unwritten fields as null — the UI renders progressively. */
@@ -94,7 +115,7 @@ object DecisionStore {
       val inputs = readJson<EventInputManifest>(dir, "event_inputs.json")
       val inputAssets = inputs?.assets.orEmpty()
       val inputPerceptions = inputAssets.mapNotNull { asset ->
-        PerceptionCache.get(context, asset.id)?.let { asset.id to it }
+        PerceptionCache.get(context, asset)?.let { asset.id to it }
       }.toMap()
       EventDecisions(
         eventId = eid,

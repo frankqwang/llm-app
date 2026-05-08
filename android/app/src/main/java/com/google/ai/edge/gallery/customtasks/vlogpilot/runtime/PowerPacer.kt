@@ -18,6 +18,13 @@ object PowerPacer {
   private const val PERCEPTION_ASSET_PAUSE_MS = 90L
   private const val VLM_ASSET_PAUSE_MS = 650L
   private const val AGENT_CALL_PAUSE_MS = 250L
+  @Volatile private var profile: PowerProfile = PowerProfile.LOW_POWER
+
+  fun setProfile(value: PowerProfile) {
+    profile = value
+  }
+
+  fun currentProfile(): PowerProfile = profile
 
   fun applyBackgroundThreadPriority() {
     if (!ENABLED) return
@@ -26,7 +33,7 @@ object PowerPacer {
 
   fun afterFrameDecode(index: Int, total: Int) {
     if (!ENABLED || total <= 2 || index >= total - 1) return
-    sleepQuietly(FRAME_DECODE_PAUSE_MS)
+    sleepQuietly(scaled(FRAME_DECODE_PAUSE_MS))
   }
 
   suspend fun afterPerceptionAsset(cacheHit: Boolean) {
@@ -49,7 +56,16 @@ object PowerPacer {
     if (!ENABLED) return
     applyBackgroundThreadPriority()
     yield()
-    delay(ms)
+    delay(scaled(ms))
+  }
+
+  private fun scaled(ms: Long): Long {
+    val factor = when (profile) {
+      PowerProfile.LOW_POWER -> 1.0f
+      PowerProfile.BALANCED -> 0.5f
+      PowerProfile.HIGH_QUALITY -> 0.15f
+    }
+    return (ms * factor).toLong().coerceAtLeast(if (profile == PowerProfile.HIGH_QUALITY) 1L else 5L)
   }
 
   private fun sleepQuietly(ms: Long) {

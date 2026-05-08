@@ -26,9 +26,10 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.MediaLoader
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.PerceptionCache
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.PerceptionEngine
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventSegmenter
-import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventSelector
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.VideoFrameSheetBuilder
 import com.google.ai.edge.gallery.customtasks.vlogpilot.render.VideoRenderer
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.PowerPacer
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotRunConfig
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
@@ -50,6 +51,7 @@ class PipelineOrchestrator(
     windowDays: Int = 30,
     maxEvents: Int = 2,
     ingestFilter: PhotoIngest.Filter = PhotoIngest.Filter(),
+    runConfig: VlogPilotRunConfig = VlogPilotRunConfig.load(context),
     onProgress: suspend (PipelineProgress) -> Unit,
   ): Result {
     // Wrap the user-supplied progress callback so every event also writes
@@ -65,7 +67,10 @@ class PipelineOrchestrator(
         Log.w(TAG, "progress callback failed for $progressName: ${t.message}")
       }
     }
-    StateBreadcrumb.mark(context, "orchestrator_start", "windowDays=$windowDays maxEvents=$maxEvents")
+    PowerPacer.setProfile(runConfig.powerProfile)
+    StateBreadcrumb.mark(context, "orchestrator_start", "windowDays=$windowDays maxEvents=$maxEvents intent=${runConfig.intent.name} power=${runConfig.powerProfile.name}")
+    StateBreadcrumb.mark(context, "power_pacing", "profile=${runConfig.powerProfile.name}; background priority + paced decode/model calls")
+    PowerPacer.applyBackgroundThreadPriority()
     progress(PipelineProgress.DownloadingModels(0, "starting"))
 
     // 1. Make sure perception models are present (best-effort).
@@ -85,33 +90,22 @@ class PipelineOrchestrator(
     val assets = PhotoIngest.loadRecent(context, windowDays, ingestFilter)
     val allEvents = EventSegmenter.segment(assets)
     val assetMap = assets.associateBy { it.id }
-    val selectionPerceptions = HashMap<String, Perception?>()
-    fun selectionPerception(assetId: String): Perception? =
-      selectionPerceptions.getOrPut(assetId) { PerceptionCache.get(context, assetId) }
-    val rankedCandidates = EventSelector.rank(allEvents, assetMap, ::selectionPerception)
-    val sortedDesc = allEvents.sortedByDescending { it.endEpochMs }
-    val candidatesDir = java.io.File(context.filesDir, "candidates")
-    val decisionsRoot = java.io.File(context.filesDir, "decisions")
-    fun isResumable(eventId: String): Boolean {
-      val tlf = java.io.File(java.io.File(decisionsRoot, eventId), "timeline_final.json")
-      val mp4 = java.io.File(candidatesDir, "$eventId.mp4")
-      return tlf.isFile && !mp4.isFile
-    }
-    val resumeEvents = sortedDesc.filter { isResumable(it.eventId) }
-    val resumeEventIds = resumeEvents.map { it.eventId }.toSet()
-    val newCandidates = rankedCandidates
-      .filter { it.eventId !in resumeEventIds }
-      .take(maxEvents)
-    val newEvents = newCandidates.map { it.event }
-    // Resume first (cheap render-only), then new (expensive full pipeline).
-    val events = resumeEvents + newEvents
+    val selectionPlan = EventSelectionPlanner.plan(
+      context = context,
+      assets = assets,
+      events = allEvents,
+      runConfig = runConfig,
+      maxEvents = maxEvents,
+    )
+    DecisionStore.writeEventSelection(context, selectionPlan.manifest)
+    val rankedCandidates = selectionPlan.rankedCandidates
+    val events = selectionPlan.selectedEvents
     val keptAssetIds = events.flatMap { it.assetIds }.toSet()
     val candidateSummary = rankedCandidates.take(8).joinToString(" | ") { it.compactSummary() }
-    val selectedSummary = (
-      resumeEvents.map { "${it.eventId}:resume" } +
-        newCandidates.map { it.compactSummary() }
-      ).joinToString(" | ")
-    Log.d(TAG, "events: ${resumeEvents.size} resumable (${resumeEvents.map { it.eventId }}) + ${newEvents.size} selected by value (cap=$maxEvents)")
+    val selectedSummary = selectionPlan.manifest.candidates
+      .filter { it.eventId in selectionPlan.manifest.selectedEventIds }
+      .joinToString(" | ") { "${it.eventId}:value=${(it.valueScore * 100).toInt()} reason=${it.reasons.joinToString("+")}" }
+    Log.d(TAG, "events: selected=${events.size} resume=${selectionPlan.resumeEventIds.size} candidates=${rankedCandidates.size} intent=${runConfig.intent.name} power=${runConfig.powerProfile.name}")
     StateBreadcrumb.mark(context, "event_candidates", candidateSummary.ifBlank { "none" })
     StateBreadcrumb.mark(
       context,
@@ -145,7 +139,7 @@ class PipelineOrchestrator(
       perceptionCount = toAnalyze.size
       val perceptionStart = System.nanoTime()
       for ((i, asset) in toAnalyze.withIndex()) {
-        val cached = PerceptionCache.get(context, asset.id)
+        val cached = PerceptionCache.get(context, asset)
         if (cached != null) {
           perceptions[asset.id] = cached
           cacheHits++
@@ -165,6 +159,7 @@ class PipelineOrchestrator(
             ),
           )
         }
+        PowerPacer.afterPerceptionAsset(cacheHit = cached != null)
       }
       perceptionMs = (System.nanoTime() - perceptionStart) / 1_000_000
       Log.d(TAG, "perception: ${toAnalyze.size} assets in ${perceptionMs}ms (cache hits: $cacheHits)")
@@ -188,7 +183,7 @@ class PipelineOrchestrator(
       val critic = CriticAgent(context, agent)
       val annotator = VlmAnnotator(agent)
       val renderer = VideoRenderer(context)
-      val resumeIds = resumeEvents.map { it.eventId }.toSet()
+      val resumeIds = selectionPlan.resumeEventIds
       StateBreadcrumb.mark(context, "decision_cache", "loading prior decisions")
       val cachedDecisions = DecisionStore.loadAll(context).associateBy { it.eventId }
 
@@ -310,6 +305,7 @@ class PipelineOrchestrator(
           elapsedMs = (System.nanoTime() - assetAnnotateStart) / 1_000_000,
         ),
       )
+      PowerPacer.afterVlmAsset()
     }
     val annotateMs = (System.nanoTime() - annotateStart) / 1_000_000
     Log.d(TAG, "annotate: $annotatedCount/${needsAnnotation.size} assets in ${annotateMs}ms")
@@ -589,6 +585,7 @@ class PipelineOrchestrator(
           elapsedMs = (System.nanoTime() - assetStart) / 1_000_000,
         ),
       )
+      PowerPacer.afterVlmAsset()
     }
     val annotateMs = (System.nanoTime() - annotateStart) / 1_000_000
     Log.d(TAG, "annotate: $annotatedCount/${needsAnnotation.size} assets in ${annotateMs}ms")

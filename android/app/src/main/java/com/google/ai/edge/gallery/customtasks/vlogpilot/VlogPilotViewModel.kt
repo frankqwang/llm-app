@@ -16,11 +16,16 @@ import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.google.ai.edge.gallery.customtasks.vlogpilot.ingest.PhotoIngest
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventSegmenter
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.GenerationIntent
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.PowerProfile
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotRunConfig
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotModelRegistry
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.DecisionStore
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventDecisions
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventSelectionManifest
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventSelectionPlanner
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineEventBus
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineProgress
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.StateBreadcrumb
@@ -51,6 +56,12 @@ sealed interface PipelineState {
 
 data class EventResult(val eventId: String, val outputPath: String)
 
+private data class CandidateRefreshResult(
+  val assets: List<Asset>,
+  val events: List<Event>,
+  val manifest: EventSelectionManifest,
+)
+
 data class ProgressSnapshot(
   val headline: String = "等待开始",
   val detail: String = "",
@@ -77,6 +88,12 @@ class VlogPilotViewModel @Inject constructor(
   private val _progress = MutableStateFlow(ProgressSnapshot())
   val progress: StateFlow<ProgressSnapshot> = _progress.asStateFlow()
 
+  private val _runConfig = MutableStateFlow(VlogPilotRunConfig.load(appContext))
+  val runConfig: StateFlow<VlogPilotRunConfig> = _runConfig.asStateFlow()
+
+  private val _eventSelection = MutableStateFlow<EventSelectionManifest?>(null)
+  val eventSelection: StateFlow<EventSelectionManifest?> = _eventSelection.asStateFlow()
+
   private val collectedOutputs = mutableMapOf<String, String>()
   private var decisionRefreshJob: Job? = null
   private val workManager by lazy { WorkManager.getInstance(appContext) }
@@ -87,11 +104,13 @@ class VlogPilotViewModel @Inject constructor(
     }
     viewModelScope.launch {
       _decisions.value = withContext(Dispatchers.IO) { DecisionStore.loadAll(appContext) }
+      _eventSelection.value = withContext(Dispatchers.IO) { DecisionStore.loadEventSelection(appContext) }
       while (true) {
         delay(3_000)
         val s = _state.value
         if (s is PipelineState.Running || s is PipelineState.Scanning || s is PipelineState.Done) {
           _decisions.value = withContext(Dispatchers.IO) { DecisionStore.loadAll(appContext) }
+          _eventSelection.value = withContext(Dispatchers.IO) { DecisionStore.loadEventSelection(appContext) }
         }
       }
     }
@@ -122,6 +141,132 @@ class VlogPilotViewModel @Inject constructor(
     }
   }
 
+  fun refreshCandidates(windowDays: Int = 30) {
+    viewModelScope.launch {
+      refreshCandidatesInternal(windowDays)
+    }
+  }
+
+  fun setIntent(intent: GenerationIntent) {
+    updateRunConfig(refreshCandidates = true) {
+      copy(intent = intent)
+    }
+  }
+
+  fun setPowerProfile(profile: PowerProfile) {
+    updateRunConfig(refreshCandidates = false) {
+      copy(powerProfile = profile)
+    }
+  }
+
+  fun pinEvent(eventId: String) {
+    updateRunConfig(refreshCandidates = true) {
+      copy(
+        pinnedEventIds = pinnedEventIds + eventId,
+        excludedEventIds = excludedEventIds - eventId,
+        onlySelectedEventIds = emptySet(),
+      )
+    }
+  }
+
+  fun excludeEvent(eventId: String) {
+    updateRunConfig(refreshCandidates = true) {
+      copy(
+        pinnedEventIds = pinnedEventIds - eventId,
+        excludedEventIds = excludedEventIds + eventId,
+        forceRegenerateEventIds = forceRegenerateEventIds - eventId,
+        onlySelectedEventIds = onlySelectedEventIds - eventId,
+      )
+    }
+  }
+
+  fun clearExcluded(eventId: String) {
+    updateRunConfig(refreshCandidates = true) {
+      copy(excludedEventIds = excludedEventIds - eventId)
+    }
+  }
+
+  fun onlyGenerateEvent(eventId: String) {
+    updateRunConfig(refreshCandidates = true) {
+      copy(
+        onlySelectedEventIds = setOf(eventId),
+        excludedEventIds = excludedEventIds - eventId,
+      )
+    }
+  }
+
+  fun forceRegenerateEvent(eventId: String) {
+    updateRunConfig(refreshCandidates = true) {
+      copy(
+        onlySelectedEventIds = setOf(eventId),
+        forceRegenerateEventIds = forceRegenerateEventIds + eventId,
+        excludedEventIds = excludedEventIds - eventId,
+      )
+    }
+  }
+
+  fun clearOnlySelected() {
+    updateRunConfig(refreshCandidates = true) {
+      copy(onlySelectedEventIds = emptySet())
+    }
+  }
+
+  private fun updateRunConfig(
+    refreshCandidates: Boolean,
+    transform: VlogPilotRunConfig.() -> VlogPilotRunConfig,
+  ) {
+    viewModelScope.launch {
+      val next = transform(_runConfig.value)
+      _runConfig.value = next
+      withContext(Dispatchers.IO) { next.save(appContext) }
+      if (refreshCandidates && _state.value !is PipelineState.Running) {
+        refreshCandidatesInternal()
+      }
+    }
+  }
+
+  private suspend fun refreshCandidatesInternal(windowDays: Int = 30): EventSelectionManifest? {
+    _state.value = PipelineState.Scanning("正在刷新候选事件")
+    _progress.value = progressWithRecent(
+      ProgressSnapshot(
+        "正在刷新候选事件",
+        "只读取 MediaStore、事件切分、缓存感知和事件排序，不启动 VLM 或渲染",
+        "candidate_refresh",
+      ),
+    )
+    return try {
+      val result = withContext(Dispatchers.IO) {
+        val assets = PhotoIngest.loadRecent(appContext, windowDays)
+        val events = EventSegmenter.segment(assets)
+        val plan = EventSelectionPlanner.plan(
+          context = appContext,
+          assets = assets,
+          events = events,
+          runConfig = _runConfig.value,
+        )
+        DecisionStore.writeEventSelection(appContext, plan.manifest)
+        CandidateRefreshResult(assets, events, plan.manifest)
+      }
+      _eventSelection.value = result.manifest
+      _state.value = PipelineState.Ready(result.assets, result.events)
+      _progress.value = progressWithRecent(
+        ProgressSnapshot(
+          "候选事件已刷新",
+          "扫描 ${result.assets.size} 个素材，切出 ${result.events.size} 个事件，候选 ${result.manifest.candidateCount} 个，选中 ${result.manifest.selectedEventIds.size} 个",
+          "candidate_ready",
+          current = result.manifest.selectedEventIds.size,
+          total = result.manifest.candidateCount,
+        ),
+      )
+      result.manifest
+    } catch (t: Throwable) {
+      val msg = t.message ?: t::class.java.simpleName
+      _state.value = PipelineState.Error(msg)
+      _progress.value = progressWithRecent(ProgressSnapshot("刷新候选失败", msg, "error"))
+      null
+    }
+  }
+
   fun reportError(message: String) {
     _state.value = PipelineState.Error(message)
     _progress.value = progressWithRecent(ProgressSnapshot("错误", message, "error"))
@@ -146,6 +291,31 @@ class VlogPilotViewModel @Inject constructor(
             "已有后台任务正在运行",
             "没有重新入队，避免再次点击生成把当前 Worker 取消；需要重跑请先点取消",
             "work_running",
+          ),
+        )
+        return@launch
+      }
+
+      val cachedManifest = withContext(Dispatchers.IO) { DecisionStore.loadEventSelection(appContext) }
+      val currentConfig = _runConfig.value
+      val manifest = if (
+        cachedManifest == null ||
+          cachedManifest.intent != currentConfig.intent ||
+          cachedManifest.powerProfile != currentConfig.powerProfile
+      ) {
+        refreshCandidatesInternal(30)
+      } else {
+        cachedManifest
+      }
+      if (manifest == null) return@launch
+      if (manifest.selectedEventIds.isEmpty()) {
+        val existing = listExistingCandidates().map { (id, path) -> EventResult(id, path) }
+        _state.value = PipelineState.Done(existing)
+        _progress.value = progressWithRecent(
+          ProgressSnapshot(
+            "没有待生成事件",
+            "当前候选都已完成或被排除；需要重跑时请在事件选择里点“重新生成”。",
+            "no_selected_event",
           ),
         )
         return@launch
@@ -319,7 +489,11 @@ class VlogPilotViewModel @Inject constructor(
     if (decisionRefreshJob?.isActive == true) return
     decisionRefreshJob = viewModelScope.launch {
       delay(750)
-      _decisions.value = withContext(Dispatchers.IO) { DecisionStore.loadAll(appContext) }
+      val (decisions, selection) = withContext(Dispatchers.IO) {
+        DecisionStore.loadAll(appContext) to DecisionStore.loadEventSelection(appContext)
+      }
+      _decisions.value = decisions
+      _eventSelection.value = selection
     }
   }
 

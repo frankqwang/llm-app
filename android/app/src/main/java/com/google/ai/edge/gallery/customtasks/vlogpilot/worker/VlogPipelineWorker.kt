@@ -17,6 +17,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.PowerPacer
+import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotRunConfig
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotModelRegistry
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -41,6 +42,8 @@ class VlogPipelineWorker(
       return androidx.work.ListenableWorker.Result.success()
     }
     StateBreadcrumb.mark(applicationContext, "worker_start", "run=$runId id=$id attempt=$runAttemptCount")
+    val runConfig = VlogPilotRunConfig.load(applicationContext)
+    PowerPacer.setProfile(runConfig.powerProfile)
     PowerPacer.applyBackgroundThreadPriority()
     setForeground(initialForegroundInfo())
     return try {
@@ -56,7 +59,7 @@ class VlogPipelineWorker(
         return androidx.work.ListenableWorker.Result.failure()
       }
       val orch = PipelineOrchestrator(applicationContext, gemma)
-      orch.run(windowDays = 30) { progress ->
+      orch.run(windowDays = 30, runConfig = runConfig) { progress ->
         try {
           PipelineEventBus.publish(progress)
         } catch (t: Throwable) {
