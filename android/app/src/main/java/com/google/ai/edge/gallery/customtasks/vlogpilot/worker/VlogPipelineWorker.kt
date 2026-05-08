@@ -40,19 +40,28 @@ class VlogPipelineWorker(
   override suspend fun doWork(): androidx.work.ListenableWorker.Result {
     val runId = RUN_SEQ.incrementAndGet()
     val iterationModeCheck = inputData.getString(KEY_ITERATION_EVENT_ID) != null
+    val curationModeCheck = inputData.getString(KEY_CURATION_REQUEST_ID) != null
     // Iteration mode (RENDER_ONLY in Milestone A) doesn't load Gemma, so it's
     // safe to run alongside the full pipeline. We only block duplicate FULL
     // pipelines (not iterations) since multiple Gemma engines blow up memory.
-    if (!iterationModeCheck && !ACTIVE.compareAndSet(false, true)) {
-      StateBreadcrumb.mark(applicationContext, "duplicate_worker", "run=$runId ignored; another full pipeline is active")
+    // Curation mode DOES load Gemma → it shares the ACTIVE lock with full mode.
+    val needsActiveLock = !iterationModeCheck
+    if (needsActiveLock && !ACTIVE.compareAndSet(false, true)) {
+      StateBreadcrumb.mark(applicationContext, "duplicate_worker", "run=$runId ignored; another full/curate pipeline is active")
       return androidx.work.ListenableWorker.Result.success()
     }
-    StateBreadcrumb.mark(applicationContext, "worker_start", "run=$runId id=$id attempt=$runAttemptCount mode=${if (iterationModeCheck) "iterate" else "full"}")
+    val mode = when {
+      iterationModeCheck -> "iterate"
+      curationModeCheck -> "curate"
+      else -> "full"
+    }
+    StateBreadcrumb.mark(applicationContext, "worker_start", "run=$runId id=$id attempt=$runAttemptCount mode=$mode")
     val runConfig = VlogPilotRunConfig.load(applicationContext)
     PowerPacer.setProfile(runConfig.powerProfile)
     PowerPacer.applyBackgroundThreadPriority()
     setForeground(initialForegroundInfo())
     val iterationEventId = inputData.getString(KEY_ITERATION_EVENT_ID)
+    val curationRequestId = inputData.getString(KEY_CURATION_REQUEST_ID)
     return try {
       val gemma = VlogPilotModelRegistry.resolve(applicationContext) ?: run {
         val lastName = VlogPilotModelRegistry.lastEnqueuedModelName(applicationContext)
@@ -90,6 +99,17 @@ class VlogPipelineWorker(
           return androidx.work.ListenableWorker.Result.failure()
         }
         orch.iterate(iterationEventId, feedback, onProgress)
+      } else if (curationRequestId != null) {
+        // User-curated story mode: read staged request, build event, parse intent,
+        // run full Browser→Audience→Director→Editor→Critic→Render with overrides.
+        StateBreadcrumb.mark(applicationContext, "worker_curate", "request=$curationRequestId")
+        val request = CurationRequestStore.load(applicationContext, curationRequestId) ?: run {
+          val msg = "no staged curation request for $curationRequestId"
+          StateBreadcrumb.mark(applicationContext, "curate_no_request", msg)
+          PipelineEventBus.publish(PipelineProgress.Failed(msg))
+          return androidx.work.ListenableWorker.Result.failure()
+        }
+        orch.runFromCuration(request = request, runConfig = runConfig, onProgress = onProgress)
       } else {
         orch.run(windowDays = 30, runConfig = runConfig, onProgress = onProgress)
       }
@@ -109,7 +129,7 @@ class VlogPipelineWorker(
       PipelineEventBus.publish(failureProgress)
       androidx.work.ListenableWorker.Result.failure()
     } finally {
-      if (!iterationModeCheck) ACTIVE.set(false)
+      if (needsActiveLock) ACTIVE.set(false)
     }
   }
 
@@ -164,9 +184,15 @@ class VlogPipelineWorker(
      *  WORK_NAME suffix per event so iterations on different events don't
      *  cancel each other (KEEP policy). */
     const val ITERATION_WORK_PREFIX = "vlog_pilot_iterate_"
+    /** Curation WorkRequests are uniquely named per requestId; they share the
+     *  ACTIVE lock with full pipeline since both load Gemma. */
+    const val CURATION_WORK_PREFIX = "vlog_pilot_curate_"
     /** inputData key — when present, the Worker runs iterate mode using
      *  IterationStore.loadPending(context, eventId) instead of full run(). */
     const val KEY_ITERATION_EVENT_ID = "vlog_pilot.iteration_event_id"
+    /** inputData key — when present, the Worker runs runFromCuration on the
+     *  staged UserCurationRequest at CurationRequestStore.load(context, requestId). */
+    const val KEY_CURATION_REQUEST_ID = "vlog_pilot.curation_request_id"
     private const val NOTIF_ID = 24601
     private const val CHANNEL_ID = "vlog_pilot_progress"
     private val ACTIVE = AtomicBoolean(false)
@@ -177,6 +203,12 @@ class VlogPipelineWorker(
 
     fun iterationWorkName(eventId: String): String =
       "$ITERATION_WORK_PREFIX$eventId"
+
+    fun curationInputData(requestId: String): Data =
+      workDataOf(KEY_CURATION_REQUEST_ID to requestId)
+
+    fun curationWorkName(requestId: String): String =
+      "$CURATION_WORK_PREFIX$requestId"
 
     fun ensureChannel(context: Context) {
       if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return

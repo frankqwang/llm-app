@@ -19,6 +19,7 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.AudienceAgent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.CriticAgent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.DirectorAgent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.EditorAgent
+import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.IntentParserAgent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.MontageAgent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.VlmAnnotator
 import com.google.ai.edge.gallery.customtasks.vlogpilot.ingest.PhotoIngest
@@ -27,11 +28,14 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.PerceptionCac
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.PerceptionEngine
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventSegmenter
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.IterationPlanner
+import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.UserCurationPlanner
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.VideoFrameSheetBuilder
 import com.google.ai.edge.gallery.customtasks.vlogpilot.render.VideoRenderer
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.PowerPacer
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotRunConfig
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.AudienceBrief
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.CaptionPolicy
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.CriticVerdict
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.DirectorBrief
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
@@ -39,13 +43,18 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.FeedbackScope
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.IterationFeedback
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.IterationSummary
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Pace
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Perception
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.RevisedRequest
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRequest
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotSpec
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Timeline
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.UserBrief
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.UserCurationRequest
 import com.google.ai.edge.gallery.data.Model
 import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 class PipelineOrchestrator(
   private val context: Context,
@@ -418,6 +427,181 @@ class PipelineOrchestrator(
     return IterationResult(eventId, out.outputPath, targetVersion, renderInput.changeSummary)
   }
 
+  /**
+   * User-curated story entry. Skips EventSegmenter / EventSelector / EventScout
+   * (the user already chose the assets), runs IntentParserAgent on the user's
+   * text to produce a UserBrief, then drives the same Browser→Audience→
+   * Director→Editor→Critic→Render chain through runEvent. UserBrief overrides
+   * are applied at the audience / director / editor / render handoff points.
+   *
+   * Top-level entry intentionally thin to keep run()'s coroutine state machine
+   * out of ART's 64K bytecode trap (landmine #1) — heavy lifting is inside
+   * runUserCuratedEvent / IntentParserAgent / runEvent / runAnnotationPass.
+   */
+  suspend fun runFromCuration(
+    request: UserCurationRequest,
+    windowDays: Int = 365,    // user-curated events may span the full year
+    runConfig: VlogPilotRunConfig = VlogPilotRunConfig.load(context),
+    onProgress: suspend (PipelineProgress) -> Unit,
+  ): Result {
+    val progress: suspend (PipelineProgress) -> Unit = { p ->
+      runCatching { StateBreadcrumb.fromProgress(context, p) }
+      runCatching { onProgress(p) }
+    }
+    PowerPacer.setProfile(runConfig.powerProfile)
+    PowerPacer.applyBackgroundThreadPriority()
+    StateBreadcrumb.mark(context, "curate_start", "request=${request.requestId} assets=${request.selectedAssetIds.size}")
+    progress(PipelineProgress.DownloadingModels(0, "starting"))
+    ModelDownloader.downloadAll(context).collect { (pct, label) ->
+      progress(PipelineProgress.DownloadingModels(pct, label))
+    }
+    progress(PipelineProgress.Ingesting)
+    val allAssets = PhotoIngest.loadRecent(context, windowDays)
+    val plannedEvent = UserCurationPlanner.plan(request, allAssets)
+    if (plannedEvent == null) {
+      val msg = "selected assets too few or missing (need >= 3 reachable)"
+      StateBreadcrumb.mark(context, "curate_no_event", msg)
+      progress(PipelineProgress.Failed(msg))
+      return Result(emptyMap())
+    }
+    val event = plannedEvent
+    val assetMap = allAssets.associateBy { it.id }
+    val agent = AgentRuntime(context, gemmaModel)
+    val outputs = HashMap<String, String>()
+    try {
+      StateBreadcrumb.mark(context, "init", "starting agent.ensureInitialized")
+      agent.ensureInitialized()
+      StateBreadcrumb.mark(context, "init_done", "agent ready")
+
+      progress(PipelineProgress.EventStage(event.eventId, "intent", "parsing user intent text"))
+      val parser = IntentParserAgent(agent)
+      val userBrief = parser.parseInitial(request)
+      writeUserBrief(event.eventId, userBrief)
+      val eventWithBrief = event.copy(userBrief = userBrief)
+
+      runUserCuratedEvent(
+        request = request,
+        event = eventWithBrief,
+        userBrief = userBrief,
+        assetMap = assetMap,
+        agent = agent,
+        outputs = outputs,
+        progress = progress,
+      )
+    } catch (t: CancellationException) {
+      StateBreadcrumb.mark(context, "curate_cancelled", "${t::class.java.simpleName}: ${t.message}")
+      throw t
+    } catch (t: Throwable) {
+      val sw = java.io.StringWriter()
+      t.printStackTrace(java.io.PrintWriter(sw))
+      StateBreadcrumb.mark(context, "curate_fatal", "${t::class.java.simpleName}: ${t.message}")
+      runCatching {
+        java.io.File(context.filesDir, "_state_fatal.txt").writeText(sw.toString())
+      }
+      Log.e(TAG, "curation pipeline fatal", t)
+      progress(PipelineProgress.Failed(t.message ?: t::class.java.simpleName))
+      throw t
+    } finally {
+      agent.close()
+    }
+    progress(PipelineProgress.AllDone)
+    return Result(outputs)
+  }
+
+  /**
+   * Per-event body for user-curated runs. Runs perception+annotation on just
+   * the selected assets, writes inputs/manifest, then defers to runEvent (the
+   * same one used by auto events) with the userBrief threaded through.
+   */
+  private suspend fun runUserCuratedEvent(
+    request: UserCurationRequest,
+    event: Event,
+    userBrief: UserBrief,
+    assetMap: Map<String, Asset>,
+    agent: AgentRuntime,
+    outputs: HashMap<String, String>,
+    progress: suspend (PipelineProgress) -> Unit,
+  ) {
+    val eventAssets = event.assetIds.mapNotNull { assetMap[it] }
+    DecisionStore.writeEventInputs(context, event, eventAssets)
+    progress(PipelineProgress.IngestDone(eventAssets.size, 1))
+
+    // Perception pass — same shape as run() but only on the user's selection.
+    val perceptions = HashMap<String, Perception>(eventAssets.size)
+    var perceptionMs = 0L
+    var cacheHits = 0
+    val perception = PerceptionEngine(context)
+    try {
+      val perceptionStart = System.nanoTime()
+      for ((i, asset) in eventAssets.withIndex()) {
+        val cached = PerceptionCache.get(context, asset)
+        if (cached != null) {
+          perceptions[asset.id] = cached
+          cacheHits++
+        } else {
+          val fresh = perception.analyze(asset)
+          perceptions[asset.id] = fresh
+          PerceptionCache.put(context, asset, fresh)
+        }
+        if (i % 5 == 0 || i == eventAssets.size - 1) {
+          progress(
+            PipelineProgress.Perceiving(
+              current = i + 1,
+              total = eventAssets.size,
+              assetName = asset.displayName,
+              mediaType = asset.mediaType.name.lowercase(),
+              cacheHit = cached != null,
+            ),
+          )
+        }
+        PowerPacer.afterPerceptionAsset(cacheHit = cached != null)
+      }
+      perceptionMs = (System.nanoTime() - perceptionStart) / 1_000_000
+    } finally {
+      perception.close()
+    }
+
+    val montage = MontageAgent(context, agent)
+    val audience = AudienceAgent(agent)
+    val director = DirectorAgent(agent)
+    val editor = EditorAgent(context, agent)
+    val critic = CriticAgent(context, agent)
+    val annotator = VlmAnnotator(agent)
+    val renderer = VideoRenderer(context)
+
+    runAnnotationPass(perceptions, assetMap, annotator, progress)
+
+    runEvent(
+      event = event,
+      eventIdx = 0,
+      eventsTotal = 1,
+      assetMap = assetMap,
+      resumeIds = emptySet(),
+      cachedDecisions = emptyMap(),
+      perceptions = perceptions,
+      perceptionCount = eventAssets.size,
+      perceptionMs = perceptionMs,
+      cacheHits = cacheHits,
+      montage = montage,
+      audience = audience,
+      director = director,
+      editor = editor,
+      critic = critic,
+      renderer = renderer,
+      outputs = outputs,
+      progress = progress,
+      userBrief = userBrief,
+    )
+  }
+
+  private fun writeUserBrief(eventId: String, brief: UserBrief) {
+    runCatching {
+      val dir = DecisionStore.dirFor(context, eventId)
+      val text = Json { prettyPrint = true; encodeDefaults = true }.encodeToString(brief)
+      java.io.File(dir, "user_brief.json").writeText(text)
+    }
+  }
+
   // ---- helpers ----
 
   // (NB: the live runAnnotationPass / annotateAsset / runEvent overloads are
@@ -433,6 +617,7 @@ private suspend fun buildTimeline(
     eventAssets: List<Asset>,
     perceptions: Map<String, Perception>,
     editor: EditorAgent,
+    mustHaveSubjects: List<String> = emptyList(),
   ): Timeline {
     val used = mutableSetOf<String>()
     val shots = mutableListOf<ShotSpec>()
@@ -449,6 +634,7 @@ private suspend fun buildTimeline(
         previousShot = prevSummary,
         directorTone = director.tone,
         directorColorGrade = director.colorGrade,
+        mustHaveSubjects = mustHaveSubjects,
       )
       if (spec == null && used.isNotEmpty()) {
         // Last-resort fill: allow reuse rather than silently dropping a required
@@ -464,6 +650,7 @@ private suspend fun buildTimeline(
           previousShot = prevSummary,
           directorTone = director.tone,
           directorColorGrade = director.colorGrade,
+          mustHaveSubjects = mustHaveSubjects,
         )
       }
       if (spec == null) {
@@ -542,6 +729,7 @@ private suspend fun buildTimeline(
     eventAssets: List<Asset>,
     perceptions: Map<String, Perception>,
     editor: EditorAgent,
+    mustHaveSubjects: List<String> = emptyList(),
   ): Timeline {
     val byOrder = base.shots.associateBy { it.order }.toMutableMap()
     // Keep ALL current picks in `used` so revised recall is forced to find a DIFFERENT asset.
@@ -568,6 +756,7 @@ private suspend fun buildTimeline(
         previousShot = "(revised slot)",
         directorTone = director.tone,
         directorColorGrade = director.colorGrade,
+        mustHaveSubjects = mustHaveSubjects,
       )
       if (replaced == null || replaced.assetId == original.assetId) continue
       used.remove(original.assetId)
@@ -615,6 +804,84 @@ private suspend fun buildTimeline(
       captionText = caption,
       kenBurnsHint = kenBurns,
       transitionInHint = transitionIn,
+    )
+  }
+
+  /**
+   * Apply UserBrief overrides on top of the LLM-generated AudienceBrief.
+   * User-specified pace overrides whatever the LLM picked. payoff/hook/tone
+   * are blended only when the LLM produced something blank (we don't trump
+   * concrete LLM judgments with user hints unless the LLM was empty).
+   */
+  private fun applyUserBriefToAudience(base: AudienceBrief, userBrief: UserBrief?): AudienceBrief {
+    if (userBrief == null) return base
+    val newPace = userBrief.parsedPace ?: base.pace
+    return base.copy(
+      emotionalPayoff = if (base.emotionalPayoff.isBlank()) userBrief.parsedPayoff.ifBlank { base.emotionalPayoff } else base.emotionalPayoff,
+      hookStrategy = if (base.hookStrategy.isBlank()) userBrief.parsedHook.ifBlank { base.hookStrategy } else base.hookStrategy,
+      pace = newPace,
+      avoidList = (base.avoidList + userBrief.parsedAvoid).distinct().take(8),
+    )
+  }
+
+  /**
+   * Apply UserBrief overrides on top of the LLM-generated DirectorBrief.
+   * User-specified duration / tone / colorGrade override the LLM's picks
+   * (these are what the user explicitly asked for). Shot durations are
+   * proportionally rescaled when target_duration_sec changes so the blueprint
+   * stays internally consistent.
+   */
+  private fun applyUserBriefToDirector(
+    base: DirectorBrief,
+    userBrief: UserBrief?,
+    audiencePace: Pace,
+  ): DirectorBrief {
+    if (userBrief == null) return base
+    val newDuration = userBrief.parsedDurationSec
+      ?.let { clampToPaceBand(it, audiencePace) }
+      ?: base.targetDurationSec
+    val rescale = if (base.targetDurationSec > 0f && newDuration != base.targetDurationSec) {
+      newDuration / base.targetDurationSec
+    } else 1f
+    val newTone = userBrief.parsedTone.takeIf { it.isNotBlank() } ?: base.tone
+    val newGrade = userBrief.parsedColorGrade ?: base.colorGrade
+    val rescaledBlueprint = if (rescale != 1f) {
+      base.shotBlueprint.map { it.copy(durationSec = (it.durationSec * rescale).coerceIn(0.4f, 8f)) }
+    } else {
+      base.shotBlueprint
+    }
+    return base.copy(
+      targetDurationSec = newDuration,
+      tone = newTone,
+      colorGrade = newGrade,
+      shotBlueprint = rescaledBlueprint,
+    )
+  }
+
+  /** Mirrors DirectorAgent.clampToPaceBand for our local rescale path. */
+  private fun clampToPaceBand(rawSec: Float, pace: Pace): Float = when (pace) {
+    Pace.SNAPPY -> rawSec.coerceIn(15f, 18f)
+    Pace.BALANCED -> rawSec.coerceIn(18f, 22f)
+    Pace.LINGERING -> rawSec.coerceIn(22f, 28f)
+  }
+
+  /**
+   * Apply caption policy + per-shot color grade override on the final timeline.
+   * Run AFTER critic accepts but BEFORE render — these are render-layer
+   * concerns that the critic doesn't need to evaluate.
+   */
+  private fun applyUserBriefToTimeline(timeline: Timeline, userBrief: UserBrief?): Timeline {
+    if (userBrief == null) return timeline
+    val stripCaptions = userBrief.captionPolicy == CaptionPolicy.NONE
+    val overrideGrade = userBrief.parsedColorGrade
+    if (!stripCaptions && overrideGrade == null) return timeline
+    return timeline.copy(
+      shots = timeline.shots.map { shot ->
+        var s = shot
+        if (stripCaptions) s = s.copy(caption = "")
+        if (overrideGrade != null) s = s.copy(colorGrade = overrideGrade)
+        s
+      },
     )
   }
 
@@ -733,7 +1000,13 @@ private suspend fun buildTimeline(
     renderer: VideoRenderer,
     outputs: HashMap<String, String>,
     progress: suspend (PipelineProgress) -> Unit,
+    /** Optional user brief for curated events. Null = auto event, default behavior.
+     *  When non-null: rawText feeds Director's available_signals, parsed fields
+     *  override the corresponding agent outputs, and mustHaveSubjects threads
+     *  through Recall scoring via buildTimeline / applyRevisions. */
+    userBrief: UserBrief? = null,
   ) {
+    val mustHaveSubjects = userBrief?.mustHaveSubjects.orEmpty()
     StateBreadcrumb.mark(context, "event_loop", "${event.eventId} ${eventIdx + 1}/$eventsTotal")
     progress(PipelineProgress.EventStart(event.eventId, eventIdx + 1, eventsTotal))
     val eventAssets = event.assetIds.mapNotNull { assetMap[it] }
@@ -771,22 +1044,30 @@ private suspend fun buildTimeline(
       DecisionStore.writeMemory(context, event.eventId, memory)
 
       progress(PipelineProgress.EventStage(event.eventId, "audience", "deriving viewer hook, payoff, and pacing"))
-      val brief = timer.audience { audience.write(memory) }
+      val rawBrief = timer.audience { audience.write(memory) }
+      val brief = applyUserBriefToAudience(rawBrief, userBrief)
       DecisionStore.writeAudience(context, event.eventId, brief)
 
       progress(PipelineProgress.EventStage(event.eventId, "director", "writing narrative arc and shot blueprint"))
-      val plan = timer.director {
+      val signals = buildAvailableSignals(eventAssets, perceptions)
+      val signalsWithUser = if (userBrief != null && userBrief.rawText.isNotBlank()) {
+        signals + "\n\n用户原话需求：「${userBrief.rawText}」（实际素材不足以完全满足时按你的判断处理）"
+      } else {
+        signals
+      }
+      val rawPlan = timer.director {
         director.draft(
           memory = memory,
           audience = brief,
           assetCount = eventAssets.size,
-          availableSignals = buildAvailableSignals(eventAssets, perceptions),
+          availableSignals = signalsWithUser,
         )
       }
+      val plan = applyUserBriefToDirector(rawPlan, userBrief, brief.pace)
       DecisionStore.writeDirector(context, event.eventId, plan)
 
       progress(PipelineProgress.EventStage(event.eventId, "editor", "recalling candidates and selecting shot windows"))
-      val v1 = timer.editor { buildTimeline(plan.shotBlueprint, plan, event, eventAssets, perceptions, editor) }
+      val v1 = timer.editor { buildTimeline(plan.shotBlueprint, plan, event, eventAssets, perceptions, editor, mustHaveSubjects) }
       DecisionStore.writeTimelineV1(context, event.eventId, v1)
 
       progress(PipelineProgress.EventStage(event.eventId, "critic", "reviewing storyboard and requesting fixes"))
@@ -824,7 +1105,7 @@ private suspend fun buildTimeline(
               )
               break@critic_loop
             }
-            working = applyRevisions(working, crit.revisedRequests, plan, event, eventAssets, perceptions, editor)
+            working = applyRevisions(working, crit.revisedRequests, plan, event, eventAssets, perceptions, editor, mustHaveSubjects)
           }
         }
       }
@@ -832,7 +1113,7 @@ private suspend fun buildTimeline(
       if (aborted) {
         progress(PipelineProgress.EventStage(event.eventId, "critic", "abort verdict; rendering current cut anyway"))
       }
-      val finalTl = working.copy(critiqueHistory = critiques.toList())
+      val finalTl = applyUserBriefToTimeline(working.copy(critiqueHistory = critiques.toList()), userBrief)
       DecisionStore.writeTimelineFinal(context, event.eventId, finalTl)
 
       progress(PipelineProgress.EventStage(event.eventId, "render", "rendering shots, transitions, captions, and BGM"))
