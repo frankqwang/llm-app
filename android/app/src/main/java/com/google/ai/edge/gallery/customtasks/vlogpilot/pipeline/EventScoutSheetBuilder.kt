@@ -24,7 +24,7 @@ import kotlin.math.roundToInt
 
 object EventScoutSheetBuilder {
 
-  const val SCOUT_VERSION = 1
+  const val SCOUT_VERSION = 2
   private const val CELLS_PER_PAGE = 9
   private const val CELL_W = 320
   private const val CELL_H = 426
@@ -50,9 +50,10 @@ object EventScoutSheetBuilder {
     powerProfile: PowerProfile,
   ): List<Sheet> {
     if (assets.isEmpty()) return emptyList()
-    val allUnits = assets.sortedBy { it.takenEpochMs }.flatMap { visualUnitsFor(it, powerProfile) }
+    val unitsByAsset = assets.sortedBy { it.takenEpochMs }.map { visualUnitsFor(it, powerProfile) }
+    val allUnits = unitsByAsset.flatten()
     val maxUnits = maxVisualUnits(powerProfile)
-    val units = if (allUnits.size > maxUnits) selectSpread(allUnits, maxUnits) else allUnits
+    val units = if (allUnits.size > maxUnits) selectDiverseUnits(unitsByAsset, maxUnits) else allUnits
     val pageCount = ((units.size + CELLS_PER_PAGE - 1) / CELLS_PER_PAGE).coerceAtLeast(1)
     return units.chunked(CELLS_PER_PAGE).mapIndexedNotNull { pageIdx, chunk ->
       val bitmap = drawSheet(context, chunk, pageIdx + 1)
@@ -110,6 +111,47 @@ object EventScoutSheetBuilder {
     return (0 until count).map { idx ->
       VisualUnit(asset, frameSec = durSec * (idx + 0.5f) / count)
     }
+  }
+
+  private fun selectDiverseUnits(unitsByAsset: List<List<VisualUnit>>, limit: Int): List<VisualUnit> {
+    if (limit <= 0) return emptyList()
+    val groups = unitsByAsset.filter { it.isNotEmpty() }
+    if (groups.isEmpty()) return emptyList()
+    if (groups.size >= limit) {
+      return selectSpread(groups, limit)
+        .map { representativeUnit(it) }
+        .sortedWith(compareBy<VisualUnit> { it.asset.takenEpochMs }.thenBy { it.frameSec ?: -1f })
+    }
+
+    val selected = LinkedHashSet<VisualUnit>()
+    groups.forEach { selected += representativeUnit(it) }
+
+    var offset = 1
+    while (selected.size < limit) {
+      var added = false
+      for (group in groups) {
+        val extras = extraUnits(group)
+        if (offset - 1 < extras.size) {
+          added = selected.add(extras[offset - 1]) || added
+          if (selected.size >= limit) break
+        }
+      }
+      if (!added) break
+      offset += 1
+    }
+
+    return selected
+      .sortedWith(compareBy<VisualUnit> { it.asset.takenEpochMs }.thenBy { it.frameSec ?: -1f })
+      .take(limit)
+  }
+
+  private fun representativeUnit(units: List<VisualUnit>): VisualUnit =
+    units[units.size / 2]
+
+  private fun extraUnits(units: List<VisualUnit>): List<VisualUnit> {
+    if (units.size <= 1) return emptyList()
+    val representative = representativeUnit(units)
+    return selectSpread(units, units.size).filterNot { it == representative }
   }
 
   private fun drawSheet(context: Context, units: List<VisualUnit>, pageIndex: Int): Bitmap {
@@ -203,9 +245,18 @@ object EventScoutSheetBuilder {
 
   private fun <T> selectSpread(values: List<T>, limit: Int): List<T> {
     if (values.size <= limit) return values
-    return (0 until limit).map { i ->
-      val idx = ((i + 0.5f) * values.size / limit).roundToInt().coerceIn(0, values.lastIndex)
-      values[idx]
-    }.distinct()
+    if (limit <= 0) return emptyList()
+    if (limit == 1) return listOf(values[values.size / 2])
+    val indices = LinkedHashSet<Int>()
+    for (i in 0 until limit) {
+      val idx = (i * values.lastIndex.toFloat() / (limit - 1)).roundToInt().coerceIn(0, values.lastIndex)
+      indices += idx
+    }
+    var cursor = 0
+    while (indices.size < limit && cursor < values.size) {
+      indices += cursor
+      cursor += 1
+    }
+    return indices.sorted().map { values[it] }
   }
 }

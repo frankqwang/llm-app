@@ -334,12 +334,8 @@ class VlogPilotViewModel @Inject constructor(
 
       val cachedManifest = withContext(Dispatchers.IO) { DecisionStore.loadEventSelection(appContext) }
       val currentConfig = _runConfig.value
-      val manifest = if (
-        cachedManifest == null ||
-          cachedManifest.intent != currentConfig.intent ||
-          cachedManifest.powerProfile != currentConfig.powerProfile
-      ) {
-        refreshCandidatesInternal(30)
+      val manifest = if (cachedManifest == null || cachedManifest.needsGenerationRefresh(currentConfig)) {
+        refreshCandidatesInternal(30, model)
       } else {
         cachedManifest
       }
@@ -373,6 +369,28 @@ class VlogPilotViewModel @Inject constructor(
         ),
       )
     }
+  }
+
+  private fun EventSelectionManifest.needsGenerationRefresh(config: VlogPilotRunConfig): Boolean {
+    if (intent != config.intent || powerProfile != config.powerProfile) return true
+    if (pinnedEventIds.toSet() != config.pinnedEventIds) return true
+    if (excludedEventIds.toSet() != config.excludedEventIds) return true
+    if (forceRegenerateEventIds.toSet() != config.forceRegenerateEventIds) return true
+    if (onlySelectedEventIds.toSet() != config.onlySelectedEventIds) return true
+    if (candidates.isEmpty()) return true
+
+    val candidateIds = candidates.map { it.eventId }.toSet()
+    val importantIds = config.onlySelectedEventIds + config.pinnedEventIds + config.forceRegenerateEventIds
+    if (importantIds.any { it !in candidateIds }) return true
+
+    val scoutIds = candidates
+      .filter { it.rankingMode == "vlm_scout" }
+      .map { it.eventId }
+      .toSet()
+    if (scoutIds.isEmpty()) return true
+    if (importantIds.any { it !in scoutIds }) return true
+    if (selectedEventIds.isEmpty() && candidates.none { it.rankingMode == "vlm_scout" }) return true
+    return false
   }
 
   private fun handleProgress(p: PipelineProgress) {

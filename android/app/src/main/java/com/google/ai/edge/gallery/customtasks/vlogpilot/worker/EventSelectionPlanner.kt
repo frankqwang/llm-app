@@ -72,6 +72,10 @@ object EventSelectionPlanner {
         generatedAtMs = nowMs,
         intent = runConfig.intent,
         powerProfile = runConfig.powerProfile,
+        pinnedEventIds = runConfig.pinnedEventIds.sorted(),
+        excludedEventIds = runConfig.excludedEventIds.sorted(),
+        forceRegenerateEventIds = runConfig.forceRegenerateEventIds.sorted(),
+        onlySelectedEventIds = runConfig.onlySelectedEventIds.sorted(),
         candidateCount = ranked.size,
         selectedEventIds = selectedCandidates.map { it.eventId },
         candidates = manifestCandidates,
@@ -98,13 +102,24 @@ object EventSelectionPlanner {
       .filter { it.eventId !in resumeIds }
       .filter { !isCompleted(context, it.eventId) }
       .filter { it.eventId !in runConfig.forceRegenerateEventIds }
+      .filterNot { shouldAvoidByScout(it) }
     val pinnedFresh = fresh.filter { it.eventId in runConfig.pinnedEventIds }
     val highFresh = fresh.filter { it.eventId !in runConfig.pinnedEventIds }
     val forced = ranked
       .filter { it.eventId !in resumeIds }
       .filter { it.eventId in runConfig.forceRegenerateEventIds }
-    val primary = (pinnedFresh + highFresh + forced).distinctBy { it.eventId }.take(maxEvents)
+    val forcedIds = forced.map { it.eventId }.toSet()
+    val primaryBudget = (maxEvents - forcedIds.size).coerceAtLeast(0)
+    val primary = (pinnedFresh + highFresh)
+      .distinctBy { it.eventId }
+      .take(primaryBudget) + forced
     return (resume + primary).distinctBy { it.eventId }
+  }
+
+  private fun shouldAvoidByScout(candidate: EventSelector.Candidate): Boolean {
+    val scout = candidate.scout ?: return false
+    if (scout.eventType.equals("junk", ignoreCase = true)) return true
+    return !scout.recommended && scout.rejectReasons.isNotEmpty() && candidate.valueScore < 0.35f
   }
 
   private fun manifestCandidates(

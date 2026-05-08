@@ -140,7 +140,7 @@ object EventSelector {
         lowSignalPenalty
       ).coerceIn(0f, 1f)
     val valueScore = if (scout != null) {
-      (baseScore * 0.42f + scoutScore * 0.58f).coerceIn(0f, 1f)
+      scoutAdjustedValueScore(baseScore, scoutScore, scout)
     } else if (intent == GenerationIntent.AUTO) {
       baseScore
     } else {
@@ -255,6 +255,7 @@ object EventSelector {
       if (scout.eventType.isNotBlank() && scout.eventType != "unknown") out += scout.eventType
       if (scout.sampled) out += "sampled-scout"
       if (!scout.recommended) out += "scout-caution"
+      if (scout.eventType.equals("junk", ignoreCase = true)) out += "scout-junk"
     } else {
       out += "metadata-only"
     }
@@ -302,6 +303,16 @@ object EventSelector {
       else -> 0f
     }
     return (base + recommendation).coerceIn(0f, 1f)
+  }
+
+  private fun scoutAdjustedValueScore(baseScore: Float, scoutScore: Float, scout: EventScout): Float {
+    if (scout.eventType.equals("junk", ignoreCase = true)) return 0.02f
+    val blended = (baseScore * 0.42f + scoutScore * 0.58f).coerceIn(0f, 1f)
+    return if (!scout.recommended && scout.rejectReasons.isNotEmpty()) {
+      blended.coerceAtMost(0.28f)
+    } else {
+      blended
+    }
   }
 
   private fun intentScore(
