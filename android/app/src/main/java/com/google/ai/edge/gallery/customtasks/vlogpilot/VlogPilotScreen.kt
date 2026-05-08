@@ -139,6 +139,8 @@ fun VlogPilotScreen(
   var iterationSheetEventId by remember { mutableStateOf<String?>(null) }
   // Full-screen curator overlay — when true, replaces the main tabbed view.
   var curatorOpen by remember { mutableStateOf(false) }
+  // Inline error banner shown inside CuratorScreen when submit fails (e.g. no model imported).
+  var curatorError by remember { mutableStateOf<String?>(null) }
   var pendingPermissionAction by remember { mutableStateOf<(() -> Unit)?>(null) }
 
   val perms = remember {
@@ -211,13 +213,26 @@ fun VlogPilotScreen(
     CuratorScreen(
       assets = curatorAssets,
       loading = curatorLoading,
-      onBack = { curatorOpen = false },
+      errorMessage = curatorError,
+      onBack = {
+        curatorError = null
+        curatorOpen = false
+      },
+      onDismissError = { curatorError = null },
       onSubmit = { selectedIds, intentText ->
-        val model = selectedModelOrReport()
+        val model = modelManagerViewModel.getAllDownloadedModels().let { downloaded ->
+          downloaded.firstOrNull { it.name.contains("gemma-4", ignoreCase = true) }
+            ?: downloaded.firstOrNull()
+        }
         if (model != null) {
+          curatorError = null
           viewModel.submitCuratedRequest(selectedIds, intentText, model)
           curatorOpen = false
           selectedTab = VlogPilotTab.Videos
+        } else {
+          // Keep curator open so the user doesn't lose their selection + intent text.
+          // Banner explains what they need to do next.
+          curatorError = "没有找到已导入的 LLM。请先在 Models 中导入一个支持图像的本地模型（例如 Gemma 4 E2B-IT）。"
         }
       },
     )

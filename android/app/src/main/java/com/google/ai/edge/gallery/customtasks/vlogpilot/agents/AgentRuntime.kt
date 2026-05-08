@@ -41,10 +41,19 @@ class AgentRuntime(
 ) : Closeable {
 
   @Volatile private var ownedInit = false
+  /** Optional context tag prepended to every ask label (e.g. "iter_v2/editor").
+   *  Set by the orchestrator's iterate path so agent_log entries can be
+   *  attributed to a specific iteration in post-mortem analysis. */
+  @Volatile private var contextTag: String? = null
   private val logFile: File by lazy {
     File(context.filesDir, "agent_log/agent.jsonl").apply { parentFile?.mkdirs() }
   }
   private val logLock = Any()
+
+  /** Sets a label prefix for subsequent ask() calls. Pass null to clear. */
+  fun setContextTag(tag: String?) {
+    contextTag = tag?.takeIf { it.isNotBlank() }
+  }
 
   /**
    * If the gallery already initialized this Model (e.g. user opened it from
@@ -158,7 +167,8 @@ class AgentRuntime(
       outcome = "error:${t::class.java.simpleName}"
     }
     val ms = (System.nanoTime() - t0) / 1_000_000
-    logEvent(label, ms, outcome, "chars=${sb.length} images=${images.size}")
+    val finalLabel = contextTag?.let { "$it/$label" } ?: label
+    logEvent(finalLabel, ms, outcome, "chars=${sb.length} images=${images.size}")
     PowerPacer.afterAgentCall()
     return sb.toString()
   }

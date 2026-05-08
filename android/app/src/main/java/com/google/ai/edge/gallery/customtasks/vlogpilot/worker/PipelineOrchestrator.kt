@@ -336,18 +336,27 @@ class PipelineOrchestrator(
     )
     val needsLlmParse = feedback.userText.isNotBlank() || feedback.targetedShotOrders.isNotEmpty()
     val needsAgent = needsLlmParse || feedback.parsedScope != FeedbackScope.RENDER_ONLY
+    val perfTimer = IterationPerfTimer(
+      eventId = eventId,
+      iterationId = "iter_%03d".format(targetVersion),
+      scope = feedback.parsedScope.name.lowercase(),
+    )
     return try {
-      if (!needsAgent) {
-        runRenderOnly(eventId, feedback, targetVersion, progress)
+      val result = if (!needsAgent) {
+        runRenderOnly(eventId, feedback, targetVersion, perfTimer, progress)
       } else {
-        runIterationWithAgent(eventId, feedback, targetVersion, needsLlmParse, progress)
+        runIterationWithAgent(eventId, feedback, targetVersion, needsLlmParse, perfTimer, progress)
       }
+      perfTimer.finalize(context)
+      result
     } catch (t: CancellationException) {
+      perfTimer.finalize(context)
       throw t
     } catch (t: Throwable) {
       Log.e(TAG, "iterate failed for $eventId", t)
       StateBreadcrumb.mark(context, "iterate_failed", "${t::class.java.simpleName}: ${t.message}")
       progress(PipelineProgress.IterationFailed(eventId, t.message ?: t::class.java.simpleName))
+      perfTimer.finalize(context)
       IterationResult(eventId, null, targetVersion, "错误")
     }
   }
@@ -363,24 +372,30 @@ class PipelineOrchestrator(
     feedback: IterationFeedback,
     targetVersion: Int,
     needsLlmParse: Boolean,
+    perfTimer: IterationPerfTimer,
     progress: suspend (PipelineProgress) -> Unit,
   ): IterationResult {
     val agent = AgentRuntime(context, gemmaModel)
+    // Tag every agent.jsonl entry from this iteration with iter_v<N> so
+    // post-mortem (`adb run-as cat agent_log/agent.jsonl`) can attribute LLM
+    // calls to the iteration that produced them.
+    agent.setContextTag("iter_v$targetVersion")
     return try {
       agent.ensureInitialized()
       val refined = if (needsLlmParse) {
         progress(PipelineProgress.IterationStage(eventId, "parse_feedback", "interpreting your text"))
         val baseTimeline = loadBaseTimelineFor(eventId)
           ?: throw IllegalStateException("no base timeline for $eventId — generate first")
-        IntentParserAgent(agent).parseFeedback(feedback, baseTimeline)
+        perfTimer.parse { IntentParserAgent(agent).parseFeedback(feedback, baseTimeline) }
       } else feedback
       when (refined.parsedScope) {
-        FeedbackScope.RENDER_ONLY -> runRenderOnly(eventId, refined, targetVersion, progress)
-        FeedbackScope.SHOT_LEVEL -> runShotLevel(eventId, refined, targetVersion, agent, progress)
-        FeedbackScope.GLOBAL -> runGlobal(eventId, refined, targetVersion, agent, progress)
-        FeedbackScope.MIXED -> runMixed(eventId, refined, targetVersion, agent, progress)
+        FeedbackScope.RENDER_ONLY -> runRenderOnly(eventId, refined, targetVersion, perfTimer, progress)
+        FeedbackScope.SHOT_LEVEL -> runShotLevel(eventId, refined, targetVersion, agent, perfTimer, progress)
+        FeedbackScope.GLOBAL -> runGlobal(eventId, refined, targetVersion, agent, perfTimer, progress)
+        FeedbackScope.MIXED -> runMixed(eventId, refined, targetVersion, agent, perfTimer, progress)
       }
     } finally {
+      agent.setContextTag(null)
       agent.close()
     }
   }
@@ -398,6 +413,7 @@ class PipelineOrchestrator(
     eventId: String,
     feedback: IterationFeedback,
     targetVersion: Int,
+    perfTimer: IterationPerfTimer,
     progress: suspend (PipelineProgress) -> Unit,
   ): IterationResult {
     progress(PipelineProgress.IterationStage(eventId, "load", "reading current timeline + assets"))
@@ -417,7 +433,7 @@ class PipelineOrchestrator(
     progress(PipelineProgress.IterationStage(eventId, "render", "rendering new cut with patches"))
     val renderInput = IterationPlanner.applyRenderOnly(baseTimeline, baseTone, patch)
     val renderer = VideoRenderer(context)
-    val out = renderer.render(renderInput.timeline, assetMap, renderInput.effectiveTone)
+    val out = perfTimer.render { renderer.render(renderInput.timeline, assetMap, renderInput.effectiveTone) }
     if (out == null) {
       progress(PipelineProgress.IterationFailed(eventId, "render returned null"))
       return IterationResult(eventId, null, targetVersion, renderInput.changeSummary)
@@ -472,6 +488,7 @@ class PipelineOrchestrator(
     feedback: IterationFeedback,
     targetVersion: Int,
     agent: AgentRuntime,
+    perfTimer: IterationPerfTimer,
     progress: suspend (PipelineProgress) -> Unit,
   ): IterationResult {
     progress(PipelineProgress.IterationStage(eventId, "load", "loading event state"))
@@ -482,16 +499,18 @@ class PipelineOrchestrator(
     }
     val editor = EditorAgent(context, agent)
     progress(PipelineProgress.IterationStage(eventId, "editor", "re-picking ${feedback.parsedRevisions.size} shots"))
-    val newTimeline = applyRevisions(
-      base = ctx.baseTimeline,
-      revisions = feedback.parsedRevisions,
-      director = ctx.director,
-      event = ctx.event,
-      eventAssets = ctx.eventAssets,
-      perceptions = ctx.perceptions,
-      editor = editor,
-      mustHaveSubjects = ctx.mustHaveSubjects,
-    )
+    val newTimeline = perfTimer.editor {
+      applyRevisions(
+        base = ctx.baseTimeline,
+        revisions = feedback.parsedRevisions,
+        director = ctx.director,
+        event = ctx.event,
+        eventAssets = ctx.eventAssets,
+        perceptions = ctx.perceptions,
+        editor = editor,
+        mustHaveSubjects = ctx.mustHaveSubjects,
+      )
+    }
     progress(PipelineProgress.IterationStage(eventId, "render", "rendering new cut"))
     return renderAndRecord(
       eventId = eventId,
@@ -500,6 +519,7 @@ class PipelineOrchestrator(
       timeline = newTimeline,
       tone = ctx.director.tone,
       assetMap = ctx.assetMap,
+      perfTimer = perfTimer,
       progress = progress,
     )
   }
@@ -518,6 +538,7 @@ class PipelineOrchestrator(
     feedback: IterationFeedback,
     targetVersion: Int,
     agent: AgentRuntime,
+    perfTimer: IterationPerfTimer,
     progress: suspend (PipelineProgress) -> Unit,
   ): IterationResult {
     val global = feedback.parsedGlobal
@@ -531,15 +552,17 @@ class PipelineOrchestrator(
     val patchedDirector = IterationPlanner.applyGlobalToDirector(ctx.director, global, effectivePace)
     val editor = EditorAgent(context, agent)
     progress(PipelineProgress.IterationStage(eventId, "editor", "rebuilding shot picks at new pace"))
-    val rebuilt = buildTimeline(
-      blueprint = patchedDirector.shotBlueprint,
-      director = patchedDirector,
-      event = ctx.event,
-      eventAssets = ctx.eventAssets,
-      perceptions = ctx.perceptions,
-      editor = editor,
-      mustHaveSubjects = ctx.mustHaveSubjects,
-    )
+    val rebuilt = perfTimer.editor {
+      buildTimeline(
+        blueprint = patchedDirector.shotBlueprint,
+        director = patchedDirector,
+        event = ctx.event,
+        eventAssets = ctx.eventAssets,
+        perceptions = ctx.perceptions,
+        editor = editor,
+        mustHaveSubjects = ctx.mustHaveSubjects,
+      )
+    }
     val finalTimeline = IterationPlanner.applyGlobalToTimeline(rebuilt, global)
     progress(PipelineProgress.IterationStage(eventId, "render", "rendering new cut"))
     return renderAndRecord(
@@ -549,6 +572,7 @@ class PipelineOrchestrator(
       timeline = finalTimeline,
       tone = patchedDirector.tone,
       assetMap = ctx.assetMap,
+      perfTimer = perfTimer,
       progress = progress,
     )
   }
@@ -566,12 +590,13 @@ class PipelineOrchestrator(
     feedback: IterationFeedback,
     targetVersion: Int,
     agent: AgentRuntime,
+    perfTimer: IterationPerfTimer,
     progress: suspend (PipelineProgress) -> Unit,
   ): IterationResult {
     val global = feedback.parsedGlobal
     if (global == null) {
       // Treat as pure shot-level if global is missing.
-      return runShotLevel(eventId, feedback, targetVersion, agent, progress)
+      return runShotLevel(eventId, feedback, targetVersion, agent, perfTimer, progress)
     }
     progress(PipelineProgress.IterationStage(eventId, "load", "loading event state"))
     val ctx = loadIterationContext(eventId)
@@ -579,20 +604,9 @@ class PipelineOrchestrator(
     val patchedDirector = IterationPlanner.applyGlobalToDirector(ctx.director, global, effectivePace)
     val editor = EditorAgent(context, agent)
     progress(PipelineProgress.IterationStage(eventId, "editor", "rebuilding shot picks at new pace"))
-    val rebuilt = buildTimeline(
-      blueprint = patchedDirector.shotBlueprint,
-      director = patchedDirector,
-      event = ctx.event,
-      eventAssets = ctx.eventAssets,
-      perceptions = ctx.perceptions,
-      editor = editor,
-      mustHaveSubjects = ctx.mustHaveSubjects,
-    )
-    val withRevisions = if (feedback.parsedRevisions.isNotEmpty()) {
-      progress(PipelineProgress.IterationStage(eventId, "editor", "applying ${feedback.parsedRevisions.size} shot tweaks"))
-      applyRevisions(
-        base = rebuilt,
-        revisions = feedback.parsedRevisions,
+    val finalTimeline = perfTimer.editor {
+      val rebuilt = buildTimeline(
+        blueprint = patchedDirector.shotBlueprint,
         director = patchedDirector,
         event = ctx.event,
         eventAssets = ctx.eventAssets,
@@ -600,8 +614,21 @@ class PipelineOrchestrator(
         editor = editor,
         mustHaveSubjects = ctx.mustHaveSubjects,
       )
-    } else rebuilt
-    val finalTimeline = IterationPlanner.applyGlobalToTimeline(withRevisions, global)
+      val withRevisions = if (feedback.parsedRevisions.isNotEmpty()) {
+        progress(PipelineProgress.IterationStage(eventId, "editor", "applying ${feedback.parsedRevisions.size} shot tweaks"))
+        applyRevisions(
+          base = rebuilt,
+          revisions = feedback.parsedRevisions,
+          director = patchedDirector,
+          event = ctx.event,
+          eventAssets = ctx.eventAssets,
+          perceptions = ctx.perceptions,
+          editor = editor,
+          mustHaveSubjects = ctx.mustHaveSubjects,
+        )
+      } else rebuilt
+      IterationPlanner.applyGlobalToTimeline(withRevisions, global)
+    }
     progress(PipelineProgress.IterationStage(eventId, "render", "rendering new cut"))
     return renderAndRecord(
       eventId = eventId,
@@ -610,6 +637,7 @@ class PipelineOrchestrator(
       timeline = finalTimeline,
       tone = patchedDirector.tone,
       assetMap = ctx.assetMap,
+      perfTimer = perfTimer,
       progress = progress,
     )
   }
@@ -661,10 +689,11 @@ class PipelineOrchestrator(
     timeline: Timeline,
     tone: String,
     assetMap: Map<String, Asset>,
+    perfTimer: IterationPerfTimer,
     progress: suspend (PipelineProgress) -> Unit,
   ): IterationResult {
     val renderer = VideoRenderer(context)
-    val out = renderer.render(timeline, assetMap, tone)
+    val out = perfTimer.render { renderer.render(timeline, assetMap, tone) }
     if (out == null) {
       progress(PipelineProgress.IterationFailed(eventId, "render returned null"))
       return IterationResult(eventId, null, targetVersion, IterationPlanner.describeChanges(feedback))

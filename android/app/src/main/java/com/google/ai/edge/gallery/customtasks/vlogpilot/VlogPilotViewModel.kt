@@ -128,6 +128,10 @@ class VlogPilotViewModel @Inject constructor(
 
   private val collectedOutputs = mutableMapOf<String, String>()
   private var decisionRefreshJob: Job? = null
+  /** EventIds we've already tried to auto-resume in this VM's lifetime. Avoids
+   *  resume loops if the iteration is structurally broken (the same pending
+   *  file would otherwise re-enqueue forever after every cold start). */
+  private val resumedIterations = mutableSetOf<String>()
   private val workManager by lazy { WorkManager.getInstance(appContext) }
 
   init {
@@ -151,6 +155,40 @@ class VlogPilotViewModel @Inject constructor(
         syncWorkState()
         delay(1_500)
       }
+    }
+    viewModelScope.launch {
+      resumePendingIterations()
+    }
+  }
+
+  /**
+   * On cold start, re-enqueue any iteration WorkRequest whose pending feedback
+   * file still exists. This handles the case where the Worker was killed mid-
+   * iteration (vivo BTM, OOM, app force-stop) — without resume the user would
+   * see "iteration silently disappeared" with the staged feedback file orphaned.
+   *
+   * Each eventId is attempted exactly ONCE per VM lifetime — see resumedIterations.
+   * A repeatedly-failing iteration won't loop forever; the user can manually
+   * delete the pending file via "再改一次" to retry.
+   */
+  private suspend fun resumePendingIterations() {
+    val pending = withContext(Dispatchers.IO) { IterationStore.listPending(appContext) }
+    if (pending.isEmpty()) return
+    StateBreadcrumb.mark(appContext, "ui_iter_resume_scan", "found=${pending.size}")
+    for (eventId in pending) {
+      if (eventId in resumedIterations) continue
+      resumedIterations += eventId
+      VlogPipelineWorker.ensureChannel(appContext)
+      val req = OneTimeWorkRequestBuilder<VlogPipelineWorker>()
+        .setInputData(VlogPipelineWorker.iterationInputData(eventId))
+        .build()
+      // KEEP: if the Worker is somehow still alive (rare), don't double-up.
+      workManager.enqueueUniqueWork(
+        VlogPipelineWorker.iterationWorkName(eventId),
+        ExistingWorkPolicy.KEEP,
+        req,
+      )
+      StateBreadcrumb.mark(appContext, "ui_iter_resume", "event=$eventId")
     }
   }
 

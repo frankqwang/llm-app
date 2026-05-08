@@ -28,8 +28,10 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -67,8 +69,12 @@ private const val MIN_SELECTION = 3
 internal fun CuratorScreen(
   assets: List<Asset>,
   loading: Boolean,
+  /** Inline error banner shown at the top of the screen. Null = no error.
+   *  The host clears this when the user submits successfully or dismisses. */
+  errorMessage: String? = null,
   onBack: () -> Unit,
   onSubmit: (selectedIds: List<String>, intentText: String) -> Unit,
+  onDismissError: () -> Unit = {},
 ) {
   var intentText by remember { mutableStateOf("") }
   var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -123,6 +129,11 @@ internal fun CuratorScreen(
       contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp, vertical = 8.dp),
       verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
+      if (errorMessage != null) {
+        item {
+          ErrorBanner(message = errorMessage, onDismiss = onDismissError)
+        }
+      }
       item {
         Text(
           "你想做一条什么样的视频？",
@@ -263,4 +274,32 @@ private fun estimatedDurationSec(selectedCount: Int, videoSec: Int): Int {
   val stillContribution = (selectedCount * 2.5f).toInt()
   val videoContribution = (videoSec / 2)
   return (stillContribution + videoContribution).coerceIn(15, 45)
+}
+
+@Composable
+private fun ErrorBanner(message: String, onDismiss: () -> Unit) {
+  androidx.compose.material3.Surface(
+    color = MaterialTheme.colorScheme.errorContainer,
+    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+    shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+    modifier = Modifier.fillMaxWidth(),
+  ) {
+    androidx.compose.foundation.layout.Row(
+      modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+      horizontalArrangement = Arrangement.spacedBy(10.dp),
+      verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+    ) {
+      androidx.compose.material3.Icon(
+        Icons.Outlined.ErrorOutline,
+        contentDescription = null,
+        modifier = Modifier.size(20.dp),
+      )
+      Text(
+        message,
+        modifier = Modifier.weight(1f),
+        style = MaterialTheme.typography.bodySmall,
+      )
+      androidx.compose.material3.TextButton(onClick = onDismiss) { Text("知道了") }
+    }
+  }
 }
