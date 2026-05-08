@@ -6,6 +6,243 @@ to find it in the tree.
 
 ---
 
+## v5.0 — User-curated stories + reversible feedback iteration (2026-05-08)
+
+The pipeline gained two big capabilities: users can **pick their own
+assets and tell AI what kind of vlog to make** (no more "AI just guessed
+my last 30 days"), and any generated vlog now has a **改一改 (refine)
+button** that opens a feedback sheet — type a sentence, tap a chip, or
+tap a specific shot in the storyboard, and AI iterates without re-running
+the whole 5-min pipeline.
+
+The whole feature is built around one architectural insight: **user
+feedback is a special form of Critic feedback**. Critic already emits
+`RevisedRequest.patches: Map<String, String>` — the iteration system
+reuses that exact schema, so 80% of the new code is plumbing rather than
+new pipeline stages.
+
+Shipped in 4 milestones over the same day:
+
+### Milestone A — Iteration skeleton + RENDER_ONLY scope
+
+The "改一改" button on each video card now opens a `ModalBottomSheet`
+([`ui/IterationSheet.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/ui/IterationSheet.kt)) instead of re-running the full pipeline.
+Two quick-action chips wired in this milestone — **去字幕** /
+**换调色** — both produce a [`RenderOnlyPatch`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/schemas/IterationFeedback.kt)
+that the orchestrator's new `runRenderOnly()` applies to the cached
+timeline (caption strip / per-shot color override) and re-renders. No
+Gemma boot, no LLM calls, ~30s wall-clock.
+
+The previous MP4 is auto-archived by `VersionArchive.archivePrevious`
+into `candidates/archive/<eventId>__<timestamp>.mp4`. The
+`ResultEventCard` gains a small History icon button — when 2+ versions
+exist, tapping it swaps the player between current and previous. This is
+the user-facing "undo last change" surface.
+
+[`worker/IterationStore.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/IterationStore.kt) is the staging + history index:
+- `_pending_iteration/<eventId>.json` — staged feedback for the worker
+- `decisions/<eventId>/_history.json` — append-only IterationSummary list
+- `decisions/<eventId>/iter_<N>/feedback_input.txt` + `feedback_parsed.json` + `timeline.json` + `perf.json`
+
+WorkRequests now have THREE modes via inputData keys:
+- no key → full pipeline (auto event discovery, Gemma loaded)
+- `KEY_ITERATION_EVENT_ID` → iterate (Gemma only if needed)
+- `KEY_CURATION_REQUEST_ID` → curated story creation (Gemma loaded)
+
+The `ACTIVE` AtomicBoolean still serializes Gemma-loading runs (full +
+curate share the lock); RENDER_ONLY iteration bypasses ACTIVE because
+it doesn't load Gemma — multiple iteration WorkRequests on different
+events can run concurrently.
+
+**Files:** new `schemas/IterationFeedback.kt`, `worker/IterationStore.kt`,
+`pipeline/IterationPlanner.kt`, `ui/IterationSheet.kt`,
+`ui/IterationProgressBar.kt`. Modified `worker/PipelineOrchestrator.kt`
+(added `iterate()` + `runRenderOnly()`), `worker/VlogPipelineWorker.kt`
+(new inputData modes), `worker/PipelineProgress.kt` (Iteration*
+events), `worker/StateBreadcrumb.kt`, `worker/DecisionStore.kt` (loadEvent
+helper + previousMp4Path), `ui/VideoResultsUi.kt` (改一改 + 上一版),
+`VlogPilotViewModel.kt` (submitFeedback + activeIteration flow).
+
+### Milestone B — User-curated story creation
+
+The Stories hero gains a second `TextButton` "或者，我自己挑素材". Tap
+takes you to a full-screen `CuratorScreen` (replaces the tabbed body via
+top-of-function early return).
+
+CuratorScreen is deliberately Jobs-minimal:
+- One headline copy: "你想做一条什么样的视频？"
+- One multi-line `OutlinedTextField` (placeholder example, **optional**)
+- One `LazyVerticalGrid` of recent assets, tap-to-toggle multi-select
+- One sticky bottom bar: live count + 开始制作 button
+- **Zero chip rails for duration / pace / color / captions.** The
+  IntentParserAgent extracts those from the textfield. Power users who
+  want fine control type "30秒 / 慢节奏 / 温暖" — same effect.
+
+Empty-text submit triggers `EmptyIntentDialog` — soft guidance with 3
+example chips that fill the textfield + a "直接生成" escape hatch.
+Selection < 3 hard-disables the start button.
+
+The new
+[`agents/IntentParserAgent.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/agents/IntentParserAgent.kt)
+calls Gemma once on the user's text and extracts a structured
+[`UserBrief`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/schemas/UserCuration.kt):
+- `parsedHook` / `parsedPayoff` / `parsedTone` (string fields)
+- `parsedPace` (Pace enum or null)
+- `parsedDurationSec` (clamped to [5, 120], or null)
+- `mustHaveSubjects` ("宝宝", "狗" — Recall boost)
+- `parsedAvoid` (merged into AudienceBrief.avoidList)
+- `captionPolicy` (DEFAULT / NONE / ZH_ONLY / BILINGUAL)
+- `parsedColorGrade` (override Director's grade)
+- `rawText` (original — fed back to Director's prompt as authoritative-but-fuzzy
+  "用户原话需求" so the LLM has direct context)
+
+[`pipeline/UserCurationPlanner.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/UserCurationPlanner.kt)
+turns the request into a synthetic `Event` with `eventId = "user_<requestId>"`
+where requestId = sha1(sorted_asset_ids + intentText)[0..12]. Stable hash
+means re-submitting identical curations hits the cached output.
+
+The orchestrator gains [`runFromCuration`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/PipelineOrchestrator.kt)
++ `runUserCuratedEvent` which boot Gemma, parse the intent, then call the
+existing `runEvent` with `userBrief: UserBrief?` threaded through. The
+agent prompts inside runEvent get user overrides applied at the audience
++ director + render handoff points — `applyUserBriefToAudience`,
+`applyUserBriefToDirector`, `applyUserBriefToTimeline`. Director's
+`available_signals` prompt segment now appends the user's `rawText` so
+the LLM sees authoritative user intent alongside the asset summary.
+
+The Recall scoring formula gained a new term: `subjectMatchBoost` reads
+`mustHaveSubjects` from UserBrief and adds up to +0.36 (0.18 per match,
+capped) to candidate scores when the asset's VLM tags mention the
+keywords. Threaded through `EditorAgent.pickShot` →
+`Recall.topK(mustHaveSubjects: List<String> = emptyList())`.
+
+User-curated stories show up alongside auto-discovered events with a
+small "你做的" tertiaryContainer-tinted badge in `StoryListItem`.
+
+**Files:** new `schemas/UserCuration.kt`, `agents/IntentParserAgent.kt`,
+`pipeline/UserCurationPlanner.kt`, `worker/CurationRequestStore.kt`,
+`ui/CuratorScreen.kt`, `ui/CuratedAssetGrid.kt`, `ui/EmptyIntentDialog.kt`.
+Modified `schemas/Schemas.kt` (Event.userCuration + userBrief —
+nullable, landmine #7-friendly), `agents/PromptStrings.kt`
+(INTENT_PARSER_INITIAL_SYSTEM), `agents/EditorAgent.kt`,
+`pipeline/Recall.kt`, `worker/PipelineOrchestrator.kt` (new
+runFromCuration + helpers), `worker/VlogPipelineWorker.kt` (curation
+mode), `ui/StoryUi.kt` (hero CTA + UserCuratedBadge),
+`VlogPilotViewModel.kt` (submitCuratedRequest + curatorAssets state).
+
+### Milestone C — Full feedback (SHOT_LEVEL / GLOBAL / MIXED)
+
+The IterationSheet now exposes the full feedback surface:
+- **Storyboard grid** (3-column `LazyVerticalGrid`) of the current
+  timeline's shots, each cell a clickable thumbnail. For video shots, the
+  cell shows the trim midpoint frame (matches what's in the rendered
+  MP4). Tapping a cell highlights it with a 2dp primary ring — that's
+  the `targetedShotOrders` signal that IntentParserAgent consumes.
+- **Free-text input** with placeholder that adapts to whether a cell is
+  selected ("太静态了，换张" vs "整体太慢，做成欢快的").
+- **4 chips, 2×2** layout: 更快 / 更慢 / 去字幕 / 换调色. FASTER/SLOWER
+  now produce a [`GlobalRevision`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/schemas/IterationFeedback.kt)
+  with the next/previous Pace (SNAPPY ↔ BALANCED ↔ LINGERING) and the
+  band's midpoint duration.
+
+`IntentParserAgent.parseFeedback()` is the new LLM call:
+- Skipped entirely when userText is blank AND no cell is tapped (chip-
+  only path runs without Gemma — zero LLM cost for "tap 去字幕 → submit")
+- Otherwise: Gemma reads the current timeline summary + user text +
+  targeted orders + chips, and emits one of four scopes:
+  - **RENDER_ONLY** — caption / color / BGM only
+  - **SHOT_LEVEL** — `parsedRevisions: List<RevisedRequest>` (reuses the
+    Critic schema)
+  - **GLOBAL** — `parsedGlobal: GlobalRevision` (pace + duration + tone
+    + colorGrade + captionPolicy)
+  - **MIXED** — both global and shot-level
+
+Client-side `RenderOnlyPatch` from chips is preserved by ORing with the
+LLM's output — chips and text co-exist as MIXED.
+
+Three new orchestrator sub-paths handle each scope:
+- `runShotLevel` — calls existing `applyRevisions` with the parsed
+  revisions; re-renders. ~30-60s.
+- `runGlobal` — applies `IterationPlanner.applyGlobalToDirector` to the
+  cached DirectorBrief (rescales blueprint durations proportionally, clamps
+  to pace band, overrides tone/colorGrade), reruns Editor's `buildTimeline`,
+  applies `applyGlobalToTimeline` for caption/grade overrides. ~2-3min.
+- `runMixed` — global flow first, then shot-level revisions on top. ~3-4min.
+
+All three are independent `private suspend fun`s sharing the same
+`loadIterationContext` + `renderAndRecord` helpers (landmine #1
+compliance — keep each method's bytecode under 64K). Critic does NOT run
+during iteration — user feedback is the authoritative critique.
+
+The dispatch logic in `iterate()` checks `needsLlmParse` =
+(userText.isNotBlank() || targetedShotOrders.isNotEmpty()) and routes
+through `runIterationWithAgent` (boots Gemma once, parses, dispatches)
+or directly to `runRenderOnly` (no Gemma) accordingly.
+
+**Files:** modified `agents/PromptStrings.kt`
+(INTENT_PARSER_FEEDBACK_SYSTEM with 4 worked examples covering the four
+scopes), `agents/IntentParserAgent.kt` (parseFeedback + scope inference
++ patch parser), `pipeline/IterationPlanner.kt` (applyGlobalToDirector,
+applyGlobalToTimeline, describeChanges, fasterChip→GlobalRevision),
+`worker/PipelineOrchestrator.kt` (runShotLevel + runGlobal + runMixed +
+loadIterationContext + renderAndRecord), `ui/IterationSheet.kt` (storyboard
++ textfield + 4 chips).
+
+### Milestone D — Hardening
+
+- **agent_log iteration tags.** `AgentRuntime.setContextTag(tag)` lets
+  the orchestrator's iterate path prefix every `agent.jsonl` label with
+  `iter_v<N>/`, so `adb run-as cat agent_log/agent.jsonl` can attribute
+  LLM calls to specific iterations.
+
+- **Crash-safe iteration recovery.** On VM init, `resumePendingIterations()`
+  scans `_pending_iteration/` and re-enqueues any orphaned feedback files
+  (KEEP policy). A per-VM-lifetime `resumedIterations` set prevents
+  failure loops — if an iteration is structurally broken, it gets ONE
+  recovery attempt per cold start.
+
+- **Per-iteration perf JSON.**
+  [`IterationPerfTimer`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/PerfTimer.kt)
+  measures parse / editor / render wall-clock and writes
+  `decisions/<eventId>/iter_<N>/perf.json` on every iterate() exit
+  (success or failure). `iterate()` finalize the timer in all 3 try/catch
+  branches (success, cancellation, fatal).
+
+- **CuratorScreen error inline banner.** When the user submits with no
+  imported LLM, instead of silently returning to Stories the screen now
+  stays open with a red `errorContainer` banner explaining what to do
+  next. The user's selection + intent text is preserved across the error.
+
+### Coverage
+
+Unit tests went from 13 → 46. New cases:
+- `IterationPlannerTest`: 21 cases covering chip → patch mappings,
+  applyRenderOnly mutations, applyGlobalToDirector duration rescale +
+  clamp + tone/colorGrade override, applyGlobalToTimeline caption strip
+  + per-shot grade, describeChanges three-scope summaries, FASTER/SLOWER
+  chip pace transitions, FASTER+SLOWER cancellation.
+- `UserCurationPlannerTest`: 10 cases covering Event construction,
+  missing-asset bypass, < 3 usable assets returning null, requestId hash
+  determinism + sort-stability + input sensitivity, eventIdFor prefix.
+
+LLM-dependent paths (parseInitial, parseFeedback) are covered by E2E
+runs, not unit tests.
+
+### Verification
+
+`./gradlew :app:compileDebugKotlin` — green (no `Method exceeds compiler
+instruction limit` warnings).
+`./gradlew :app:assembleDebug` — green.
+`./gradlew :app:testDebugUnitTest` — 46/46 green.
+
+E2E on vivo X200 Pro (Dimensity 9400 + GPU + MTP): all 8 plan scenarios
+verified — auto generation, curated generation, empty-intent guidance,
+chip-only RENDER_ONLY iteration, shot-level iteration with tap-to-target,
+GLOBAL iteration with text only, version rollback via 上一版 arrow,
+crash-recovery via app force-stop mid-iteration.
+
+---
+
 ## v4.4 — 5-agent prompt audit (3-loop pass) + EventScout 2-pass selection (2026-05-08)
 
 Pushed as commit [`f22ba50`](https://github.com/frankqwang/llm-app/commit/f22ba50).

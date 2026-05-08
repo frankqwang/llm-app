@@ -4,6 +4,11 @@ Forked from [google-ai-edge/gallery](https://github.com/google-ai-edge/gallery) 
 
 The 5-agent reasoning chain (Browser → Audience → Director → Editor → Critic) is ported from the [pc-pilot](pc-pilot/) Python reference. Per-asset semantic tags (scene/subjects/action/mood/salient + per-video best-moment frame index) come from a single VLM annotation call per asset. Render uses ffmpeg-kit with hardware H.264 (h264_mediacodec) on supported SoCs.
 
+Three ways to make a vlog (v5.0+):
+- **Auto** — tap "开始挑故事", AI picks the best 1-2 events from your album.
+- **Curated** — tap "我自己挑素材", select assets and (optionally) write what you want; AI cuts that.
+- **Iterate** — tap "改一改" on any vlog you've made, send AI a sentence ("整体太慢"), tap a chip ("去字幕"), or tap a specific shot in the storyboard ("太静态了，换张") and it re-cuts in 30s–3min depending on scope.
+
 Verified end-to-end on **vivo X200 Pro** (Dimensity 9400 + GPU + MTP). Two events / 12 assets / ~7 minutes wall-clock to produce two ~6 MB 1080×1920 MP4s; perception + annotation cache make subsequent runs much faster.
 
 For the engineering log of what changed and why between versions see [CHANGELOG.md](CHANGELOG.md). Project landmines and contributor notes live in [CLAUDE.md](CLAUDE.md).
@@ -211,6 +216,40 @@ PhotoIngest ──► EventSegmenter ──► EventSelectionPlanner (coarse ran
                                     (h264_mediacodec when available)
 ```
 
+In addition to the auto entry above, two side entries (v5.0+):
+
+```
+Curated entry (user picks assets + writes intent):
+  CuratorScreen → UserCurationRequest → CurationRequestStore.stage
+                → Worker (KEY_CURATION_REQUEST_ID)
+                → runFromCuration:
+                    UserCurationPlanner → synthetic Event(eventId="user_<requestId>")
+                    IntentParserAgent.parseInitial → UserBrief
+                    (parsedHook/payoff/tone/pace/duration/mustHaveSubjects/
+                     parsedAvoid/captionPolicy/parsedColorGrade/rawText)
+                    perception + annotation pass on selection
+                    runEvent(userBrief=...) — agents apply overrides at
+                    audience / director / timeline handoff points
+
+Iterate entry (user gives feedback on a generated vlog):
+  IterationSheet (storyboard tap-to-target + textfield + 4 chips)
+  → IterationFeedback → IterationStore.stagePending
+  → Worker (KEY_ITERATION_EVENT_ID)
+  → iterate():
+      if (text or targeted-shot non-empty):
+        boot Gemma → IntentParserAgent.parseFeedback(timeline + raw)
+                     → refined IterationFeedback with parsedScope
+      dispatch by parsedScope:
+        RENDER_ONLY → IterationPlanner.applyRenderOnly + render        (~30s)
+        SHOT_LEVEL  → applyRevisions on cached timeline + render       (~30-60s)
+        GLOBAL      → applyGlobalToDirector + buildTimeline rebuild
+                       + applyGlobalToTimeline + render                (~2-3min)
+        MIXED       → GLOBAL flow + SHOT_LEVEL revisions + render      (~3-4min)
+      VersionArchive auto-archives prior MP4 →
+        candidates/archive/<eventId>__<timestamp>.mp4
+      IterationStore writes iter_<N>/ artifacts + appends history
+```
+
 Key design points:
 
 - **Method extraction is load-bearing**, not cosmetic. Inlined, `PipelineOrchestrator.run()`'s coroutine state machine exceeds ART's 64K bytecode limit and the resume-from-saved-label dispatch breaks (every progress suspension restarts run() from the top, looping forever). Per-event body lives in `runEvent()`; annotation pass lives in `runAnnotationPass()`. **If you add another pass, keep it in its own suspend function.** See [CHANGELOG.md v4.1](CHANGELOG.md) for the full debug story.
@@ -230,10 +269,19 @@ Vivo OriginOS (and similar OEMs) flood logcat from `HWUI`/`SurfaceComposerClient
 | `_state.txt` | Single line: `<unix_millis>\t<stage>\t<detail>` — current pipeline state |
 | `_state_history.jsonl` | Append-only trail of every PipelineProgress event |
 | `_state_fatal.txt` | Stack trace if `run()` throws above the per-event catch |
-| `agent_log/agent.jsonl` | Per-LLM-call timing + outcome (`ok` / `timeout` / `error:Foo`) |
-| `decisions/<eventId>/*.json` | EventMemory / AudienceBrief / DirectorBrief / Timeline / Critique / perf |
+| `agent_log/agent.jsonl` | Per-LLM-call timing + outcome (`ok` / `timeout` / `error:Foo`); iteration calls prefixed with `iter_v<N>/` |
+| `decisions/<eventId>/*.json` | EventMemory / AudienceBrief / DirectorBrief / Timeline / Critique / perf / user_brief |
+| `decisions/<eventId>/_history.json` | IterationHistory: every version's mp4 + feedback text + change summary |
+| `decisions/<eventId>/iter_<N>/feedback_input.txt` | User's raw feedback text for iteration N |
+| `decisions/<eventId>/iter_<N>/feedback_parsed.json` | IntentParserAgent's structured interpretation |
+| `decisions/<eventId>/iter_<N>/timeline.json` | Snapshot of the timeline used to render this iteration |
+| `decisions/<eventId>/iter_<N>/perf.json` | parseMs / editorMs / renderMs / totalMs per iteration |
+| `_pending_iteration/<eventId>.json` | Staged feedback waiting for the worker (auto-resumed on cold start) |
+| `user_curation_requests/<requestId>.json` | The user's original UserCurationRequest (for cache hit on resubmit) |
 | `perception_cache/<assetId>.json` | Per-asset Perception (cheap signals + VLM tags) |
-| `candidates/<eventId>.mp4` | Final rendered vlog |
+| `event_scout_cache/<eventId>.json` | EventScout VLM signal (story arc / person / pacing) |
+| `candidates/<eventId>.mp4` | Latest rendered vlog (always the most recent version) |
+| `candidates/archive/<eventId>__<timestamp>.mp4` | Prior versions (the 上一版 arrow plays these) |
 
 Read any of them via:
 ```powershell
@@ -259,12 +307,37 @@ adb logcat -v threadtime PipelineOrchestrator:D AgentRuntime:D EditorAgent:D *:S
 
 ## VlogPilot user flow
 
-1. Open the app (lands directly on the VlogPilot screen, not the gallery home).
-2. Tap **生成** (Generate). Permission prompt for `READ_MEDIA_IMAGES` / `READ_MEDIA_VIDEO` if not yet granted.
-3. Watch the Process tab. Stages: download → ingest → perceive → annotate → event_start → browse / audience / director / editor / critic / render → event_done.
-4. When `all_done` lands, MP4 candidates appear in the Results tab. Tap any one to play inline.
+The app lands directly on the VlogPilot screen (not the gallery home). The Stories tab hero card has two CTAs:
 
-Cancel any time via the **取消** button (calls `WorkManager.cancelUniqueWork`).
+### Auto path
+
+1. Tap **开始挑故事**. Permission prompt for `READ_MEDIA_IMAGES` / `READ_MEDIA_VIDEO` if not granted.
+2. AI scans the album, segments events, runs EventScout, and proposes top stories. Tap any one to see details, pin/exclude, or batch-select.
+3. Tap **开始制作** to generate. Watch the Live process panel: download → ingest → perceive → annotate → browse / audience / director / editor / critic / render → done.
+4. MP4 lands in the Videos tab. Tap any card to play inline. Cancel via **取消** any time.
+
+### Curated path (v5.0+)
+
+1. From the Stories hero, tap **或者，我自己挑素材**.
+2. Type what you want (optional — empty submit triggers a friendly guidance dialog with example chips). E.g. "30秒怀旧风的成长vlog" or "做条欢快有节奏的".
+3. Tap thumbnails in the grid to multi-select assets (need ≥ 3).
+4. Tap **开始制作**. AI parses your text into a structured UserBrief (pace / tone / colorGrade / mustHaveSubjects / captionPolicy / duration), constructs a synthetic event, and runs the same Browser→Audience→Director→Editor→Critic→Render chain with your overrides applied at each handoff point.
+5. The result appears in Videos tab with a "你做的" badge.
+
+### Iterate path (v5.0+)
+
+1. From any video card in the Videos tab, tap **改一改**.
+2. The bottom sheet shows the current timeline as a 3-column storyboard. Tap a cell to mark it (the 2dp ring), or write feedback in the textfield, or tap any of the 4 quick chips: **更快** / **更慢** / **去字幕** / **换调色**.
+3. Submit. Worker dispatches based on what you said:
+   - chip-only **去字幕** / **换调色** → `RENDER_ONLY` scope, ~30s, no LLM call
+   - chip-only **更快** / **更慢** → `GLOBAL` scope, ~2-3min (rebuilds shot picks at new pace)
+   - tap a cell + write text → `SHOT_LEVEL` scope, ~30-60s (re-pick that shot)
+   - text without cell selection → `GLOBAL`, ~2-3min
+   - chips + text/cell → `MIXED`, ~3-4min
+4. Progress strip appears above the videos list (non-blocking — keep browsing). When done, the new MP4 auto-plays.
+5. Tap the **History** icon button at the top-right of the card to compare with the previous version.
+
+If the worker is killed mid-iteration (vivo BTM, OOM, force-stop), the staged feedback file at `_pending_iteration/<eventId>.json` is auto-resumed on next cold start (one attempt per session — failed iterations don't loop).
 
 ## Future cleanup (does NOT block VlogPilot working)
 

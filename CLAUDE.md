@@ -18,8 +18,17 @@ uses one Gemma VLM call per asset (`VlmAnnotator`); the cheap perception layer
 a **two-pass VLM workflow** — coarse rank → EventScout (3×3 contact sheet read
 by Gemma per top-K candidate) → final rank — see landmine #4.
 
+There are now **three pipeline entry points** running through one Worker:
+1. **Auto** (`run()`) — scan album → segment → select → make 1-2 vlogs
+2. **Curated** (`runFromCuration()`) — user picks assets + writes a sentence,
+   IntentParserAgent extracts a UserBrief, runEvent runs with overrides
+3. **Iterate** (`iterate()`) — user taps "改一改" on a generated vlog, four
+   sub-paths (RENDER_ONLY / SHOT_LEVEL / GLOBAL / MIXED) re-render or
+   re-build the timeline. See landmine #9.
+
 End-to-end verified on **vivo X200 Pro** (Dimensity 9400, GPU + MTP). 12 assets /
-2 events / ~7 min wall-clock for two MP4s. Cache makes repeat runs much faster.
+2 events / ~7 min wall-clock for two MP4s. RENDER_ONLY iterations finish in
+~30s; SHOT_LEVEL ~30-60s; GLOBAL ~2-3min. Cache makes repeat runs much faster.
 
 ## Where to read the docs
 
@@ -123,7 +132,7 @@ schema version, or delete `filesDir/perception_cache/` in the migration path.
 
 ### 8. Prompt-audit signal flow (Pace / ColorGrade / patches)
 
-The 7 prompts (`PromptStrings.*`) and their parsers in the agents are tightly
+The 8 prompts (`PromptStrings.*`) and their parsers in the agents are tightly
 coupled — adding a field requires changes in BOTH the prompt and the parser, or
 the field is silently dropped. Specific cross-stage flows:
 
@@ -138,7 +147,10 @@ the field is silently dropped. Specific cross-stage flows:
   over `newRequest`. `PipelineOrchestrator.applyPatches()` honors blank values
   for cosmetic fields (caption / transition / ken_burns) but skips blanks for
   narrative fields (mood / visual_requirements) — Gemma occasionally emits
-  empty strings as model error, not as intentional clear.
+  empty strings as model error, not as intentional clear. **The same
+  `RevisedRequest` schema is reused by `IntentParserAgent.parseFeedback` for
+  user iteration** — don't change the patch schema without auditing both
+  callers.
 - **`CriticVerdict.ABORT`** → `runEvent`'s critic loop logs a `critic_abort`
   breadcrumb and breaks (no more model calls), but ships the working timeline.
   Don't add "skip the event entirely on ABORT" — abort means "patches won't fix
@@ -146,7 +158,72 @@ the field is silently dropped. Specific cross-stage flows:
 - **Director's `available_signals`** → built by `buildAvailableSignals()` from
   the orchestrator. Director prompt requires `visual_requirements` to match
   something in this summary. If you change `buildAvailableSignals` output
-  format, update the prompt's example accordingly or Gemma will drift.
+  format, update the prompt's example accordingly or Gemma will drift. When
+  a UserBrief is present, `runEvent` appends `用户原话需求：「...」` to
+  `available_signals` so the LLM sees the user's authoritative-but-fuzzy
+  intent alongside the asset summary.
+
+### 9. Iteration sub-paths must each be independent suspend funs
+
+Same root cause as landmine #1 (ART 64K bytecode), different surface. The
+iteration entry [`iterate()`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/PipelineOrchestrator.kt)
+dispatches to FOUR sub-paths via `parsedScope`:
+- `runRenderOnly` — caption / colorGrade / BGM only, no Gemma
+- `runShotLevel` — applyRevisions on cached timeline, Gemma needed for Editor
+- `runGlobal` — applyGlobalToDirector + buildTimeline rebuild, Gemma needed
+- `runMixed` — runGlobal then SHOT_LEVEL revisions on top
+
+**Rule:** each sub-path is its own `private suspend fun`. Don't inline two of
+them into one method "for clarity" — the combined coroutine state machine
+will exceed 64K. Common helpers `loadIterationContext` and
+`renderAndRecord` are pure I/O wrappers, safe to share.
+
+The `runIterationWithAgent` opens AgentRuntime ONCE and threads it through
+both `parseFeedback` (when needed) and the sub-path — don't create two
+agent instances per iteration; Gemma 4 init costs ~15s and would double
+that for SHOT_LEVEL/GLOBAL/MIXED iterations needing parsed feedback.
+
+Critic does NOT run during iteration. The user's feedback IS the critique;
+running another LLM critic on top would waste tokens and might revert what
+the user explicitly asked for.
+
+### 10. Worker has 3 modes; ACTIVE lock semantics differ
+
+[`VlogPipelineWorker`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/VlogPipelineWorker.kt)
+inspects inputData for two keys:
+- `KEY_ITERATION_EVENT_ID` → iterate mode (per-event WORK_NAME prefix
+  `vlog_pilot_iterate_<eventId>`)
+- `KEY_CURATION_REQUEST_ID` → curated story mode (per-request WORK_NAME
+  prefix `vlog_pilot_curate_<requestId>`)
+- neither → full pipeline mode (unique WORK_NAME `vlog_pilot_pipeline`)
+
+The static `ACTIVE: AtomicBoolean` serializes Gemma-loading runs (full +
+curate share the lock — both load Gemma). **Iteration mode bypasses
+ACTIVE** because RENDER_ONLY iterations don't load Gemma. SHOT_LEVEL /
+GLOBAL / MIXED iterations DO load Gemma but — given they're triggered by
+user feedback on an already-existing event — we accept the rare race
+where two Gemma engines compete for memory. If we ever see OOM in
+production from this, switch to per-eventId locking.
+
+Pending iterations are persisted on disk (`_pending_iteration/<eid>.json`).
+On VM cold start, `resumePendingIterations()` re-enqueues them ONCE per VM
+lifetime (tracked in `resumedIterations`). Repeated cold-start failures
+won't loop — the file stays around but isn't re-tried until user takes
+explicit action.
+
+### 11. User curation: nullable Event fields + requestId stability
+
+`Event.userCuration` and `Event.userBrief` are `nullable` with default
+`null`. Always-nullable for landmine #7 friendliness — old
+`perception_cache/` JSONs missing these fields deserialize cleanly.
+Don't make either non-null without writing a migration.
+
+`requestId = sha1(sorted(selectedAssetIds) + intentText)[0..12]` —
+canonical hash. Always sort asset IDs before hashing. Same input → same
+requestId → same `eventId = "user_<requestId>"` → cache hit. If you
+change the hash recipe, every prior user-curated event becomes
+unreachable from the UI (its eventId no longer maps to the
+CurationRequestStore key).
 
 ## Working effectively in this codebase
 
@@ -220,16 +297,30 @@ Git Bash translates `/sdcard/foo` and `/data/data/...` to Windows paths
 
 ## Test infrastructure
 
-Two unit-test files, 13 cases total:
+Four unit-test files, 46 cases total:
 
 - `agents/JsonExtractorTest.kt` (10 cases) — the agent JSON extractor is the
   hot path covering every prompt parse. Cases cover: clean object, nested
   braces, code-fence wrapper, `<think>` tag, prose prefix/suffix, escaped
   quotes inside strings, unclosed braces, garbage, array extraction.
   **If you add new JSON-parsing logic, add cases here.**
-- `pipeline/EventSelectorTest.kt` (3 cases) — covers content-scored event
+- `pipeline/EventSelectorTest.kt` (5 cases) — covers content-scored event
   ranking with intent bias. Add cases here if you change weights in
   `valueScore` / `eventBias` / `EventScoutRunner` integration.
+- `pipeline/IterationPlannerTest.kt` (21 cases) — chip → patch mappings
+  (RENDER_ONLY + GLOBAL pace transitions + MIXED), `applyRenderOnly` /
+  `applyGlobalToDirector` / `applyGlobalToTimeline` semantics, ColorGrade
+  rotation, FASTER+SLOWER cancellation, describeChanges summaries. **Add
+  cases here when you change iteration scope routing or QuickAction
+  mappings.**
+- `pipeline/UserCurationPlannerTest.kt` (10 cases) — synthetic Event
+  construction, missing-asset bypass, < 3 usable assets returning null,
+  requestId hash stability + sort-invariance + sensitivity to inputs,
+  eventIdFor prefix.
+
+LLM-dependent paths (`IntentParserAgent.parseInitial` / `parseFeedback`,
+`MontageAgent.browse`, etc.) are covered by E2E runs on a real device,
+not unit tests.
 
 Run: `./gradlew :app:testDebugUnitTest`. Every other component is tested only
 by end-to-end runs on a real device.
