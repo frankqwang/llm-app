@@ -24,12 +24,14 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotRunConf
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotModelRegistry
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.IterationFeedback
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.DecisionStore
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventDecisions
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventSelectionManifest
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventSelectionPlanner
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventSelectionStatus
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventScoutRunner
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.IterationStore
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineEventBus
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineProgress
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.StateBreadcrumb
@@ -78,6 +80,17 @@ data class ProgressSnapshot(
   val recent: List<String> = emptyList(),
 )
 
+/** Snapshot of an in-flight iteration. The UI uses this to render a small
+ *  bottom progress bar over the Videos tab so the user knows their feedback
+ *  is being applied without blocking other interaction. */
+data class IterationSnapshot(
+  val eventId: String,
+  val baseVersion: Int,
+  val targetVersion: Int,
+  val phase: String,                 // "queued"/"render"/"done"/"failed"
+  val message: String = "",
+)
+
 @HiltViewModel
 class VlogPilotViewModel @Inject constructor(
   @ApplicationContext private val appContext: Context,
@@ -97,6 +110,11 @@ class VlogPilotViewModel @Inject constructor(
 
   private val _eventSelection = MutableStateFlow<EventSelectionManifest?>(null)
   val eventSelection: StateFlow<EventSelectionManifest?> = _eventSelection.asStateFlow()
+
+  /** Active iteration in flight (null when idle). UI subscribes to render the
+   *  IterationProgressBar above the Videos tab. */
+  private val _activeIteration = MutableStateFlow<IterationSnapshot?>(null)
+  val activeIteration: StateFlow<IterationSnapshot?> = _activeIteration.asStateFlow()
 
   private val collectedOutputs = mutableMapOf<String, String>()
   private var decisionRefreshJob: Job? = null
@@ -199,6 +217,20 @@ class VlogPilotViewModel @Inject constructor(
     }
   }
 
+  fun toggleSelectedEvent(eventId: String) {
+    updateRunConfig(refreshCandidates = false) {
+      val selected = if (eventId in onlySelectedEventIds) {
+        onlySelectedEventIds - eventId
+      } else {
+        onlySelectedEventIds + eventId
+      }
+      copy(
+        onlySelectedEventIds = selected,
+        excludedEventIds = excludedEventIds - eventId,
+      )
+    }
+  }
+
   fun forceRegenerateEvent(eventId: String) {
     updateRunConfig(refreshCandidates = false) {
       copy(
@@ -252,11 +284,7 @@ class VlogPilotViewModel @Inject constructor(
 
   private fun EventSelectionManifest.syncWithRunConfig(config: VlogPilotRunConfig): EventSelectionManifest {
     val candidateIds = candidates.map { it.eventId }.toSet()
-    val selectedIds = if (config.onlySelectedEventIds.isNotEmpty()) {
-      config.onlySelectedEventIds.filter { it in candidateIds }
-    } else {
-      selectedEventIds.filter { it !in config.excludedEventIds }
-    }
+    val selectedIds = config.onlySelectedEventIds.filter { it in candidateIds }
     val selectedSet = selectedIds.toSet()
     val candidatesWithStatus = candidates.map { candidate ->
       val status = when {
@@ -365,6 +393,45 @@ class VlogPilotViewModel @Inject constructor(
     _progress.value = progressWithRecent(ProgressSnapshot("已取消", "后台生成任务已取消", "idle"))
   }
 
+  /**
+   * Submit user feedback for iteration. Stages the feedback to disk and
+   * enqueues a foreground iteration WorkRequest under a per-event WORK_NAME so
+   * it doesn't collide with the main pipeline.
+   *
+   * REPLACE policy: re-submitting feedback for the same event before the
+   * previous iteration finishes cancels and replaces it (most recent wins).
+   *
+   * Empty/no-op feedback (no chips, no patches) is a UI-side no-op — we only
+   * call this when the user explicitly tapped "让 AI 优化".
+   */
+  fun submitFeedback(eventId: String, feedback: IterationFeedback) {
+    viewModelScope.launch {
+      withContext(Dispatchers.IO) { IterationStore.stagePending(appContext, eventId, feedback) }
+      _activeIteration.value = IterationSnapshot(
+        eventId = eventId,
+        baseVersion = feedback.baseTimelineVersion,
+        targetVersion = feedback.baseTimelineVersion + 1,
+        phase = "queued",
+        message = "已提交，正在排队",
+      )
+      VlogPipelineWorker.ensureChannel(appContext)
+      val req = OneTimeWorkRequestBuilder<VlogPipelineWorker>()
+        .setInputData(VlogPipelineWorker.iterationInputData(eventId))
+        .build()
+      StateBreadcrumb.mark(appContext, "ui_feedback_enqueue", "event=$eventId scope=${feedback.parsedScope.name}")
+      workManager.enqueueUniqueWork(
+        VlogPipelineWorker.iterationWorkName(eventId),
+        ExistingWorkPolicy.REPLACE,
+        req,
+      )
+    }
+  }
+
+  /** Dismiss a finished or failed iteration banner. */
+  fun dismissIterationStatus() {
+    _activeIteration.value = null
+  }
+
   fun runFullPipeline(model: Model) {
     viewModelScope.launch {
       runFullPipelineInternal(model)
@@ -461,6 +528,39 @@ class VlogPilotViewModel @Inject constructor(
         _state.value = PipelineState.Done(all)
       }
       is PipelineProgress.Failed -> _state.value = PipelineState.Error(p.message)
+      is PipelineProgress.IterationStart -> {
+        _activeIteration.value = IterationSnapshot(
+          eventId = p.eventId,
+          baseVersion = p.baseVersion,
+          targetVersion = p.targetVersion,
+          phase = "render",
+          message = "开始优化（${p.scope}）",
+        )
+        // Don't change PipelineState — iteration is a side-channel that
+        // shouldn't reset the main Stories/Videos flow.
+      }
+      is PipelineProgress.IterationStage -> {
+        _activeIteration.value = _activeIteration.value?.copy(
+          phase = p.phase,
+          message = p.detail.ifBlank { snapshot.headline },
+        )
+      }
+      is PipelineProgress.IterationDone -> {
+        _activeIteration.value = IterationSnapshot(
+          eventId = p.eventId,
+          baseVersion = (_activeIteration.value?.baseVersion ?: 1),
+          targetVersion = p.targetVersion,
+          phase = "done",
+          message = p.changeSummary,
+        )
+        scheduleDecisionRefresh()
+      }
+      is PipelineProgress.IterationFailed -> {
+        _activeIteration.value = _activeIteration.value?.copy(
+          phase = "failed",
+          message = p.message,
+        ) ?: IterationSnapshot(p.eventId, 1, 1, "failed", p.message)
+      }
       else -> _state.value = PipelineState.Running(snapshot.headline)
     }
     _progress.value = progressWithRecent(snapshot)
@@ -566,6 +666,28 @@ class VlogPilotViewModel @Inject constructor(
       headline = "${p.eventId} 失败",
       detail = p.message,
       stage = "event_failed",
+    )
+    is PipelineProgress.IterationStart -> ProgressSnapshot(
+      headline = "开始优化 v${p.baseVersion}→v${p.targetVersion}",
+      detail = "${p.eventId} · ${p.scope}",
+      stage = "iterate_start",
+      current = p.baseVersion,
+      total = p.targetVersion,
+    )
+    is PipelineProgress.IterationStage -> ProgressSnapshot(
+      headline = "正在优化 ${p.eventId}",
+      detail = p.detail.ifBlank { p.phase },
+      stage = "iterate_${p.phase}",
+    )
+    is PipelineProgress.IterationDone -> ProgressSnapshot(
+      headline = "${p.eventId} 已优化为 v${p.targetVersion}",
+      detail = p.changeSummary,
+      stage = "iterate_done",
+    )
+    is PipelineProgress.IterationFailed -> ProgressSnapshot(
+      headline = "${p.eventId} 优化失败",
+      detail = p.message,
+      stage = "iterate_failed",
     )
     PipelineProgress.AllDone -> ProgressSnapshot("全部完成", "候选视频已写入本地 candidates 目录", "done")
     is PipelineProgress.Failed -> ProgressSnapshot("任务失败", p.message, "failed")

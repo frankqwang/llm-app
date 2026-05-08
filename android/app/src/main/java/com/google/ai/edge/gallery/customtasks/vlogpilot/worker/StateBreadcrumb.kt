@@ -47,6 +47,10 @@ object StateBreadcrumb {
       is PipelineProgress.EventStage -> mark(context, "event_stage", "${p.eventId} ${p.stage} ${p.detail}")
       is PipelineProgress.EventDone -> mark(context, "event_done", "${p.eventId} ${p.outputPath}")
       is PipelineProgress.EventFailed -> mark(context, "event_failed", "${p.eventId} ${p.message}")
+      is PipelineProgress.IterationStart -> mark(context, "iterate_start", "${p.eventId} v${p.baseVersion}->v${p.targetVersion} scope=${p.scope}")
+      is PipelineProgress.IterationStage -> mark(context, "iterate_stage", "${p.eventId} ${p.phase} ${p.detail}")
+      is PipelineProgress.IterationDone -> mark(context, "iterate_done", "${p.eventId} v${p.targetVersion} ${p.outputPath} ${p.changeSummary}")
+      is PipelineProgress.IterationFailed -> mark(context, "iterate_failed", "${p.eventId} ${p.message}")
       PipelineProgress.AllDone -> mark(context, "all_done", "")
       is PipelineProgress.Failed -> mark(context, "failed", p.message)
     }

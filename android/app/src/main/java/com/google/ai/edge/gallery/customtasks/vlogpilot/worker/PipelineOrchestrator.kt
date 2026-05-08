@@ -26,6 +26,7 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.MediaLoader
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.PerceptionCache
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.PerceptionEngine
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventSegmenter
+import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.IterationPlanner
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.VideoFrameSheetBuilder
 import com.google.ai.edge.gallery.customtasks.vlogpilot.render.VideoRenderer
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.PowerPacer
@@ -34,6 +35,9 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.CriticVerdict
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.DirectorBrief
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.FeedbackScope
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.IterationFeedback
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.IterationSummary
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Perception
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.RevisedRequest
@@ -48,6 +52,13 @@ class PipelineOrchestrator(
   private val gemmaModel: Model,
 ) {
   data class Result(val outputs: Map<String, String>) // eventId -> mp4 path
+
+  data class IterationResult(
+    val eventId: String,
+    val outputPath: String?,
+    val targetVersion: Int,
+    val changeSummary: String,
+  )
 
   suspend fun run(
     windowDays: Int = 30,
@@ -279,6 +290,132 @@ class PipelineOrchestrator(
 
     progress(PipelineProgress.AllDone)
     return Result(outputs)
+  }
+
+  /**
+   * User-feedback iteration entry. Loads the existing event's persisted state,
+   * routes to the cheapest sub-path that satisfies the parsed feedback scope,
+   * archives the previous MP4, writes a new candidate, and records the version
+   * in IterationStore.
+   *
+   * Milestone A only implements RENDER_ONLY. SHOT_LEVEL / GLOBAL / MIXED throw
+   * UnsupportedOperationException — the worker turns those into IterationFailed.
+   *
+   * Top-level entry intentionally thin (landmine #1: keep run-like methods'
+   * coroutine state machines under ART's 64K bytecode limit).
+   */
+  suspend fun iterate(
+    eventId: String,
+    feedback: IterationFeedback,
+    onProgress: suspend (PipelineProgress) -> Unit,
+  ): IterationResult {
+    val progress: suspend (PipelineProgress) -> Unit = { p ->
+      runCatching { StateBreadcrumb.fromProgress(context, p) }
+      runCatching { onProgress(p) }
+    }
+    val targetVersion = (IterationStore.loadHistory(context, eventId)?.currentVersion ?: 1) + 1
+    progress(
+      PipelineProgress.IterationStart(
+        eventId = eventId,
+        baseVersion = feedback.baseTimelineVersion,
+        targetVersion = targetVersion,
+        scope = feedback.parsedScope.name.lowercase(),
+      ),
+    )
+    StateBreadcrumb.mark(
+      context,
+      "iterate_start",
+      "$eventId v$targetVersion scope=${feedback.parsedScope.name}",
+    )
+    return try {
+      when (feedback.parsedScope) {
+        FeedbackScope.RENDER_ONLY -> runRenderOnly(eventId, feedback, targetVersion, progress)
+        FeedbackScope.SHOT_LEVEL,
+        FeedbackScope.GLOBAL,
+        FeedbackScope.MIXED -> {
+          progress(PipelineProgress.IterationFailed(eventId, "scope ${feedback.parsedScope.name.lowercase()} not yet implemented"))
+          IterationResult(eventId, null, targetVersion, "未实现")
+        }
+      }
+    } catch (t: CancellationException) {
+      throw t
+    } catch (t: Throwable) {
+      Log.e(TAG, "iterate failed for $eventId", t)
+      StateBreadcrumb.mark(context, "iterate_failed", "${t::class.java.simpleName}: ${t.message}")
+      progress(PipelineProgress.IterationFailed(eventId, t.message ?: t::class.java.simpleName))
+      IterationResult(eventId, null, targetVersion, "错误")
+    }
+  }
+
+  /**
+   * RENDER_ONLY sub-path. No agent calls. Loads the base timeline + tone from
+   * decisions/<eventId>/, applies the patch via IterationPlanner, calls the
+   * renderer (which archives the previous MP4 automatically), and records the
+   * new version. Typical wall-clock: 20-40s on Dimensity 9400.
+   */
+  private suspend fun runRenderOnly(
+    eventId: String,
+    feedback: IterationFeedback,
+    targetVersion: Int,
+    progress: suspend (PipelineProgress) -> Unit,
+  ): IterationResult {
+    progress(PipelineProgress.IterationStage(eventId, "load", "reading current timeline + assets"))
+    val decisions = DecisionStore.loadEvent(context, eventId)
+      ?: throw IllegalStateException("event $eventId has no persisted decisions")
+    val baseTimeline = decisions.timelineFinal ?: decisions.timelineV1
+      ?: throw IllegalStateException("event $eventId has no timeline yet — generate first")
+    val baseTone = decisions.director?.tone ?: "neutral"
+    val assetMap = decisions.inputAssets.associateBy { it.id }
+    if (assetMap.isEmpty()) {
+      throw IllegalStateException("event $eventId has no cached inputAssets — cannot re-render")
+    }
+
+    val patch = feedback.parsedRenderPatch
+      ?: throw IllegalStateException("RENDER_ONLY scope but parsedRenderPatch is null")
+
+    progress(PipelineProgress.IterationStage(eventId, "render", "rendering new cut with patches"))
+    val renderInput = IterationPlanner.applyRenderOnly(baseTimeline, baseTone, patch)
+    val renderer = VideoRenderer(context)
+    val out = renderer.render(renderInput.timeline, assetMap, renderInput.effectiveTone)
+    if (out == null) {
+      progress(PipelineProgress.IterationFailed(eventId, "render returned null"))
+      return IterationResult(eventId, null, targetVersion, renderInput.changeSummary)
+    }
+
+    DecisionStore.writeTimelineFinal(context, eventId, out.timeline)
+    IterationStore.writeIterationArtifacts(
+      context = context,
+      eventId = eventId,
+      iterationId = "iter_%03d".format(targetVersion),
+      feedback = feedback,
+      timelineUsed = renderInput.timeline,
+    )
+    IterationStore.appendIteration(
+      context,
+      eventId,
+      IterationSummary(
+        version = targetVersion,
+        mp4Path = out.outputPath,
+        createdAtMs = System.currentTimeMillis(),
+        feedbackText = feedback.userText,
+        changeSummary = renderInput.changeSummary,
+      ),
+    )
+    IterationStore.clearPending(context, eventId)
+    StateBreadcrumb.mark(
+      context,
+      "iterate_done",
+      "$eventId v$targetVersion ${renderInput.changeSummary}",
+    )
+    progress(
+      PipelineProgress.IterationDone(
+        eventId = eventId,
+        targetVersion = targetVersion,
+        outputPath = out.outputPath,
+        changeSummary = renderInput.changeSummary,
+      ),
+    )
+    return IterationResult(eventId, out.outputPath, targetVersion, renderInput.changeSummary)
   }
 
   // ---- helpers ----
@@ -615,6 +752,7 @@ private suspend fun buildTimeline(
           if (out != null) {
             DecisionStore.writeTimelineFinal(context, event.eventId, out.timeline)
             outputs[event.eventId] = out.outputPath
+            IterationStore.recordInitialVersion(context, event.eventId, out.outputPath)
             progress(PipelineProgress.EventDone(event.eventId, out.outputPath))
           } else {
             progress(PipelineProgress.EventFailed(event.eventId, "render returned null (resume)"))
@@ -704,6 +842,7 @@ private suspend fun buildTimeline(
       if (out != null) {
         DecisionStore.writeTimelineFinal(context, event.eventId, out.timeline)
         outputs[event.eventId] = out.outputPath
+        IterationStore.recordInitialVersion(context, event.eventId, out.outputPath)
         progress(PipelineProgress.EventDone(event.eventId, out.outputPath))
       } else {
         progress(PipelineProgress.EventFailed(event.eventId, "render returned null"))

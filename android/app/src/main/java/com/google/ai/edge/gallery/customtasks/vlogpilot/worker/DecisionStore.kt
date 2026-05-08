@@ -44,6 +44,12 @@ data class EventDecisions(
   val critique: Critique? = null,
   val mp4Path: String? = null,
   val perf: StagePerf? = null,
+  /** Previous version's mp4 path, populated from IterationStore. Null when
+   *  no iteration has happened yet (only the initial v1 exists) or when the
+   *  archived file went missing. UI reads this for the 上一版 arrow. */
+  val previousMp4Path: String? = null,
+  /** Total number of versions for this event (1 = initial only, 2+ = iterated). */
+  val versionCount: Int = 1,
 )
 
 object DecisionStore {
@@ -130,6 +136,39 @@ object DecisionStore {
     }
   }
 
+  /** Loads a single event's decisions. Same composition as loadAll but skips
+   *  the directory scan — used by the iteration path which already has an
+   *  eventId in hand. Returns null if the event has no persisted artifacts. */
+  fun loadEvent(context: Context, eventId: String): EventDecisions? {
+    val dir = File(File(context.filesDir, "decisions"), eventId)
+    if (!dir.isDirectory) return null
+    val candidatesDir = File(context.filesDir, "candidates")
+    val mp4 = File(candidatesDir, "$eventId.mp4").takeIf { it.isFile }?.absolutePath
+    val inputs = readJson<EventInputManifest>(dir, "event_inputs.json")
+    val inputAssets = inputs?.assets.orEmpty()
+    val inputPerceptions = inputAssets.mapNotNull { asset ->
+      PerceptionCache.get(context, asset)?.let { asset.id to it }
+    }.toMap()
+    val history = IterationStore.loadHistory(context, eventId)
+    val previousMp4 = IterationStore.previousVersionPath(context, eventId)
+    return EventDecisions(
+      eventId = eventId,
+      event = inputs?.event,
+      inputAssets = inputAssets,
+      inputPerceptions = inputPerceptions,
+      memory = readJson(dir, "event_memory.json"),
+      audience = readJson(dir, "audience.json"),
+      director = readJson(dir, "director.json"),
+      timelineV1 = readJson(dir, "timeline_v1.json"),
+      timelineFinal = readJson(dir, "timeline_final.json"),
+      critique = readJson(dir, "critique.json"),
+      mp4Path = mp4,
+      perf = readJson(dir, "perf.json"),
+      previousMp4Path = previousMp4,
+      versionCount = history?.iterations?.size ?: if (mp4 != null) 1 else 0,
+    )
+  }
+
   /** Read every event's persisted decisions into a list, sorted by eventId. Any
    *  partially-completed event (e.g. browse done but not director) just has the
    *  unwritten fields as null — the UI renders progressively. */
@@ -145,6 +184,7 @@ object DecisionStore {
       val inputPerceptions = inputAssets.mapNotNull { asset ->
         PerceptionCache.get(context, asset)?.let { asset.id to it }
       }.toMap()
+      val history = IterationStore.loadHistory(context, eid)
       EventDecisions(
         eventId = eid,
         event = inputs?.event,
@@ -158,6 +198,8 @@ object DecisionStore {
         critique = readJson(dir, "critique.json"),
         mp4Path = mp4,
         perf = readJson(dir, "perf.json"),
+        previousMp4Path = IterationStore.previousVersionPath(context, eid),
+        versionCount = history?.iterations?.size ?: if (mp4 != null) 1 else 0,
       )
     }.orEmpty().sortedWith(
       compareByDescending<EventDecisions> { it.event?.endEpochMs ?: Long.MIN_VALUE }

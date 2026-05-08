@@ -40,6 +40,10 @@ object Recall {
     perceptions: Map<String, Perception>,
     excludedAssetIds: Set<String> = emptySet(), // already used by another shot in this timeline
     k: Int = 8,
+    /** Subject keywords from the user's brief ("宝宝", "狗"). When non-empty,
+     *  candidates whose VLM tags mention these get a meaningful boost. Same
+     *  scale as faceBonus / travelBonus so it competes with structural fit. */
+    mustHaveSubjects: List<String> = emptyList(),
   ): List<Candidate> {
     val sorted = eventAssets.sortedBy { it.takenEpochMs }
     if (sorted.isEmpty()) return emptyList()
@@ -69,6 +73,7 @@ object Recall {
         val roleHintFit = roleHintMatch(perc.vlmTags.narrativeRoleHint, request.role)
         val faceBonus = if (request.role == ShotRole.PORTRAIT && perc.faces.isNotEmpty()) 0.20f else 0f
         val travelBonus = TravelSceneScorer.assetScore(asset, perc) * travelWeight(request.role)
+        val subjectBoost = subjectMatchBoost(perc, mustHaveSubjects)
         // Score weights: VLM tag overlap is the dominant semantic signal (the analogue of
         // CLIP cosine pre-v4). Time fit + duration fit are structural correctness.
         // Sharpness breaks ties between otherwise-equal candidates.
@@ -79,6 +84,7 @@ object Recall {
           perc.sharpness * 0.07f +
           faceBonus +
           travelBonus +
+          subjectBoost +
           if (perc.vlmTags.scene.isBlank()) -0.10f else 0f  // soft penalty: VLM didn't tag this
         expandWindows(asset, perc, request, score).asSequence()
       }
@@ -86,7 +92,28 @@ object Recall {
       .take(k)
       .toList()
 
-    return scored.ifEmpty { relaxedFallback(request, eventAssets, perceptions, excludedAssetIds, k) }
+    return scored.ifEmpty { relaxedFallback(request, eventAssets, perceptions, excludedAssetIds, k, mustHaveSubjects) }
+  }
+
+  /** When user said "must include 宝宝/狗", boost assets whose VLM tags
+   *  (subjects/salient/action/scene) contain those keywords. Each match adds
+   *  0.18 (capped at 0.36 — three matches max benefit) so the signal can
+   *  override modest visual mismatches but not dominate completely. */
+  private fun subjectMatchBoost(perception: Perception, mustHaveSubjects: List<String>): Float {
+    if (mustHaveSubjects.isEmpty()) return 0f
+    val tags = perception.vlmTags
+    val haystack = buildString {
+      append(tags.scene); append(' ')
+      tags.subjects.forEach { append(it); append(' ') }
+      append(tags.action); append(' ')
+      append(tags.salient); append(' ')
+      append(tags.mood)
+    }.lowercase()
+    val hits = mustHaveSubjects.count { kw ->
+      val k = kw.trim().lowercase()
+      k.isNotEmpty() && k in haystack
+    }
+    return (hits * 0.18f).coerceAtMost(0.36f)
   }
 
   /**
@@ -142,6 +169,7 @@ object Recall {
     perceptions: Map<String, Perception>,
     excludedAssetIds: Set<String>,
     k: Int,
+    mustHaveSubjects: List<String> = emptyList(),
   ): List<Candidate> {
     val requestTokens = tokenize(request.visualRequirements + " " + request.moodTarget)
     return eventAssets
@@ -153,7 +181,8 @@ object Recall {
         val score = semanticOverlap(perc, requestTokens) * 0.45f +
           perc.sharpness * 0.30f +
           durationCompat(asset, request.durationSec) * 0.25f +
-          TravelSceneScorer.assetScore(asset, perc) * travelWeight(request.role)
+          TravelSceneScorer.assetScore(asset, perc) * travelWeight(request.role) +
+          subjectMatchBoost(perc, mustHaveSubjects)
         expandWindows(asset, perc, request, score)
       }
       .flatten()

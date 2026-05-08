@@ -48,6 +48,9 @@ class EditorAgent(
     directorTone: String = "",
     /** Director's chosen ColorGrade enum. NEUTRAL means "use ColorGradeFromTone keyword inference on directorTone". */
     directorColorGrade: ColorGrade = ColorGrade.NEUTRAL,
+    /** Subject keywords from UserBrief.mustHaveSubjects — boosts assets whose
+     *  VLM tags mention these in Recall scoring. Empty for auto events. */
+    mustHaveSubjects: List<String> = emptyList(),
   ): ShotSpec? {
     val candidates = Recall.topK(
       request = request,
@@ -56,6 +59,7 @@ class EditorAgent(
       perceptions = perceptions,
       excludedAssetIds = excludedAssetIds,
       k = 8,
+      mustHaveSubjects = mustHaveSubjects,
     )
     val grade = if (directorColorGrade != ColorGrade.NEUTRAL) directorColorGrade
                 else ColorGradeFromTone.pick(directorTone)

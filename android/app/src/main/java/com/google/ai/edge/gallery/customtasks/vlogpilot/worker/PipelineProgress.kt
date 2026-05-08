@@ -40,6 +40,26 @@ sealed interface PipelineProgress {
   data class EventStage(val eventId: String, val stage: String, val detail: String = "") : PipelineProgress
   data class EventDone(val eventId: String, val outputPath: String) : PipelineProgress
   data class EventFailed(val eventId: String, val message: String) : PipelineProgress
+  /** Iteration started — orchestrator is about to apply user feedback to an existing event. */
+  data class IterationStart(
+    val eventId: String,
+    val baseVersion: Int,
+    val targetVersion: Int,
+    val scope: String,            // "render_only" / "shot_level" / "global" / "mixed"
+  ) : PipelineProgress
+  /** Iteration progress — phase one of: parsing / rebuilding / rendering. */
+  data class IterationStage(
+    val eventId: String,
+    val phase: String,
+    val detail: String = "",
+  ) : PipelineProgress
+  data class IterationDone(
+    val eventId: String,
+    val targetVersion: Int,
+    val outputPath: String,
+    val changeSummary: String,
+  ) : PipelineProgress
+  data class IterationFailed(val eventId: String, val message: String) : PipelineProgress
   data object AllDone : PipelineProgress
   data class Failed(val message: String) : PipelineProgress
 }

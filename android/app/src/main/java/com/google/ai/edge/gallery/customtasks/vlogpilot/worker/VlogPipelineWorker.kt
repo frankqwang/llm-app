@@ -14,8 +14,10 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
+import androidx.work.Data
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
+import androidx.work.workDataOf
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.PowerPacer
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotRunConfig
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotModelRegistry
@@ -37,15 +39,20 @@ class VlogPipelineWorker(
 
   override suspend fun doWork(): androidx.work.ListenableWorker.Result {
     val runId = RUN_SEQ.incrementAndGet()
-    if (!ACTIVE.compareAndSet(false, true)) {
-      StateBreadcrumb.mark(applicationContext, "duplicate_worker", "run=$runId ignored; another VlogPipelineWorker is active")
+    val iterationModeCheck = inputData.getString(KEY_ITERATION_EVENT_ID) != null
+    // Iteration mode (RENDER_ONLY in Milestone A) doesn't load Gemma, so it's
+    // safe to run alongside the full pipeline. We only block duplicate FULL
+    // pipelines (not iterations) since multiple Gemma engines blow up memory.
+    if (!iterationModeCheck && !ACTIVE.compareAndSet(false, true)) {
+      StateBreadcrumb.mark(applicationContext, "duplicate_worker", "run=$runId ignored; another full pipeline is active")
       return androidx.work.ListenableWorker.Result.success()
     }
-    StateBreadcrumb.mark(applicationContext, "worker_start", "run=$runId id=$id attempt=$runAttemptCount")
+    StateBreadcrumb.mark(applicationContext, "worker_start", "run=$runId id=$id attempt=$runAttemptCount mode=${if (iterationModeCheck) "iterate" else "full"}")
     val runConfig = VlogPilotRunConfig.load(applicationContext)
     PowerPacer.setProfile(runConfig.powerProfile)
     PowerPacer.applyBackgroundThreadPriority()
     setForeground(initialForegroundInfo())
+    val iterationEventId = inputData.getString(KEY_ITERATION_EVENT_ID)
     return try {
       val gemma = VlogPilotModelRegistry.resolve(applicationContext) ?: run {
         val lastName = VlogPilotModelRegistry.lastEnqueuedModelName(applicationContext)
@@ -59,7 +66,7 @@ class VlogPipelineWorker(
         return androidx.work.ListenableWorker.Result.failure()
       }
       val orch = PipelineOrchestrator(applicationContext, gemma)
-      orch.run(windowDays = 30, runConfig = runConfig) { progress ->
+      val onProgress: suspend (PipelineProgress) -> Unit = { progress ->
         try {
           PipelineEventBus.publish(progress)
         } catch (t: Throwable) {
@@ -73,17 +80,36 @@ class VlogPipelineWorker(
           StateBreadcrumb.mark(applicationContext, "foreground_error", "${t::class.java.simpleName}: ${t.message}")
         }
       }
-      StateBreadcrumb.mark(applicationContext, "worker_success", "run=$runId")
+      if (iterationEventId != null) {
+        // Iteration mode: read staged feedback, apply, archive prior MP4, write new.
+        StateBreadcrumb.mark(applicationContext, "worker_iterate", "event=$iterationEventId")
+        val feedback = IterationStore.loadPending(applicationContext, iterationEventId) ?: run {
+          val msg = "no pending feedback for $iterationEventId"
+          StateBreadcrumb.mark(applicationContext, "iterate_no_pending", msg)
+          PipelineEventBus.publish(PipelineProgress.IterationFailed(iterationEventId, msg))
+          return androidx.work.ListenableWorker.Result.failure()
+        }
+        orch.iterate(iterationEventId, feedback, onProgress)
+      } else {
+        orch.run(windowDays = 30, runConfig = runConfig, onProgress = onProgress)
+      }
+      StateBreadcrumb.mark(applicationContext, "worker_success", "run=$runId mode=${if (iterationEventId != null) "iterate" else "full"}")
       androidx.work.ListenableWorker.Result.success()
     } catch (t: CancellationException) {
       StateBreadcrumb.mark(applicationContext, "worker_cancelled", "run=$runId ${t::class.java.simpleName}: ${t.message}")
       throw t
     } catch (t: Throwable) {
       StateBreadcrumb.mark(applicationContext, "worker_failed", "${t::class.java.simpleName}: ${t.message}")
-      PipelineEventBus.publish(PipelineProgress.Failed(t.message ?: t::class.java.simpleName))
+      val failureMsg = t.message ?: t::class.java.simpleName
+      val failureProgress: PipelineProgress = if (iterationEventId != null) {
+        PipelineProgress.IterationFailed(iterationEventId, failureMsg)
+      } else {
+        PipelineProgress.Failed(failureMsg)
+      }
+      PipelineEventBus.publish(failureProgress)
       androidx.work.ListenableWorker.Result.failure()
     } finally {
-      ACTIVE.set(false)
+      if (!iterationModeCheck) ACTIVE.set(false)
     }
   }
 
@@ -106,6 +132,10 @@ class VlogPipelineWorker(
       is PipelineProgress.EventStage -> "${p.eventId}: ${p.stage}"
       is PipelineProgress.EventDone -> "${p.eventId}: done"
       is PipelineProgress.EventFailed -> "${p.eventId}: failed"
+      is PipelineProgress.IterationStart -> "iterate ${p.eventId}: v${p.baseVersion}→v${p.targetVersion} (${p.scope})"
+      is PipelineProgress.IterationStage -> "iterate ${p.eventId}: ${p.phase}"
+      is PipelineProgress.IterationDone -> "iterate ${p.eventId}: v${p.targetVersion} done"
+      is PipelineProgress.IterationFailed -> "iterate ${p.eventId}: failed"
       PipelineProgress.AllDone -> "all done"
       is PipelineProgress.Failed -> "error: ${p.message}"
     }
@@ -130,10 +160,23 @@ class VlogPipelineWorker(
 
   companion object {
     const val WORK_NAME = "vlog_pilot_pipeline"
+    /** Iteration WorkRequests reuse the same Worker class but with a unique
+     *  WORK_NAME suffix per event so iterations on different events don't
+     *  cancel each other (KEEP policy). */
+    const val ITERATION_WORK_PREFIX = "vlog_pilot_iterate_"
+    /** inputData key — when present, the Worker runs iterate mode using
+     *  IterationStore.loadPending(context, eventId) instead of full run(). */
+    const val KEY_ITERATION_EVENT_ID = "vlog_pilot.iteration_event_id"
     private const val NOTIF_ID = 24601
     private const val CHANNEL_ID = "vlog_pilot_progress"
     private val ACTIVE = AtomicBoolean(false)
     private val RUN_SEQ = AtomicLong(0)
+
+    fun iterationInputData(eventId: String): Data =
+      workDataOf(KEY_ITERATION_EVENT_ID to eventId)
+
+    fun iterationWorkName(eventId: String): String =
+      "$ITERATION_WORK_PREFIX$eventId"
 
     fun ensureChannel(context: Context) {
       if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return

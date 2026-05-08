@@ -106,6 +106,13 @@ data class Event(
   val startEpochMs: Long,
   val endEpochMs: Long,
   val placeHint: String = "",
+  /** Non-null when this Event was constructed from a user curation request
+   *  rather than auto-segmented. EventSelector / EventScout skip these — they
+   *  don't compete with auto events for the maxEvents slot. */
+  val userCuration: UserCurationRequest? = null,
+  /** IntentParserAgent.parseInitial output. Populated lazily by the
+   *  orchestrator after Gemma is ready (intent parsing is a model call). */
+  val userBrief: UserBrief? = null,
 )
 
 // ---------------- step3 montage ----------------

@@ -219,6 +219,51 @@ color_grade 选择参考：温馨家人/亲情→warm；夜晚/海/雨→cool；
   // Critic — review timeline + storyboard, request patches
   // ============================================================================
 
+  // ============================================================================
+  // Intent Parser (user curation: free-text → structured UserBrief)
+  // ============================================================================
+
+  val INTENT_PARSER_INITIAL_SYSTEM = """
+你是把用户对短视频剪辑的自然语言需求，解析成结构化 JSON 的助手。
+用户会说一段中文（可能夹杂英文）的剪辑意图，可能涉及：主题/情绪/节奏/时长/必须出现的关键元素/要避免的内容/调色风格/字幕策略。
+
+请输出严格 JSON（不要 markdown，不要解释，不要照抄占位）：
+{
+  "hook": "<=20字 开场策略；用户没说就空串>",
+  "payoff": "<=25字 看完观众应有的情绪；用户没说就空串>",
+  "tone": "<=15字 整体调性，例如 怀旧/欢快/沉稳；没说就空串>",
+  "pace": "snappy|balanced|lingering|null",
+  "duration_sec": <整数 或 null>,
+  "must_have_subjects": ["<=5字 关键词", ...],
+  "avoid": ["<=10字 要避开的内容", ...],
+  "color_grade": "neutral|warm|cool|vibrant|muted|cinematic_teal_orange|vintage|null",
+  "caption_policy": "default|none|zh_only|bilingual"
+}
+
+规则：
+1. 用户没说的字段：字符串 → 空串；数值 → null；列表 → 空数组；枚举 → null（pace/color_grade）或 default（caption_policy）。
+2. **不要编造用户没说的内容**。比如用户没提到狗，就不要把"狗"加进 must_have_subjects。
+3. pace：用户说"快/精炼/抓眼球" → snappy；"慢/留白/沉浸/悠长" → lingering；其它/未提 → null（让 audience 决定）。
+4. duration_sec：仅识别明确数字（"30秒"/"45s"/"一分钟"=60）。模糊词（短一点/长一点）→ null。范围 [5, 120]，超出当 null。
+5. color_grade：用户说"温暖/暖色调"→warm；"清冷/冷色"→cool；"鲜艳/饱和"→vibrant；"复古/胶片"→vintage；"电影感/影调"→cinematic_teal_orange；"低饱和/雅致"→muted。
+6. caption_policy："不要字幕/无字幕"→none；"中英字幕/双语"→bilingual；"中文字幕"→zh_only；其它→default。
+7. must_have_subjects：5字以内简洁词，最多 4 项。
+8. avoid：用户说"别用XX/不要XX"，10字内描述要避开的内容，最多 4 项。
+
+示例（用户原文："做个30秒怀旧风的成长记录，必须有宝宝和狗，慢节奏，温暖调色，别用模糊的"）：
+{
+  "hook": "用最早的画面开场",
+  "payoff": "时间流过的温柔",
+  "tone": "怀旧温暖",
+  "pace": "lingering",
+  "duration_sec": 30,
+  "must_have_subjects": ["宝宝", "狗"],
+  "avoid": ["模糊"],
+  "color_grade": "warm",
+  "caption_policy": "default"
+}
+""".trimIndent()
+
   val CRITIC_SYSTEM = """
 你是审片人。我会给你：
 - DirectorBrief 摘要（标题 / tone / target_duration / narrative_arc）
