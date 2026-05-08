@@ -25,6 +25,8 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotModelRe
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.IterationFeedback
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.UserCurationRequest
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.CurationRequestStore
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.DecisionStore
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventDecisions
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventSelectionManifest
@@ -115,6 +117,14 @@ class VlogPilotViewModel @Inject constructor(
    *  IterationProgressBar above the Videos tab. */
   private val _activeIteration = MutableStateFlow<IterationSnapshot?>(null)
   val activeIteration: StateFlow<IterationSnapshot?> = _activeIteration.asStateFlow()
+
+  /** Recent assets list specifically loaded for CuratorScreen. Populated via
+   *  loadCuratorAssets() when the user opens the curator. Distinct from
+   *  Ready(assets, events) so the curator works regardless of pipeline state. */
+  private val _curatorAssets = MutableStateFlow<List<Asset>>(emptyList())
+  val curatorAssets: StateFlow<List<Asset>> = _curatorAssets.asStateFlow()
+  private val _curatorLoading = MutableStateFlow(false)
+  val curatorLoading: StateFlow<Boolean> = _curatorLoading.asStateFlow()
 
   private val collectedOutputs = mutableMapOf<String, String>()
   private var decisionRefreshJob: Job? = null
@@ -430,6 +440,69 @@ class VlogPilotViewModel @Inject constructor(
   /** Dismiss a finished or failed iteration banner. */
   fun dismissIterationStatus() {
     _activeIteration.value = null
+  }
+
+  /** Refresh the curator's asset list. Cheap if PhotoIngest already cached;
+   *  re-runs the MediaStore scan otherwise. Idempotent — safe to call from
+   *  CuratorScreen's onShow. */
+  fun loadCuratorAssets(windowDays: Int = 365) {
+    if (_curatorLoading.value) return
+    viewModelScope.launch {
+      _curatorLoading.value = true
+      val loaded = withContext(Dispatchers.IO) {
+        runCatching { PhotoIngest.loadRecent(appContext, windowDays) }.getOrDefault(emptyList())
+      }
+      _curatorAssets.value = loaded
+      _curatorLoading.value = false
+    }
+  }
+
+  /**
+   * Submit a user-curated story request. Stages the request to disk so the
+   * Worker can pick it up by requestId, then enqueues a curation WorkRequest.
+   *
+   * The eventId for the curated story is "user_<requestId>"; once the worker
+   * finishes, the new event will appear in Stories Shelf with the "你做的"
+   * badge and in Videos tab when the MP4 lands.
+   *
+   * Returns the requestId so the UI can navigate to a "your story is being
+   * made" state if it wants to show a confirmation.
+   */
+  fun submitCuratedRequest(
+    selectedAssetIds: List<String>,
+    intentText: String,
+    model: Model,
+  ): String {
+    val requestId = CurationRequestStore.computeRequestId(selectedAssetIds, intentText)
+    val request = UserCurationRequest(
+      requestId = requestId,
+      selectedAssetIds = selectedAssetIds,
+      intentText = intentText,
+      createdAtMs = System.currentTimeMillis(),
+    )
+    StateBreadcrumb.mark(appContext, "ui_curate_submit", "request=$requestId assets=${selectedAssetIds.size} intent=${intentText.take(40)}")
+    viewModelScope.launch {
+      withContext(Dispatchers.IO) { CurationRequestStore.stage(appContext, request) }
+      VlogPilotModelRegistry.stash(appContext, model)
+      VlogPipelineWorker.ensureChannel(appContext)
+      val req = OneTimeWorkRequestBuilder<VlogPipelineWorker>()
+        .setInputData(VlogPipelineWorker.curationInputData(requestId))
+        .build()
+      workManager.enqueueUniqueWork(
+        VlogPipelineWorker.curationWorkName(requestId),
+        ExistingWorkPolicy.KEEP,
+        req,
+      )
+      _state.value = PipelineState.Running("正在为你的素材创建故事")
+      _progress.value = progressWithRecent(
+        ProgressSnapshot(
+          headline = "已开始制作你挑的故事",
+          detail = "完成后会出现在视频里。${selectedAssetIds.size} 个素材，意图：${intentText.ifBlank { "AI 自由发挥" }.take(40)}",
+          stage = "curate_queued",
+        ),
+      )
+    }
+    return requestId
   }
 
   fun runFullPipeline(model: Model) {

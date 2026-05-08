@@ -120,6 +120,7 @@ internal fun StoryHeroCard(
   recentDecisions: List<EventDecisions>,
   onStartClick: () -> Unit,
   onVideosClick: () -> Unit,
+  onCurateClick: () -> Unit,
 ) {
   PanelCard {
     Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -143,6 +144,15 @@ internal fun StoryHeroCard(
       }
       Button(modifier = Modifier.fillMaxWidth(), onClick = onStartClick) {
         Text("开始挑故事")
+      }
+      // Secondary CTA — same level visually but "或者" framing makes it
+      // optional. Power users who already know what they want skip the auto
+      // discovery and go straight to curation.
+      androidx.compose.material3.TextButton(
+        modifier = Modifier.fillMaxWidth(),
+        onClick = onCurateClick,
+      ) {
+        Text("或者，我自己挑素材")
       }
       if (recentDecisions.isNotEmpty()) {
         HorizontalDivider()
@@ -701,6 +711,7 @@ internal fun StoryListItem(
           maxLines = 2,
           overflow = TextOverflow.Ellipsis,
         )
+        if (candidate.event.userCuration != null) UserCuratedBadge()
         StoryTinyStatus(candidate.status)
       }
       Text(
@@ -730,6 +741,24 @@ internal fun StoryListItem(
     Button(onClick = onToggle, enabled = enabled) {
       Text(if (selected) "已选" else "选")
     }
+  }
+}
+
+/** Tiny "你做的" tag rendered next to the title for user-curated stories.
+ *  Same shape as StoryTinyStatus so they sit neatly side by side. */
+@Composable
+internal fun UserCuratedBadge() {
+  Surface(
+    shape = RoundedCornerShape(7.dp),
+    color = MaterialTheme.colorScheme.tertiaryContainer,
+    contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+  ) {
+    Text(
+      "你做的",
+      modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+      style = MaterialTheme.typography.labelSmall,
+      fontWeight = FontWeight.SemiBold,
+    )
   }
 }
 

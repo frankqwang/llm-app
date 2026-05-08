@@ -127,6 +127,8 @@ fun VlogPilotScreen(
   val runConfig by viewModel.runConfig.collectAsState()
   val eventSelection by viewModel.eventSelection.collectAsState()
   val activeIteration by viewModel.activeIteration.collectAsState()
+  val curatorAssets by viewModel.curatorAssets.collectAsState()
+  val curatorLoading by viewModel.curatorLoading.collectAsState()
   val context = LocalContext.current
   var selectedTab by remember { mutableStateOf(VlogPilotTab.Stories) }
   var selectedAdvancedTab by remember { mutableStateOf(VlogPilotAdvancedTab.Process) }
@@ -135,6 +137,8 @@ fun VlogPilotScreen(
   var selectedStoryId by remember { mutableStateOf<String?>(null) }
   // When non-null, the bottom-sheet feedback editor is open targeting this event.
   var iterationSheetEventId by remember { mutableStateOf<String?>(null) }
+  // Full-screen curator overlay — when true, replaces the main tabbed view.
+  var curatorOpen by remember { mutableStateOf(false) }
   var pendingPermissionAction by remember { mutableStateOf<(() -> Unit)?>(null) }
 
   val perms = remember {
@@ -200,6 +204,26 @@ fun VlogPilotScreen(
   }
 
   val running = state is PipelineState.Running || state is PipelineState.Scanning
+
+  // Full-screen curator overlay — replaces the tabbed body when active. Dialogs
+  // (StoryDetail / IterationSheet) below this composable still render normally.
+  if (curatorOpen) {
+    CuratorScreen(
+      assets = curatorAssets,
+      loading = curatorLoading,
+      onBack = { curatorOpen = false },
+      onSubmit = { selectedIds, intentText ->
+        val model = selectedModelOrReport()
+        if (model != null) {
+          viewModel.submitCuratedRequest(selectedIds, intentText, model)
+          curatorOpen = false
+          selectedTab = VlogPilotTab.Videos
+        }
+      },
+    )
+    return
+  }
+
   LazyColumn(
     modifier = modifier
       .fillMaxSize()
@@ -235,6 +259,12 @@ fun VlogPilotScreen(
                 }
               },
               onVideosClick = { selectedTab = VlogPilotTab.Videos },
+              onCurateClick = {
+                requireAlbumPermission {
+                  viewModel.loadCuratorAssets()
+                  curatorOpen = true
+                }
+              },
             )
           }
 
