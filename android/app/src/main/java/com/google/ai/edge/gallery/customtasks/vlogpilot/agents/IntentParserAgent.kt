@@ -20,13 +20,20 @@ package com.google.ai.edge.gallery.customtasks.vlogpilot.agents
 
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.CaptionPolicy
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ColorGrade
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.FeedbackScope
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.GlobalRevision
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.IterationFeedback
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Pace
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.RenderOnlyPatch
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.RevisedRequest
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Timeline
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.UserBrief
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.UserCurationRequest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.floatOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -115,5 +122,180 @@ class IntentParserAgent(private val agent: AgentRuntime) {
     "zh_only" -> CaptionPolicy.ZH_ONLY
     "bilingual" -> CaptionPolicy.BILINGUAL
     else -> CaptionPolicy.DEFAULT
+  }
+
+  /** Optional CaptionPolicy parser — null when LLM emitted "null" / unknown.
+   *  Used for GlobalRevision/RenderOnlyPatch fields that are *meant* to be
+   *  null-signalled "leave it alone" rather than DEFAULT-snapped. */
+  private fun parseCaptionPolicyOrNull(s: String?): CaptionPolicy? = when (s?.trim()?.lowercase()) {
+    null, "", "null" -> null
+    "default" -> CaptionPolicy.DEFAULT
+    "none" -> CaptionPolicy.NONE
+    "zh_only" -> CaptionPolicy.ZH_ONLY
+    "bilingual" -> CaptionPolicy.BILINGUAL
+    else -> null
+  }
+
+  // ============================================================================
+  // parseFeedback (Milestone C — interpret the user's iteration feedback)
+  // ============================================================================
+
+  /**
+   * Refines a raw IterationFeedback by asking Gemma to interpret userText +
+   * targetedShotOrders + quickActions against the current timeline. The result
+   * has parsedScope set to the cheapest scope that satisfies the feedback,
+   * with parsedRevisions / parsedGlobal / parsedRenderPatch populated.
+   *
+   * Behavior contract:
+   *   - When userText is blank AND targetedShotOrders is empty, the LLM call
+   *     is skipped — the raw feedback (already enriched by client-side
+   *     IterationPlanner.fromQuickActions) is returned as-is.
+   *   - LLM failures fall back to the raw feedback (chip-derived path stays
+   *     valid). The user always gets *some* iteration even if parsing breaks.
+   *   - Any client-side parsedRenderPatch from chips is preserved by ORing
+   *     into the LLM's output (chips and text can co-exist as MIXED).
+   */
+  suspend fun parseFeedback(
+    raw: IterationFeedback,
+    currentTimeline: Timeline,
+  ): IterationFeedback {
+    val needsLlmParse = raw.userText.isNotBlank() || raw.targetedShotOrders.isNotEmpty()
+    if (!needsLlmParse) return raw
+
+    val timelineSummary = currentTimeline.shots.joinToString("\n") { s ->
+      val trim = s.videoTrim?.let { " trim=${"%.1f".format(it.startSec)}-${"%.1f".format(it.endSec)}s" }.orEmpty()
+      "  #${s.order} [${s.mediaType.name.lowercase()}] dur=${"%.1f".format(s.durationSec)}s$trim caption=\"${s.caption}\""
+    }
+    val targetedDesc = if (raw.targetedShotOrders.isEmpty()) "无（用户没点选具体镜头）"
+                       else raw.targetedShotOrders.joinToString(",")
+    val chipsDesc = if (raw.quickActions.isEmpty()) "无"
+                    else raw.quickActions.joinToString(",") { it.name.lowercase() }
+    val userMsg = """
+当前 timeline 镜头：
+$timelineSummary
+
+targeted_shot_orders: $targetedDesc
+快捷 chip: $chipsDesc
+
+用户原话：「${raw.userText}」
+
+请输出 IterationFeedback JSON。
+""".trimIndent()
+    val rawResponse = agent.ask(
+      systemPrompt = PromptStrings.INTENT_PARSER_FEEDBACK_SYSTEM,
+      userText = userMsg,
+      label = "intent_feedback",
+    )
+    val obj = try {
+      JsonExtractor.firstObject(rawResponse)?.let(json::parseToJsonElement)?.jsonObject
+    } catch (_: Throwable) {
+      null
+    } ?: return raw  // fall back to client-built feedback
+
+    val llmScope = parseFeedbackScope(obj["scope"]?.jsonPrimitive?.contentOrNull)
+    val llmGlobal = obj["global"]?.jsonObject?.takeIf { it.isNotEmpty() }?.let(::parseGlobalRevision)
+    val llmRenderPatch = obj["render_patch"]?.jsonObject?.takeIf { it.isNotEmpty() }?.let(::parseRenderOnlyPatch)
+    val llmRevisions = obj["revisions"]?.jsonArray
+      ?.mapNotNull { el -> parseRevision(el.jsonObject) }
+      ?.take(5)
+      .orEmpty()
+
+    // Combine LLM output with client-side chips. Chips that map to RenderOnlyPatch
+    // (REMOVE_CAPTIONS / CHANGE_COLOR_GRADE) are preserved if LLM didn't already
+    // override them — chips are "ground truth" for explicit user gestures.
+    val mergedRenderPatch = mergeRenderPatches(client = raw.parsedRenderPatch, llm = llmRenderPatch)
+    val mergedGlobal = llmGlobal ?: raw.parsedGlobal
+
+    // Determine final scope by what's actually present after merge.
+    val finalScope = computeScope(
+      llmHint = llmScope,
+      hasRevisions = llmRevisions.isNotEmpty(),
+      hasGlobal = mergedGlobal != null,
+      hasRenderPatch = mergedRenderPatch != null,
+    )
+    return raw.copy(
+      parsedScope = finalScope,
+      parsedRevisions = llmRevisions,
+      parsedGlobal = mergedGlobal,
+      parsedRenderPatch = mergedRenderPatch,
+    )
+  }
+
+  private fun parseFeedbackScope(s: String?): FeedbackScope? = when (s?.trim()?.lowercase()) {
+    "render_only" -> FeedbackScope.RENDER_ONLY
+    "shot_level" -> FeedbackScope.SHOT_LEVEL
+    "global" -> FeedbackScope.GLOBAL
+    "mixed" -> FeedbackScope.MIXED
+    else -> null
+  }
+
+  private fun computeScope(
+    llmHint: FeedbackScope?,
+    hasRevisions: Boolean,
+    hasGlobal: Boolean,
+    hasRenderPatch: Boolean,
+  ): FeedbackScope {
+    val nonRenderTouches = listOf(hasRevisions, hasGlobal).count { it }
+    return when {
+      nonRenderTouches == 0 && hasRenderPatch -> FeedbackScope.RENDER_ONLY
+      hasRevisions && hasGlobal -> FeedbackScope.MIXED
+      hasRevisions -> FeedbackScope.SHOT_LEVEL
+      hasGlobal -> FeedbackScope.GLOBAL
+      // No structural changes detected; trust LLM hint or fall back to render-only.
+      else -> llmHint ?: FeedbackScope.RENDER_ONLY
+    }
+  }
+
+  private fun parseGlobalRevision(obj: JsonObject): GlobalRevision? {
+    val durationRaw = obj["new_target_duration_sec"]?.jsonPrimitive?.floatOrNull
+    val newDuration = durationRaw?.takeIf { it in 5f..120f }
+    val newPace = parsePace(obj["new_pace"]?.jsonPrimitive?.contentOrNull)
+    val newTone = obj["new_tone"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+    val newGrade = parseColorGrade(obj["new_color_grade"]?.jsonPrimitive?.contentOrNull)
+    val captionPolicy = parseCaptionPolicyOrNull(obj["caption_policy"]?.jsonPrimitive?.contentOrNull)
+    val anyChange = newDuration != null || newPace != null || newTone != null || newGrade != null || captionPolicy != null
+    if (!anyChange) return null
+    return GlobalRevision(
+      newTargetDurationSec = newDuration,
+      newPace = newPace,
+      newTone = newTone,
+      newColorGrade = newGrade,
+      captionPolicy = captionPolicy,
+    )
+  }
+
+  private fun parseRenderOnlyPatch(obj: JsonObject): RenderOnlyPatch? {
+    val newGrade = parseColorGrade(obj["new_color_grade"]?.jsonPrimitive?.contentOrNull)
+    val captionPolicy = parseCaptionPolicyOrNull(obj["caption_policy"]?.jsonPrimitive?.contentOrNull)
+    val newBgmTone = obj["new_bgm_tone"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+    if (newGrade == null && captionPolicy == null && newBgmTone == null) return null
+    return RenderOnlyPatch(
+      newColorGrade = newGrade,
+      captionPolicy = captionPolicy,
+      newBgmTone = newBgmTone,
+    )
+  }
+
+  private fun parseRevision(obj: JsonObject): RevisedRequest? {
+    val order = obj["shot_order"]?.jsonPrimitive?.intOrNull ?: return null
+    val patchesObj = obj["patches"]?.jsonObject ?: return null
+    val patches = patchesObj.entries
+      .mapNotNull { (k, v) ->
+        val s = v.jsonPrimitive.contentOrNull?.trim() ?: return@mapNotNull null
+        if (s.isEmpty()) null else k to s
+      }
+      .toMap()
+    if (patches.isEmpty()) return null
+    return RevisedRequest(shotOrder = order, newRequest = null, patches = patches)
+  }
+
+  private fun mergeRenderPatches(client: RenderOnlyPatch?, llm: RenderOnlyPatch?): RenderOnlyPatch? {
+    if (client == null) return llm
+    if (llm == null) return client
+    return RenderOnlyPatch(
+      newColorGrade = llm.newColorGrade ?: client.newColorGrade,
+      captionPolicy = llm.captionPolicy ?: client.captionPolicy,
+      newBgmTone = llm.newBgmTone ?: client.newBgmTone,
+    )
   }
 }

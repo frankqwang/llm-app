@@ -303,12 +303,10 @@ class PipelineOrchestrator(
 
   /**
    * User-feedback iteration entry. Loads the existing event's persisted state,
-   * routes to the cheapest sub-path that satisfies the parsed feedback scope,
-   * archives the previous MP4, writes a new candidate, and records the version
-   * in IterationStore.
-   *
-   * Milestone A only implements RENDER_ONLY. SHOT_LEVEL / GLOBAL / MIXED throw
-   * UnsupportedOperationException — the worker turns those into IterationFailed.
+   * optionally refines the feedback via IntentParserAgent (for text /
+   * targeted-shot inputs), then dispatches to the cheapest sub-path that
+   * satisfies the parsed scope. Archives the prior MP4, writes a new
+   * candidate, and records the version in IterationStore.
    *
    * Top-level entry intentionally thin (landmine #1: keep run-like methods'
    * coroutine state machines under ART's 64K bytecode limit).
@@ -336,15 +334,13 @@ class PipelineOrchestrator(
       "iterate_start",
       "$eventId v$targetVersion scope=${feedback.parsedScope.name}",
     )
+    val needsLlmParse = feedback.userText.isNotBlank() || feedback.targetedShotOrders.isNotEmpty()
+    val needsAgent = needsLlmParse || feedback.parsedScope != FeedbackScope.RENDER_ONLY
     return try {
-      when (feedback.parsedScope) {
-        FeedbackScope.RENDER_ONLY -> runRenderOnly(eventId, feedback, targetVersion, progress)
-        FeedbackScope.SHOT_LEVEL,
-        FeedbackScope.GLOBAL,
-        FeedbackScope.MIXED -> {
-          progress(PipelineProgress.IterationFailed(eventId, "scope ${feedback.parsedScope.name.lowercase()} not yet implemented"))
-          IterationResult(eventId, null, targetVersion, "未实现")
-        }
+      if (!needsAgent) {
+        runRenderOnly(eventId, feedback, targetVersion, progress)
+      } else {
+        runIterationWithAgent(eventId, feedback, targetVersion, needsLlmParse, progress)
       }
     } catch (t: CancellationException) {
       throw t
@@ -355,6 +351,42 @@ class PipelineOrchestrator(
       IterationResult(eventId, null, targetVersion, "错误")
     }
   }
+
+  /**
+   * Boots Gemma once, optionally refines the feedback via IntentParserAgent,
+   * then dispatches to runShotLevel / runGlobal / runMixed (or back to
+   * runRenderOnly if the LLM refined the scope downward). Agent stays open
+   * for the whole call so we don't pay 15s init twice.
+   */
+  private suspend fun runIterationWithAgent(
+    eventId: String,
+    feedback: IterationFeedback,
+    targetVersion: Int,
+    needsLlmParse: Boolean,
+    progress: suspend (PipelineProgress) -> Unit,
+  ): IterationResult {
+    val agent = AgentRuntime(context, gemmaModel)
+    return try {
+      agent.ensureInitialized()
+      val refined = if (needsLlmParse) {
+        progress(PipelineProgress.IterationStage(eventId, "parse_feedback", "interpreting your text"))
+        val baseTimeline = loadBaseTimelineFor(eventId)
+          ?: throw IllegalStateException("no base timeline for $eventId — generate first")
+        IntentParserAgent(agent).parseFeedback(feedback, baseTimeline)
+      } else feedback
+      when (refined.parsedScope) {
+        FeedbackScope.RENDER_ONLY -> runRenderOnly(eventId, refined, targetVersion, progress)
+        FeedbackScope.SHOT_LEVEL -> runShotLevel(eventId, refined, targetVersion, agent, progress)
+        FeedbackScope.GLOBAL -> runGlobal(eventId, refined, targetVersion, agent, progress)
+        FeedbackScope.MIXED -> runMixed(eventId, refined, targetVersion, agent, progress)
+      }
+    } finally {
+      agent.close()
+    }
+  }
+
+  private fun loadBaseTimelineFor(eventId: String): Timeline? =
+    DecisionStore.loadEvent(context, eventId)?.let { d -> d.timelineFinal ?: d.timelineV1 }
 
   /**
    * RENDER_ONLY sub-path. No agent calls. Loads the base timeline + tone from
@@ -425,6 +457,254 @@ class PipelineOrchestrator(
       ),
     )
     return IterationResult(eventId, out.outputPath, targetVersion, renderInput.changeSummary)
+  }
+
+  /**
+   * SHOT_LEVEL sub-path. Loads cached director + timeline + perceptions, runs
+   * the existing applyRevisions on the LLM-parsed RevisedRequests, renders.
+   * No Critic loop — user feedback is the authoritative critique.
+   *
+   * Cost: per-revision Editor pickShot (~5-10s each) + render (~20-30s).
+   * Typical 1-2 revisions = ~30-60s total.
+   */
+  private suspend fun runShotLevel(
+    eventId: String,
+    feedback: IterationFeedback,
+    targetVersion: Int,
+    agent: AgentRuntime,
+    progress: suspend (PipelineProgress) -> Unit,
+  ): IterationResult {
+    progress(PipelineProgress.IterationStage(eventId, "load", "loading event state"))
+    val ctx = loadIterationContext(eventId)
+    if (feedback.parsedRevisions.isEmpty()) {
+      progress(PipelineProgress.IterationFailed(eventId, "no shot-level revisions parsed"))
+      return IterationResult(eventId, null, targetVersion, "无修改")
+    }
+    val editor = EditorAgent(context, agent)
+    progress(PipelineProgress.IterationStage(eventId, "editor", "re-picking ${feedback.parsedRevisions.size} shots"))
+    val newTimeline = applyRevisions(
+      base = ctx.baseTimeline,
+      revisions = feedback.parsedRevisions,
+      director = ctx.director,
+      event = ctx.event,
+      eventAssets = ctx.eventAssets,
+      perceptions = ctx.perceptions,
+      editor = editor,
+      mustHaveSubjects = ctx.mustHaveSubjects,
+    )
+    progress(PipelineProgress.IterationStage(eventId, "render", "rendering new cut"))
+    return renderAndRecord(
+      eventId = eventId,
+      feedback = feedback,
+      targetVersion = targetVersion,
+      timeline = newTimeline,
+      tone = ctx.director.tone,
+      assetMap = ctx.assetMap,
+      progress = progress,
+    )
+  }
+
+  /**
+   * GLOBAL sub-path. Patches the cached DirectorBrief with the user's
+   * GlobalRevision, then re-runs the Editor (buildTimeline) on the rescaled
+   * blueprint to get a fresh shot pick. The post-Editor caption / colorGrade
+   * overrides come last via applyGlobalToTimeline.
+   *
+   * Cost: full Editor sweep across all shots (~30-90s) + render (~20-30s).
+   * Typical 5-shot timeline = ~2-3 minutes.
+   */
+  private suspend fun runGlobal(
+    eventId: String,
+    feedback: IterationFeedback,
+    targetVersion: Int,
+    agent: AgentRuntime,
+    progress: suspend (PipelineProgress) -> Unit,
+  ): IterationResult {
+    val global = feedback.parsedGlobal
+    if (global == null) {
+      progress(PipelineProgress.IterationFailed(eventId, "no global revision parsed"))
+      return IterationResult(eventId, null, targetVersion, "无修改")
+    }
+    progress(PipelineProgress.IterationStage(eventId, "load", "loading event state"))
+    val ctx = loadIterationContext(eventId)
+    val effectivePace = global.newPace ?: ctx.audiencePace
+    val patchedDirector = IterationPlanner.applyGlobalToDirector(ctx.director, global, effectivePace)
+    val editor = EditorAgent(context, agent)
+    progress(PipelineProgress.IterationStage(eventId, "editor", "rebuilding shot picks at new pace"))
+    val rebuilt = buildTimeline(
+      blueprint = patchedDirector.shotBlueprint,
+      director = patchedDirector,
+      event = ctx.event,
+      eventAssets = ctx.eventAssets,
+      perceptions = ctx.perceptions,
+      editor = editor,
+      mustHaveSubjects = ctx.mustHaveSubjects,
+    )
+    val finalTimeline = IterationPlanner.applyGlobalToTimeline(rebuilt, global)
+    progress(PipelineProgress.IterationStage(eventId, "render", "rendering new cut"))
+    return renderAndRecord(
+      eventId = eventId,
+      feedback = feedback,
+      targetVersion = targetVersion,
+      timeline = finalTimeline,
+      tone = patchedDirector.tone,
+      assetMap = ctx.assetMap,
+      progress = progress,
+    )
+  }
+
+  /**
+   * MIXED sub-path. Run GLOBAL first to get a pace-rescaled rebuilt timeline,
+   * then layer the SHOT_LEVEL revisions on top. The shot orders in
+   * parsedRevisions reference the ORIGINAL timeline — Editor maps them back
+   * via applyRevisions's order-keyed lookup.
+   *
+   * Cost: full GLOBAL pass + per-revision Editor pickShot. ~3-4 minutes.
+   */
+  private suspend fun runMixed(
+    eventId: String,
+    feedback: IterationFeedback,
+    targetVersion: Int,
+    agent: AgentRuntime,
+    progress: suspend (PipelineProgress) -> Unit,
+  ): IterationResult {
+    val global = feedback.parsedGlobal
+    if (global == null) {
+      // Treat as pure shot-level if global is missing.
+      return runShotLevel(eventId, feedback, targetVersion, agent, progress)
+    }
+    progress(PipelineProgress.IterationStage(eventId, "load", "loading event state"))
+    val ctx = loadIterationContext(eventId)
+    val effectivePace = global.newPace ?: ctx.audiencePace
+    val patchedDirector = IterationPlanner.applyGlobalToDirector(ctx.director, global, effectivePace)
+    val editor = EditorAgent(context, agent)
+    progress(PipelineProgress.IterationStage(eventId, "editor", "rebuilding shot picks at new pace"))
+    val rebuilt = buildTimeline(
+      blueprint = patchedDirector.shotBlueprint,
+      director = patchedDirector,
+      event = ctx.event,
+      eventAssets = ctx.eventAssets,
+      perceptions = ctx.perceptions,
+      editor = editor,
+      mustHaveSubjects = ctx.mustHaveSubjects,
+    )
+    val withRevisions = if (feedback.parsedRevisions.isNotEmpty()) {
+      progress(PipelineProgress.IterationStage(eventId, "editor", "applying ${feedback.parsedRevisions.size} shot tweaks"))
+      applyRevisions(
+        base = rebuilt,
+        revisions = feedback.parsedRevisions,
+        director = patchedDirector,
+        event = ctx.event,
+        eventAssets = ctx.eventAssets,
+        perceptions = ctx.perceptions,
+        editor = editor,
+        mustHaveSubjects = ctx.mustHaveSubjects,
+      )
+    } else rebuilt
+    val finalTimeline = IterationPlanner.applyGlobalToTimeline(withRevisions, global)
+    progress(PipelineProgress.IterationStage(eventId, "render", "rendering new cut"))
+    return renderAndRecord(
+      eventId = eventId,
+      feedback = feedback,
+      targetVersion = targetVersion,
+      timeline = finalTimeline,
+      tone = patchedDirector.tone,
+      assetMap = ctx.assetMap,
+      progress = progress,
+    )
+  }
+
+  /** Bundle of cached event state needed by the iteration sub-paths. Loaded
+   *  once per iterate() call to keep DecisionStore I/O bounded. */
+  private data class IterationContext(
+    val event: Event,
+    val eventAssets: List<Asset>,
+    val assetMap: Map<String, Asset>,
+    val perceptions: Map<String, Perception>,
+    val director: DirectorBrief,
+    val audiencePace: Pace,
+    val baseTimeline: Timeline,
+    val mustHaveSubjects: List<String>,
+  )
+
+  private fun loadIterationContext(eventId: String): IterationContext {
+    val decisions = DecisionStore.loadEvent(context, eventId)
+      ?: throw IllegalStateException("event $eventId has no persisted decisions")
+    val event = decisions.event
+      ?: throw IllegalStateException("event $eventId missing event_inputs.json")
+    val director = decisions.director
+      ?: throw IllegalStateException("event $eventId has no director.json — generate first")
+    val baseTimeline = decisions.timelineFinal ?: decisions.timelineV1
+      ?: throw IllegalStateException("event $eventId has no timeline yet — generate first")
+    val eventAssets = event.assetIds.mapNotNull { id -> decisions.inputAssets.firstOrNull { it.id == id } }
+    val assetMap = decisions.inputAssets.associateBy { it.id }
+    val audiencePace = decisions.audience?.pace ?: Pace.BALANCED
+    val mustHaveSubjects = event.userBrief?.mustHaveSubjects.orEmpty()
+    return IterationContext(
+      event = event,
+      eventAssets = eventAssets,
+      assetMap = assetMap,
+      perceptions = decisions.inputPerceptions,
+      director = director,
+      audiencePace = audiencePace,
+      baseTimeline = baseTimeline,
+      mustHaveSubjects = mustHaveSubjects,
+    )
+  }
+
+  /** Common end-of-iteration: render → persist timeline_final + iter artifacts
+   *  → append IterationSummary → emit IterationDone progress. */
+  private suspend fun renderAndRecord(
+    eventId: String,
+    feedback: IterationFeedback,
+    targetVersion: Int,
+    timeline: Timeline,
+    tone: String,
+    assetMap: Map<String, Asset>,
+    progress: suspend (PipelineProgress) -> Unit,
+  ): IterationResult {
+    val renderer = VideoRenderer(context)
+    val out = renderer.render(timeline, assetMap, tone)
+    if (out == null) {
+      progress(PipelineProgress.IterationFailed(eventId, "render returned null"))
+      return IterationResult(eventId, null, targetVersion, IterationPlanner.describeChanges(feedback))
+    }
+    DecisionStore.writeTimelineFinal(context, eventId, out.timeline)
+    val iterId = "iter_%03d".format(targetVersion)
+    IterationStore.writeIterationArtifacts(
+      context = context,
+      eventId = eventId,
+      iterationId = iterId,
+      feedback = feedback,
+      timelineUsed = timeline,
+    )
+    val changeSummary = IterationPlanner.describeChanges(feedback)
+    IterationStore.appendIteration(
+      context,
+      eventId,
+      IterationSummary(
+        version = targetVersion,
+        mp4Path = out.outputPath,
+        createdAtMs = System.currentTimeMillis(),
+        feedbackText = feedback.userText,
+        changeSummary = changeSummary,
+      ),
+    )
+    IterationStore.clearPending(context, eventId)
+    StateBreadcrumb.mark(
+      context,
+      "iterate_done",
+      "$eventId v$targetVersion ${changeSummary}",
+    )
+    progress(
+      PipelineProgress.IterationDone(
+        eventId = eventId,
+        targetVersion = targetVersion,
+        outputPath = out.outputPath,
+        changeSummary = changeSummary,
+      ),
+    )
+    return IterationResult(eventId, out.outputPath, targetVersion, changeSummary)
   }
 
   /**

@@ -1,20 +1,28 @@
 /*
  * Copyright 2026 The pc-pilot v3 authors
  *
- * Tests Milestone A's RENDER_ONLY iteration path. Validates that:
- *   - QuickAction chip taps map to the expected RenderOnlyPatch
- *   - applyRenderOnly correctly mutates the timeline (caption strip, color grade swap)
- *   - GLOBAL-scope chips (FASTER/SLOWER) produce a no-op patch in Milestone A
- *   - changeSummary is human-readable and reflects what changed
+ * Tests Milestones A + C iteration logic. Validates that:
+ *   - QuickAction chip taps map to expected RenderOnlyPatch / GlobalRevision
+ *   - applyRenderOnly mutates timeline (caption strip, color grade swap)
+ *   - applyGlobalToDirector rescales blueprint durations + clamps to pace band
+ *   - applyGlobalToTimeline strips captions + overrides per-shot color grade
+ *   - describeChanges produces human-readable summaries
  */
 package com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline
 
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.CaptionPolicy
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ColorGrade
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.DirectorBrief
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.FeedbackScope
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.GlobalRevision
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.IterationFeedback
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Pace
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.QuickAction
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.RenderOnlyPatch
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.RevisedRequest
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRequest
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRole
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotSpec
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Timeline
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.TransitionKind
@@ -74,15 +82,62 @@ class IterationPlannerTest {
     assertEquals(ColorGrade.WARM, IterationPlanner.nextColorGrade(ColorGrade.MUTED))   // wraps
   }
 
-  @Test fun globalChipsAreNoOpInMilestoneA() {
+  @Test fun fasterChipProducesSnappyGlobalRevision() {
+    val fb = IterationPlanner.fromQuickActions(
+      iterationId = "iter_002",
+      baseTimelineVersion = 1,
+      actions = listOf(QuickAction.FASTER_OVERALL),
+      currentPace = Pace.BALANCED,
+    )
+    assertEquals(FeedbackScope.GLOBAL, fb.parsedScope)
+    assertNotNull(fb.parsedGlobal)
+    assertEquals(Pace.SNAPPY, fb.parsedGlobal?.newPace)
+    assertNotNull(fb.parsedGlobal?.newTargetDurationSec)
+  }
+
+  @Test fun slowerChipProducesLingeringGlobalRevision() {
+    val fb = IterationPlanner.fromQuickActions(
+      iterationId = "iter_002",
+      baseTimelineVersion = 1,
+      actions = listOf(QuickAction.SLOWER_OVERALL),
+      currentPace = Pace.BALANCED,
+    )
+    assertEquals(FeedbackScope.GLOBAL, fb.parsedScope)
+    assertEquals(Pace.LINGERING, fb.parsedGlobal?.newPace)
+  }
+
+  @Test fun fasterFromLingeringStepsToBalanced() {
+    val fb = IterationPlanner.fromQuickActions(
+      iterationId = "iter_002",
+      baseTimelineVersion = 1,
+      actions = listOf(QuickAction.FASTER_OVERALL),
+      currentPace = Pace.LINGERING,
+    )
+    assertEquals(Pace.BALANCED, fb.parsedGlobal?.newPace)
+  }
+
+  @Test fun bothFasterAndSlowerCancelOut() {
     val fb = IterationPlanner.fromQuickActions(
       iterationId = "iter_002",
       baseTimelineVersion = 1,
       actions = listOf(QuickAction.FASTER_OVERALL, QuickAction.SLOWER_OVERALL),
     )
-    // No RENDER_ONLY patch produced — these are GLOBAL-scope chips not yet wired.
-    assertNull(fb.parsedRenderPatch)
+    // Contradictory pace chips ignored — falls back to RENDER_ONLY no-op.
     assertNull(fb.parsedGlobal)
+    assertEquals(FeedbackScope.RENDER_ONLY, fb.parsedScope)
+  }
+
+  @Test fun mixedPaceAndCaptionChipsProduceMixed() {
+    val fb = IterationPlanner.fromQuickActions(
+      iterationId = "iter_002",
+      baseTimelineVersion = 1,
+      actions = listOf(QuickAction.FASTER_OVERALL, QuickAction.REMOVE_CAPTIONS),
+      currentPace = Pace.BALANCED,
+    )
+    assertEquals(FeedbackScope.MIXED, fb.parsedScope)
+    assertNotNull(fb.parsedGlobal)
+    assertNotNull(fb.parsedRenderPatch)
+    assertEquals(CaptionPolicy.NONE, fb.parsedRenderPatch?.captionPolicy)
   }
 
   @Test fun applyRenderOnly_stripsCaptionsWhenPolicyIsNone() {
@@ -117,5 +172,128 @@ class IterationPlannerTest {
     val out = IterationPlanner.applyRenderOnly(baseTimeline, "neutral", patch)
     assertEquals("upbeat", out.effectiveTone)
     assertTrue(out.changeSummary.contains("BGM"))
+  }
+
+  // ---- applyGlobalToDirector ----
+
+  private fun shotRequest(position: Int, durationSec: Float): ShotRequest =
+    ShotRequest(
+      position = position,
+      role = ShotRole.ESTABLISHING,
+      moodTarget = "中性",
+      visualRequirements = "占位",
+      durationSec = durationSec,
+    )
+
+  private fun director(durationSec: Float, blueprint: List<ShotRequest>): DirectorBrief =
+    DirectorBrief(
+      eventId = "evt1",
+      title = "测试",
+      tagline = null,
+      targetDurationSec = durationSec,
+      tone = "neutral",
+      narrativeArc = listOf("开场", "高潮", "收尾"),
+      shotBlueprint = blueprint,
+    )
+
+  @Test fun applyGlobalToDirector_rescalesShotDurationsProportionally() {
+    val base = director(20f, listOf(shotRequest(1, 4f), shotRequest(2, 6f), shotRequest(3, 4f), shotRequest(4, 6f)))
+    val out = IterationPlanner.applyGlobalToDirector(
+      base,
+      GlobalRevision(newTargetDurationSec = 30f, newPace = Pace.LINGERING),
+    )
+    // 30 falls in LINGERING band [22, 28], gets clamped to 28.
+    assertEquals(28f, out.targetDurationSec, 0.01f)
+    val rescale = 28f / 20f
+    val expected = listOf(4f * rescale, 6f * rescale, 4f * rescale, 6f * rescale)
+    out.shotBlueprint.zip(expected).forEach { (shot, want) ->
+      assertEquals(want.coerceIn(0.4f, 8f), shot.durationSec, 0.01f)
+    }
+  }
+
+  @Test fun applyGlobalToDirector_overridesToneAndColorGrade() {
+    val base = director(20f, listOf(shotRequest(1, 4f), shotRequest(2, 4f)))
+    val out = IterationPlanner.applyGlobalToDirector(
+      base,
+      GlobalRevision(newTone = "欢快", newColorGrade = ColorGrade.WARM),
+    )
+    assertEquals("欢快", out.tone)
+    assertEquals(ColorGrade.WARM, out.colorGrade)
+  }
+
+  @Test fun applyGlobalToDirector_withoutChangesReturnsEquivalentBrief() {
+    val base = director(20f, listOf(shotRequest(1, 4f)))
+    val out = IterationPlanner.applyGlobalToDirector(base, GlobalRevision())
+    assertEquals(base.targetDurationSec, out.targetDurationSec, 0.01f)
+    assertEquals(base.tone, out.tone)
+    assertEquals(base.colorGrade, out.colorGrade)
+    assertEquals(base.shotBlueprint.first().durationSec, out.shotBlueprint.first().durationSec, 0.01f)
+  }
+
+  // ---- applyGlobalToTimeline ----
+
+  @Test fun applyGlobalToTimeline_stripsCaptionsWhenPolicyIsNone() {
+    val out = IterationPlanner.applyGlobalToTimeline(
+      baseTimeline,
+      GlobalRevision(captionPolicy = CaptionPolicy.NONE),
+    )
+    assertTrue(out.shots.all { it.caption.isEmpty() })
+  }
+
+  @Test fun applyGlobalToTimeline_overridesAllShotColorGrades() {
+    val out = IterationPlanner.applyGlobalToTimeline(
+      baseTimeline,
+      GlobalRevision(newColorGrade = ColorGrade.VINTAGE),
+    )
+    assertTrue(out.shots.all { it.colorGrade == ColorGrade.VINTAGE })
+  }
+
+  @Test fun applyGlobalToTimeline_passesThroughWhenNoRenderOverrides() {
+    val out = IterationPlanner.applyGlobalToTimeline(
+      baseTimeline,
+      GlobalRevision(newPace = Pace.SNAPPY),  // doesn't affect timeline directly
+    )
+    assertEquals(baseTimeline, out)
+  }
+
+  // ---- describeChanges ----
+
+  @Test fun describeChanges_renderOnlyPatch() {
+    val fb = IterationFeedback(
+      iterationId = "iter_002",
+      baseTimelineVersion = 1,
+      parsedScope = FeedbackScope.RENDER_ONLY,
+      parsedRenderPatch = RenderOnlyPatch(captionPolicy = CaptionPolicy.NONE, newColorGrade = ColorGrade.WARM),
+    )
+    val summary = IterationPlanner.describeChanges(fb)
+    assertTrue(summary.contains("去字幕"))
+    assertTrue(summary.contains("调色"))
+  }
+
+  @Test fun describeChanges_globalRevision() {
+    val fb = IterationFeedback(
+      iterationId = "iter_002",
+      baseTimelineVersion = 1,
+      parsedScope = FeedbackScope.GLOBAL,
+      parsedGlobal = GlobalRevision(newTargetDurationSec = 18f, newPace = Pace.SNAPPY),
+    )
+    val summary = IterationPlanner.describeChanges(fb)
+    assertTrue(summary.contains("时长"))
+    assertTrue(summary.contains("节奏"))
+  }
+
+  @Test fun describeChanges_shotLevelLisesShotOrders() {
+    val fb = IterationFeedback(
+      iterationId = "iter_002",
+      baseTimelineVersion = 1,
+      parsedScope = FeedbackScope.SHOT_LEVEL,
+      parsedRevisions = listOf(
+        RevisedRequest(shotOrder = 3, patches = mapOf("duration_sec" to "2.0")),
+        RevisedRequest(shotOrder = 5, patches = mapOf("caption_text" to "再见")),
+      ),
+    )
+    val summary = IterationPlanner.describeChanges(fb)
+    assertTrue(summary.contains("#3"))
+    assertTrue(summary.contains("#5"))
   }
 }
