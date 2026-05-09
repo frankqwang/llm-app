@@ -23,6 +23,7 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotSpec
 import java.io.File
+import java.util.Locale
 
 object ShotRenderer {
 
@@ -32,6 +33,7 @@ object ShotRenderer {
   private const val FPS = 30
   private const val MAX_SLOWMO_NORMAL = 1.15f
   private const val MAX_SLOWMO_HIGHFPS = 1.75f
+  private const val MAX_SPEEDUP = 2.0f
   private const val HIGHFPS_THRESHOLD = 48f
 
   // Video encoder is picked at runtime by EncoderProbe — prefers
@@ -73,14 +75,31 @@ object ShotRenderer {
 
   // ---- image ----
 
-  private fun imageCmd(input: String, output: String, spec: ShotSpec, fontPath: String?): String {
-    val dur = spec.durationSec
-    val kbZoomExpr = when (spec.kenBurns) {
-      "in" -> "z='min(zoom+0.0007,1.08)'"
-      "out" -> "z='if(eq(on,0),1.08,max(zoom-0.0007,1.0))'"
+  // zoompan iterates `on` from 0..durFrames-1. zoom-in/out drift linearly to
+  // the requested kbZoom level over the shot's duration; pan modes hold zoom
+  // at kbZoom and sweep x across the `iw - iw/zoom` margin. y stays centered.
+  // Director controls the travel intensity via ShotSpec.kenBurnsZoom (range
+  // ~1.0..1.20); we clamp here to keep the crop margin numerically safe.
+  private fun kenBurnsExpr(mode: String, durFrames: Int, requestedZoom: Float): String {
+    val maxOn = (durFrames - 1).coerceAtLeast(1)
+    val zoom = requestedZoom.coerceIn(1.0f, 1.20f)
+    val delta = (zoom - 1.0f).coerceAtLeast(0.001f)
+    val zoomS = "%.4f".format(Locale.US, zoom)
+    val deltaS = "%.4f".format(Locale.US, delta)
+    return when (mode) {
+      "in" -> "z='1+$deltaS*on/$maxOn'"
+      "out" -> "z='1+$deltaS*(1-on/$maxOn)'"
+      "pan_left" -> "z=$zoomS:x='(iw-iw/zoom)*(1-on/$maxOn)':y='(ih-ih/zoom)/2'"
+      "pan_right" -> "z=$zoomS:x='(iw-iw/zoom)*on/$maxOn':y='(ih-ih/zoom)/2'"
       else -> "z=1.025"
     }
-    val zoompan = "zoompan=$kbZoomExpr:d=${(dur * FPS).toInt()}:s=${OUT_W}x${OUT_H}:fps=$FPS"
+  }
+
+  private fun imageCmd(input: String, output: String, spec: ShotSpec, fontPath: String?): String {
+    val dur = spec.durationSec
+    val durFrames = (dur * FPS).toInt().coerceAtLeast(2)
+    val kbExpr = kenBurnsExpr(spec.kenBurns, durFrames, spec.kenBurnsZoom)
+    val zoompan = "zoompan=$kbExpr:d=$durFrames:s=${OUT_W}x${OUT_H}:fps=$FPS"
     val grade = ColorGradeFilter.forGrade(spec.colorGrade).let { if (it.isEmpty()) "" else ",$it" }
     val polish = ",${ColorGradeFilter.polishLayer()}"
     val caption = CaptionFilter.build(spec.caption, dur, fontPath).let { if (it.isEmpty()) "" else ",$it" }
@@ -102,14 +121,23 @@ object ShotRenderer {
     val srcWindow = trim?.let { (it.endSec - it.startSec).coerceAtLeast(0.4f) } ?: srcDur
 
     val want = spec.durationSec
-    // setpts factor: >1 → slow-mo, capped to `cap`.
+    // setpts factor: >1 = slow, <1 = fast. Existing logic auto-stretches when
+    // source < target (rawStretch >= 1). Director's speedFactor (1/x model:
+    // 0.5 = half-speed, 2.0 = double-speed) layers a multiplicative bias on
+    // top, then we clamp into [1/MAX_SPEEDUP .. cap] so the encoder doesn't
+    // get asked for impossible rates.
+    val sf = spec.speedFactor.coerceIn(0.5f, MAX_SPEEDUP)
     val rawStretch = (want / srcWindow).coerceAtLeast(1f)
-    val ptsFactor = rawStretch.coerceAtMost(cap)
+    val ptsFactor = (rawStretch / sf).coerceIn(1f / MAX_SPEEDUP, cap)
     val effectiveDur = (srcWindow * ptsFactor).coerceAtMost(want)
 
     val needsSlowmo = ptsFactor > 1.01f
-    val setpts = if (needsSlowmo) "setpts=${ptsFactor}*PTS,minterpolate=fps=$FPS:mi_mode=blend"
-                 else "fps=$FPS"
+    val isSpeedup = ptsFactor < 0.99f
+    val setpts = when {
+      needsSlowmo -> "setpts=${"%.3f".format(Locale.US, ptsFactor)}*PTS,minterpolate=fps=$FPS:mi_mode=blend"
+      isSpeedup -> "setpts=${"%.3f".format(Locale.US, ptsFactor)}*PTS,fps=$FPS"
+      else -> "fps=$FPS"
+    }
     // 9:16 blurred-bg compose: split, blur+scale to 1080x1920, scale fg to fit, overlay center.
     val blurredCompose = "split[bg][fg];" +
       "[bg]scale=$OUT_W:$OUT_H:force_original_aspect_ratio=increase,crop=$OUT_W:$OUT_H,boxblur=24:1[bg2];" +

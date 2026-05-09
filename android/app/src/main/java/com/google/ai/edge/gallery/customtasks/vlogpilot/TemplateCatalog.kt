@@ -120,6 +120,49 @@ internal object TemplateCatalog {
         TemplateSlot(5, ShotRole.CLOSING, 2.2f, "收尾", "离开、回头或安静画面", TemplateSubjectPolicy.PROTAGONIST, "fadewhite", "out"),
       ),
     ),
+    // Long-form template: a multi-day or multi-scene trip that benefits from a
+    // larger structure than the 5-slot daily/travel_memory. Keywords are picked
+    // to NOT overlap with travel_memory — "多日 / 行程 / 自驾" should win against
+    // a generic "旅行" alone, but a quick weekend trip stays on travel_memory.
+    VlogTemplate(
+      id = "travel_long",
+      label = "长行程旅程",
+      storyKeywords = setOf("多日", "长途", "远行", "行程", "全程", "路线", "沿途", "自驾", "公路", "road_trip", "multi_day", "journey", "tour"),
+      defaultPace = Pace.LINGERING,
+      bgmTone = "cinematic",
+      slots = listOf(
+        TemplateSlot(1, ShotRole.OPENING, 2.4f, "出发", "出发或抵达的第一帧，明确旅程开始", TemplateSubjectPolicy.ENVIRONMENT, "fade", "in", "上路"),
+        TemplateSlot(2, ShotRole.ESTABLISHING, 2.6f, "路线", "沿途风景或交通工具，建立空间感", TemplateSubjectPolicy.ENVIRONMENT, "crossfade", "pan_right"),
+        TemplateSlot(3, ShotRole.PORTRAIT, 2.6f, "同行者", "同行人物的自然神情或背影", TemplateSubjectPolicy.PROTAGONIST, "cut"),
+        TemplateSlot(4, ShotRole.ACTION, 2.8f, "在路上", "走路、上车、远眺或玩耍动作", TemplateSubjectPolicy.ACTION, "smoothleft"),
+        TemplateSlot(5, ShotRole.TRANSITION, 2.4f, "节点", "中途停留或环境转换镜头", TemplateSubjectPolicy.ENVIRONMENT, "slideleft", "pan_left"),
+        TemplateSlot(6, ShotRole.ACTION, 2.6f, "继续", "第二段动作或互动，避免与第 4 重复", TemplateSubjectPolicy.AVOID_REPEAT, "cut"),
+        TemplateSlot(7, ShotRole.CLIMAX, 3.4f, "目的地高光", "最像旅程记忆的画面或情绪峰值", TemplateSubjectPolicy.AVOID_REPEAT, "zoomin", "in", "到了"),
+        TemplateSlot(8, ShotRole.CLOSING, 2.6f, "告别", "离开、远景或夜色收尾", TemplateSubjectPolicy.ENVIRONMENT, "fadewhite", "out"),
+      ),
+    ),
+    // Long-form template: gatherings/celebrations with multiple distinct beats
+    // (greeting → activity → reaction → climax → group photo). Keywords pick up
+    // weddings, birthdays, parties, festivals — events where 5 slots feel
+    // truncated.
+    VlogTemplate(
+      id = "event_recap",
+      label = "聚会/庆典",
+      storyKeywords = setOf("婚礼", "生日", "派对", "庆祝", "聚会", "节日", "周年", "毕业", "庆典", "宴", "party", "wedding", "birthday", "anniversary", "celebration", "gathering", "festival"),
+      defaultPace = Pace.LINGERING,
+      bgmTone = "vibrant",
+      slots = listOf(
+        TemplateSlot(1, ShotRole.OPENING, 2.4f, "到场", "现场入口或人物出现的第一帧", TemplateSubjectPolicy.GROUP, "fade", "in", "今天的主角"),
+        TemplateSlot(2, ShotRole.ESTABLISHING, 2.4f, "现场", "布置、场地或氛围细节", TemplateSubjectPolicy.ENVIRONMENT, "crossfade", "pan_right"),
+        TemplateSlot(3, ShotRole.PORTRAIT, 2.6f, "主角", "今日主角的自然神情或近景", TemplateSubjectPolicy.PROTAGONIST, "cut"),
+        TemplateSlot(4, ShotRole.ACTION, 2.4f, "互动一", "聊天、玩闹、敬酒、拥抱等互动", TemplateSubjectPolicy.ACTION, "slideleft"),
+        TemplateSlot(5, ShotRole.PORTRAIT, 2.6f, "反应", "其他人的反应或情绪流露", TemplateSubjectPolicy.AVOID_REPEAT, "cut"),
+        TemplateSlot(6, ShotRole.ACTION, 2.6f, "互动二", "第二段互动，避免与第 4 重复", TemplateSubjectPolicy.AVOID_REPEAT, "smoothright"),
+        TemplateSlot(7, ShotRole.CLIMAX, 3.4f, "高光时刻", "切蛋糕/敬酒/拍合影等情绪峰值", TemplateSubjectPolicy.GROUP, "zoomin", "in", "这一刻"),
+        TemplateSlot(8, ShotRole.PORTRAIT, 2.6f, "大家", "群像或全员合影", TemplateSubjectPolicy.GROUP, "circleopen"),
+        TemplateSlot(9, ShotRole.CLOSING, 2.8f, "散场", "灯光、空场或安静收尾", TemplateSubjectPolicy.ENVIRONMENT, "fadewhite", "out"),
+      ),
+    ),
   )
 
   fun byId(id: String?): VlogTemplate =

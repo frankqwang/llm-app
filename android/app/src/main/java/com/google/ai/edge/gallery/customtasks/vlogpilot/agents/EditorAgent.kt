@@ -77,28 +77,38 @@ class EditorAgent(
       return composeSpec(order, request, candidates[0], "high-confidence recall pick", grade)
     }
 
-    val visualCandidates = candidates.mapNotNull { candidate ->
+    val visualCandidates = candidates.take(MAX_VISUAL_CANDIDATES).mapNotNull { candidate ->
       loadCandidateBitmap(candidate)?.let { candidate to it }
     }
     if (visualCandidates.isEmpty()) {
       return candidates.firstOrNull()?.let { composeSpec(order, request, it, "thumbnail load failed; fallback to top recall", grade) }
     }
-    val thumbs = visualCandidates.map { it.second }
+    if (visualCandidates.size == 1) {
+      val only = visualCandidates.first()
+      only.second.recycle()
+      return composeSpec(order, request, only.first, "only visual candidate after thumbnail load", grade)
+    }
     val tagSummary = visualCandidates.withIndex().joinToString("\n") { (i, pair) ->
       val tags = pair.first.perception.vlmTags
       val video = pair.first.perception.videoInsight
+      val desc = tags.visualDescription.takeIf { it.isNotBlank() }
+        ?: video.visualDescription.takeIf { it.isNotBlank() }
+        ?: tags.salient.takeIf { it.isNotBlank() }
+        ?: video.summary.takeIf { it.isNotBlank() }
       val parts = listOfNotNull(
-        tags.scene.takeIf { it.isNotBlank() }?.let { "scene=$it" },
-        tags.action.takeIf { it.isNotBlank() }?.let { "action=$it" },
-        tags.mood.takeIf { it.isNotBlank() }?.let { "mood=$it" },
-        tags.salient.takeIf { it.isNotBlank() }?.let { "salient=$it" },
-        video.summary.takeIf { it.isNotBlank() }?.let { "video=$it" },
+        desc?.let { "描述=$it" },
+        tags.composition.takeIf { it.isNotBlank() }?.let { "构图=$it" },
+        tags.lighting.takeIf { it.isNotBlank() }?.let { "光线=$it" },
+        tags.motionHint.takeIf { it.isNotBlank() }?.let { "动态=$it" },
+        video.cameraWork.takeIf { it.isNotBlank() }?.let { "镜头=$it" },
+        video.pacing.takeIf { it.isNotBlank() }?.let { "节奏=$it" },
         video.bestMomentSec.takeIf { it > 0f }?.let { "best=${"%.1f".format(it)}s" },
         pair.first.videoTrim?.let { "trim=${"%.1f".format(it.startSec)}-${"%.1f".format(it.endSec)}s ${pair.first.windowReason}" },
-        tags.subjects.takeIf { it.isNotEmpty() }?.let { "subjects=${it.joinToString("、")}" },
       )
       "  ${i + 1}. ${parts.joinToString(" / ").ifBlank { "(no tags)" }}"
     }
+    val contactSheet = buildCandidateContactSheet(visualCandidates)
+    visualCandidates.forEach { (_, bitmap) -> bitmap.recycle() }
     val userMsg = """
 当前 slot：role=${request.role}; mood=${request.moodTarget}; visual_req=${request.visualRequirements}
 previous_shot_summary: $previousShot
@@ -106,14 +116,13 @@ previous_shot_summary: $previousShot
 候选标签（VLM 已经看过每张图，结构化摘要）：
 $tagSummary
 
-请综合标签 + 缩略图视觉，从 ${thumbs.size} 张候选中选 1 张（编号 1..${thumbs.size}）。
-图和标签矛盾时以图为准。
+候选都在同一张编号接触表里，请综合标签和缩略图，从 ${visualCandidates.size} 个候选中选 1 个（编号 1..${visualCandidates.size}）。
+请输出 chosen_index，对应接触表上的数字编号；图和标签冲突时以图为准。
 """.trimIndent()
     val raw = try {
-      agent.ask(systemPrompt = PromptStrings.EDITOR_SYSTEM, userText = userMsg, images = thumbs, label = "editor")
+      agent.ask(systemPrompt = PromptStrings.EDITOR_SYSTEM, userText = userMsg, images = listOf(contactSheet), label = "editor")
     } finally {
-      // Free thumbnail bitmaps once they've been encoded into the inference request.
-      thumbs.forEach { runCatching { it.recycle() } }
+      contactSheet.recycle()
     }
     val obj = try { JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject } catch (_: Throwable) { null }
     // Coerce chosen_index into [0, size-1] before using it. Gemma 4 E2B occasionally
@@ -138,6 +147,53 @@ $tagSummary
     val runnerUp = candidates.drop(1).firstOrNull { it.asset.id != top.asset.id } ?: candidates.getOrNull(1)
     val gap = top.score - (runnerUp?.score ?: 0f)
     return top.score >= 0.74f && gap >= 0.18f
+  }
+
+  private fun buildCandidateContactSheet(visualCandidates: List<Pair<Recall.Candidate, Bitmap>>): Bitmap {
+    val count = visualCandidates.size.coerceAtLeast(1)
+    val cols = if (count <= 2) count else 2
+    val rows = ((count + cols - 1) / cols).coerceAtLeast(1)
+    val sheet = Bitmap.createBitmap(cols * CANDIDATE_CELL_W, rows * CANDIDATE_CELL_H, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(sheet).apply { drawColor(Color.rgb(12, 12, 12)) }
+    visualCandidates.forEachIndexed { index, (_, bitmap) ->
+      val col = index % cols
+      val row = index / cols
+      val x = col * CANDIDATE_CELL_W
+      val y = row * CANDIDATE_CELL_H
+      drawCandidateCell(canvas, bitmap, x, y)
+      drawCandidateBadge(canvas, x.toFloat(), y.toFloat(), index + 1)
+    }
+    return sheet
+  }
+
+  private fun drawCandidateCell(canvas: Canvas, bitmap: Bitmap, x: Int, y: Int) {
+    val srcAspect = bitmap.width.toFloat() / bitmap.height.toFloat().coerceAtLeast(1f)
+    val dstAspect = CANDIDATE_CELL_W.toFloat() / CANDIDATE_CELL_H.toFloat()
+    val src = if (srcAspect > dstAspect) {
+      val cropW = (bitmap.height * dstAspect).toInt().coerceAtLeast(1)
+      val left = ((bitmap.width - cropW) / 2).coerceAtLeast(0)
+      Rect(left, 0, (left + cropW).coerceAtMost(bitmap.width), bitmap.height)
+    } else {
+      val cropH = (bitmap.width / dstAspect).toInt().coerceAtLeast(1)
+      val top = ((bitmap.height - cropH) / 2).coerceAtLeast(0)
+      Rect(0, top, bitmap.width, (top + cropH).coerceAtMost(bitmap.height))
+    }
+    val dst = Rect(x, y, x + CANDIDATE_CELL_W, y + CANDIDATE_CELL_H)
+    canvas.drawBitmap(bitmap, src, dst, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+  }
+
+  private fun drawCandidateBadge(canvas: Canvas, x: Float, y: Float, index: Int) {
+    val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(230, 255, 122, 24) }
+    val rect = RectF(x + 10f, y + 10f, x + 56f, y + 56f)
+    canvas.drawRoundRect(rect, 20f, 20f, bg)
+    val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.WHITE
+      typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+      textSize = 25f
+      textAlign = Paint.Align.CENTER
+    }
+    val cy = rect.centerY() - (textPaint.descent() + textPaint.ascent()) / 2f
+    canvas.drawText(index.toString(), rect.centerX(), cy, textPaint)
   }
 
   private fun loadCandidateBitmap(candidate: Recall.Candidate): Bitmap? =
@@ -257,10 +313,16 @@ $tagSummary
       rationale = listOf(rationale, candidate.windowReason.takeIf { it.isNotBlank() }?.let { "window: $it" })
         .filterNotNull()
         .joinToString(" / "),
+      speedFactor = request.speedHint.coerceIn(0.5f, 1.75f),
+      kenBurnsZoom = request.kenBurnsIntensity.coerceIn(1.0f, 1.20f),
+      cutReason = request.cutReason,
     )
   }
 
   companion object {
+    private const val MAX_VISUAL_CANDIDATES = 4
+    private const val CANDIDATE_CELL_W = 300
+    private const val CANDIDATE_CELL_H = 420
     private const val VIDEO_STRIP_CELL_W = 220
     private const val VIDEO_STRIP_CELL_H = 300
 
@@ -290,17 +352,28 @@ $tagSummary
     private fun transitionFor(order: Int, raw: String): TransitionKind {
       val key = raw.trim().lowercase()
       if (key.isBlank()) return if (order == 1) TransitionKind.FADE else TransitionKind.CUT
-      val requested = TRANSITION_MAP[key] ?: return if (order == 1) TransitionKind.FADE else TransitionKind.CUT
-      return when (requested) {
-        TransitionKind.SLIDELEFT,
-        TransitionKind.SLIDERIGHT,
-        TransitionKind.CIRCLEOPEN,
-        TransitionKind.CIRCLECLOSE,
-        TransitionKind.ZOOMIN,
-        TransitionKind.SMOOTHLEFT,
-        TransitionKind.SMOOTHRIGHT -> TransitionKind.CROSSFADE
-        else -> requested
+      return TRANSITION_MAP[key] ?: if (order == 1) TransitionKind.FADE else TransitionKind.CUT
+    }
+
+    /**
+     * Post-process: if 3+ consecutive shots share the same transition, break the
+     * chain to keep visual variety. Pick CUT for short shots (< 2s) where a
+     * fade would feel like dragging, otherwise FADE. Order-1 is left alone
+     * since it's the opener.
+     */
+    fun enforceTransitionDiversity(shots: List<ShotSpec>): List<ShotSpec> {
+      if (shots.size < 3) return shots
+      val out = shots.toMutableList()
+      for (i in 2 until out.size) {
+        val a = out[i].transitionIn
+        if (a == out[i - 1].transitionIn && a == out[i - 2].transitionIn) {
+          val replacement = if (out[i].durationSec < 2f) TransitionKind.CUT else TransitionKind.FADE
+          if (replacement != a) {
+            out[i] = out[i].copy(transitionIn = replacement)
+          }
+        }
       }
+      return out
     }
 
     private fun normalizeKenBurns(raw: String): String =

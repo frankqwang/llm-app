@@ -44,16 +44,17 @@ import androidx.compose.material.icons.outlined.HourglassEmpty
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Subtitles
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
+import com.google.ai.edge.gallery.customtasks.vlogpilot.ui.PrimaryActionButton
+import com.google.ai.edge.gallery.customtasks.vlogpilot.ui.PressableSurface
+import com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -103,24 +104,33 @@ internal fun IterationSheet(
   val currentPace = decisions.audience?.pace ?: Pace.BALANCED
   val canSubmit = selectedActions.isNotEmpty() || feedbackText.isNotBlank() || targetedShotOrder != null
 
-  ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+  ModalBottomSheet(
+    onDismissRequest = onDismiss,
+    sheetState = sheetState,
+    containerColor = MaterialTheme.colorScheme.background,
+    dragHandle = { IosDragHandle() },
+  ) {
     Column(
       modifier = Modifier
         .fillMaxWidth()
-        .padding(horizontal = 20.dp, vertical = 12.dp),
-      verticalArrangement = Arrangement.spacedBy(14.dp),
+        .padding(horizontal = VlogPilotTokens.spacing.xl, vertical = VlogPilotTokens.spacing.sm),
+      verticalArrangement = Arrangement.spacedBy(VlogPilotTokens.spacing.lg),
     ) {
-      Text(
-        "想怎么改？",
-        style = MaterialTheme.typography.titleLarge,
-        fontWeight = FontWeight.SemiBold,
-      )
-      if (shots.isNotEmpty()) {
+      Column(verticalArrangement = Arrangement.spacedBy(VlogPilotTokens.spacing.xs)) {
         Text(
-          "点你想改的那一格（不点就改整片）。",
-          style = MaterialTheme.typography.bodySmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          "想怎么改？",
+          style = MaterialTheme.typography.headlineSmall,
+          fontWeight = FontWeight.Bold,
         )
+        if (shots.isNotEmpty()) {
+          Text(
+            "点想改的那一格，不点就改整片",
+            style = MaterialTheme.typography.bodyMedium,
+            color = VlogPilotTokens.colors.secondaryLabel,
+          )
+        }
+      }
+      if (shots.isNotEmpty()) {
         StoryboardGrid(
           shots = shots,
           assetMap = assetMap,
@@ -142,55 +152,69 @@ internal fun IterationSheet(
             } else {
               "比如：整体太慢，做成欢快的（不写也行）"
             },
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = VlogPilotTokens.colors.tertiaryLabel,
           )
         },
+        shape = RoundedCornerShape(14.dp),
         maxLines = 4,
+        colors = OutlinedTextFieldDefaults.colors(
+          unfocusedBorderColor = VlogPilotTokens.colors.opaqueSeparator,
+          focusedBorderColor = VlogPilotTokens.colors.accent,
+          unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+          focusedContainerColor = MaterialTheme.colorScheme.surface,
+        ),
       )
 
-      // 4 quick chips arranged 2x2 so the labels stay readable.
-      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+      // 4 quick toggle chips — tinted with semantic colors so each action's
+      // category is obvious at a glance (pace = blue, caption = gray, color = pink).
+      Column(verticalArrangement = Arrangement.spacedBy(VlogPilotTokens.spacing.sm)) {
         Row(
           modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
+          horizontalArrangement = Arrangement.spacedBy(VlogPilotTokens.spacing.sm),
         ) {
-          QuickActionChip(
+          IosToggleChip(
             label = "更快",
             icon = Icons.Outlined.FastForward,
             selected = QuickAction.FASTER_OVERALL in selectedActions,
+            tint = VlogPilotTokens.colors.accent,
             onClick = { selectedActions = selectedActions.toggle(QuickAction.FASTER_OVERALL) },
             modifier = Modifier.weight(1f),
           )
-          QuickActionChip(
+          IosToggleChip(
             label = "更慢",
             icon = Icons.Outlined.HourglassEmpty,
             selected = QuickAction.SLOWER_OVERALL in selectedActions,
+            tint = VlogPilotTokens.colors.systemPurple,
             onClick = { selectedActions = selectedActions.toggle(QuickAction.SLOWER_OVERALL) },
             modifier = Modifier.weight(1f),
           )
         }
         Row(
           modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
+          horizontalArrangement = Arrangement.spacedBy(VlogPilotTokens.spacing.sm),
         ) {
-          QuickActionChip(
+          IosToggleChip(
             label = "去字幕",
             icon = Icons.Outlined.Subtitles,
             selected = QuickAction.REMOVE_CAPTIONS in selectedActions,
+            tint = VlogPilotTokens.colors.secondaryLabel,
             onClick = { selectedActions = selectedActions.toggle(QuickAction.REMOVE_CAPTIONS) },
             modifier = Modifier.weight(1f),
           )
-          QuickActionChip(
+          IosToggleChip(
             label = "换调色",
             icon = Icons.Outlined.Palette,
             selected = QuickAction.CHANGE_COLOR_GRADE in selectedActions,
+            tint = VlogPilotTokens.colors.systemPink,
             onClick = { selectedActions = selectedActions.toggle(QuickAction.CHANGE_COLOR_GRADE) },
             modifier = Modifier.weight(1f),
           )
         }
       }
 
-      FilledTonalButton(
+      PrimaryActionButton(
+        text = "让 AI 优化",
+        icon = Icons.Outlined.AutoAwesome,
         onClick = {
           val targetedOrders = listOfNotNull(targetedShotOrder)
           val feedback = IterationPlanner.fromQuickActions(
@@ -206,10 +230,67 @@ internal fun IterationSheet(
         },
         enabled = canSubmit,
         modifier = Modifier.fillMaxWidth(),
-      ) {
-        Icon(Icons.Outlined.AutoAwesome, contentDescription = null)
-        Text(text = "  让 AI 优化", fontWeight = FontWeight.SemiBold)
-      }
+      )
+      androidx.compose.foundation.layout.Spacer(Modifier.padding(bottom = VlogPilotTokens.spacing.lg))
+    }
+  }
+}
+
+/** iOS-style sheet drag handle: small horizontal pill, centered, dim. */
+@Composable
+private fun IosDragHandle() {
+  Box(
+    modifier = Modifier
+      .fillMaxWidth()
+      .padding(top = 8.dp, bottom = 4.dp),
+    contentAlignment = Alignment.Center,
+  ) {
+    Box(
+      modifier = Modifier
+        .size(width = 36.dp, height = 5.dp)
+        .clip(RoundedCornerShape(50))
+        .background(VlogPilotTokens.colors.tertiaryLabel),
+    )
+  }
+}
+
+@Composable
+private fun IosToggleChip(
+  label: String,
+  icon: androidx.compose.ui.graphics.vector.ImageVector,
+  selected: Boolean,
+  tint: Color,
+  onClick: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val tokens = VlogPilotTokens
+  val containerColor = if (selected) {
+    tint.copy(alpha = if (tokens.colors.isDark) 0.24f else 0.14f)
+  } else {
+    if (tokens.colors.isDark) tokens.colors.groupedSurfaceRaised
+    else MaterialTheme.colorScheme.surface
+  }
+  val contentColor = if (selected) tint else MaterialTheme.colorScheme.onSurface
+  PressableSurface(
+    onClick = onClick,
+    enabled = true,
+    shape = RoundedCornerShape(14.dp),
+    color = containerColor,
+    modifier = modifier,
+  ) {
+    Row(
+      modifier = Modifier.padding(horizontal = 12.dp, vertical = 11.dp),
+      horizontalArrangement = Arrangement.Center,
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Icon(icon, contentDescription = null, tint = contentColor, modifier = Modifier.size(17.dp))
+      androidx.compose.foundation.layout.Spacer(Modifier.size(6.dp))
+      Text(
+        label,
+        style = MaterialTheme.typography.titleSmall,
+        color = contentColor,
+        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+      )
     }
   }
 }
@@ -322,34 +403,6 @@ private fun StoryboardCell(
       )
     }
   }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun QuickActionChip(
-  label: String,
-  icon: androidx.compose.ui.graphics.vector.ImageVector,
-  selected: Boolean,
-  onClick: () -> Unit,
-  modifier: Modifier = Modifier,
-) {
-  FilterChip(
-    modifier = modifier,
-    selected = selected,
-    onClick = onClick,
-    label = { Text(label) },
-    leadingIcon = {
-      Icon(
-        imageVector = icon,
-        contentDescription = null,
-        modifier = Modifier.padding(end = 4.dp),
-      )
-    },
-    colors = FilterChipDefaults.filterChipColors(
-      selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-      selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
-    ),
-  )
 }
 
 private fun <T> Set<T>.toggle(value: T): Set<T> =

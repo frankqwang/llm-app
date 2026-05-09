@@ -120,31 +120,47 @@ internal fun EmptyProcessCard(
   title: String = "还没有过程数据",
   message: String = "开始生成后，这里会逐步出现输入素材、Agent 输出和渲染结果。",
 ) {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
+  val isError = state is PipelineState.Error
   Surface(
-    modifier = Modifier.fillMaxWidth(),
-    shape = RoundedCornerShape(18.dp),
-    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+    modifier = Modifier
+      .fillMaxWidth()
+      .padding(horizontal = tokens.spacing.pageInset),
+    shape = RoundedCornerShape(20.dp),
+    color = MaterialTheme.colorScheme.surface,
+    tonalElevation = 0.dp,
   ) {
     Row(
-      modifier = Modifier.padding(16.dp),
-      horizontalArrangement = Arrangement.spacedBy(12.dp),
+      modifier = Modifier.padding(tokens.spacing.lg),
+      horizontalArrangement = Arrangement.spacedBy(tokens.spacing.md),
       verticalAlignment = Alignment.CenterVertically,
     ) {
-      Icon(
-        imageVector = if (state is PipelineState.Error) Icons.Outlined.ErrorOutline else Icons.Outlined.PhotoLibrary,
-        contentDescription = null,
-        tint = if (state is PipelineState.Error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-      )
-      Column {
+      val tint = if (isError) tokens.colors.systemRed else tokens.colors.accent
+      Box(
+        modifier = Modifier
+          .size(40.dp)
+          .clip(RoundedCornerShape(12.dp))
+          .background(tint.copy(alpha = if (tokens.colors.isDark) 0.24f else 0.14f)),
+        contentAlignment = Alignment.Center,
+      ) {
+        Icon(
+          imageVector = if (isError) Icons.Outlined.ErrorOutline else Icons.Outlined.PhotoLibrary,
+          contentDescription = null,
+          tint = tint,
+          modifier = Modifier.size(20.dp),
+        )
+      }
+      Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(
-          if (state is PipelineState.Error) "任务中断" else title,
+          if (isError) "任务中断" else title,
           style = MaterialTheme.typography.titleSmall,
           fontWeight = FontWeight.SemiBold,
+          color = MaterialTheme.colorScheme.onSurface,
         )
         Text(
-          if (state is PipelineState.Error) state.message else message,
-          style = MaterialTheme.typography.bodySmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          if (isError) (state as PipelineState.Error).message else message,
+          style = MaterialTheme.typography.bodyMedium,
+          color = tokens.colors.secondaryLabel,
         )
       }
     }
@@ -159,16 +175,53 @@ internal fun EmptyActionCard(
   actionLabel: String,
   onAction: () -> Unit,
 ) {
-  PanelCard {
-    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-      SectionHeader(
-        icon = if (state is PipelineState.Error) Icons.Outlined.ErrorOutline else Icons.Outlined.Movie,
-        title = if (state is PipelineState.Error) "任务中断" else title,
-        subtitle = if (state is PipelineState.Error) state.message else message,
-      )
-      Button(modifier = Modifier.fillMaxWidth(), onClick = onAction) {
-        Text(actionLabel)
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
+  val isError = state is PipelineState.Error
+  Surface(
+    modifier = Modifier
+      .fillMaxWidth()
+      .padding(horizontal = tokens.spacing.pageInset),
+    shape = RoundedCornerShape(20.dp),
+    color = MaterialTheme.colorScheme.surface,
+    tonalElevation = 0.dp,
+  ) {
+    Column(
+      modifier = Modifier.padding(tokens.spacing.xl),
+      verticalArrangement = Arrangement.spacedBy(tokens.spacing.md),
+      horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+      val tint = if (isError) tokens.colors.systemRed else tokens.colors.accent
+      Box(
+        modifier = Modifier
+          .size(56.dp)
+          .clip(RoundedCornerShape(16.dp))
+          .background(tint.copy(alpha = if (tokens.colors.isDark) 0.24f else 0.12f)),
+        contentAlignment = Alignment.Center,
+      ) {
+        Icon(
+          imageVector = if (isError) Icons.Outlined.ErrorOutline else Icons.Outlined.Movie,
+          contentDescription = null,
+          tint = tint,
+          modifier = Modifier.size(28.dp),
+        )
       }
+      Text(
+        if (isError) "任务中断" else title,
+        style = MaterialTheme.typography.titleMedium,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.onSurface,
+      )
+      Text(
+        if (isError) (state as PipelineState.Error).message else message,
+        style = MaterialTheme.typography.bodyMedium,
+        color = tokens.colors.secondaryLabel,
+        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+      )
+      com.google.ai.edge.gallery.customtasks.vlogpilot.ui.PrimaryActionButton(
+        text = actionLabel,
+        onClick = onAction,
+        modifier = Modifier.fillMaxWidth(),
+      )
     }
   }
 }

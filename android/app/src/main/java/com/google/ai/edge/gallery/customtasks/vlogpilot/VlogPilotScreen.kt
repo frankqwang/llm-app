@@ -144,6 +144,9 @@ fun VlogPilotScreen(
   var selectedVideoSort by remember { mutableStateOf(VideoSortMode.Recent) }
   var selectedStoryId by remember { mutableStateOf<String?>(null) }
   var focusedVideoEventId by remember { mutableStateOf<String?>(null) }
+  // When non-null, replaces the tab view with a full-screen vlog detail page.
+  // Tap a row in 作品库 to navigate in; back-arrow on the detail page clears it.
+  var detailEventId by remember { mutableStateOf<String?>(null) }
   // When non-null, the bottom-sheet feedback editor is open targeting this event.
   var iterationSheetEventId by remember { mutableStateOf<String?>(null) }
   var iterationSheetTargetOrder by remember { mutableStateOf<Int?>(null) }
@@ -249,6 +252,46 @@ fun VlogPilotScreen(
     return
   }
 
+  // Album state lives outside the LazyColumn so the asset detail dialog
+  // can render at the screen level (Dialog isn't valid inside LazyListScope).
+  val albumState = com.google.ai.edge.gallery.customtasks.vlogpilot.rememberAssetLibraryUiState()
+
+  // Vlog detail navigation: full-screen page replaces the tabbed view when
+  // a row is tapped in 作品库. Hardware back arrow returns to the list.
+  detailEventId?.let { id ->
+    com.google.ai.edge.gallery.customtasks.vlogpilot.VlogDetailScreen(
+      decisions = decisions,
+      projects = projects,
+      eventId = id,
+      onBack = { detailEventId = null },
+      onOpenIterationSheet = { eventId, shotOrder ->
+        iterationSheetEventId = eventId
+        iterationSheetTargetOrder = shotOrder
+      },
+      onChangeStory = {
+        detailEventId = null
+        selectedTab = VlogPilotTab.Create
+      },
+    )
+    iterationSheetEventId?.let { eventId ->
+      val target = decisions.firstOrNull { it.eventId == eventId } ?: return@let
+      IterationSheet(
+        decisions = target,
+        initialTargetShotOrder = iterationSheetTargetOrder,
+        onDismiss = {
+          iterationSheetEventId = null
+          iterationSheetTargetOrder = null
+        },
+        onSubmit = { feedback ->
+          viewModel.submitFeedback(eventId, feedback)
+          iterationSheetEventId = null
+          iterationSheetTargetOrder = null
+        },
+      )
+    }
+    return
+  }
+
   LazyColumn(
     modifier = modifier
       .fillMaxSize()
@@ -341,50 +384,33 @@ fun VlogPilotScreen(
               selectedSort = selectedVideoSort,
               onCategorySelect = { selectedVideoCategory = it },
               onSortSelect = { selectedVideoSort = it },
-              onOpenIterationSheet = { eventId, shotOrder ->
-                iterationSheetEventId = eventId
-                iterationSheetTargetOrder = shotOrder
-              },
-              onChangeStory = { selectedTab = VlogPilotTab.Create },
+              onOpenDetail = { eventId -> detailEventId = eventId },
               onDismissIteration = viewModel::dismissIterationStatus,
-              focusedEventId = focusedVideoEventId,
-              onFocusConsumed = { focusedVideoEventId = null },
             )
           }
         }
       }
 
       VlogPilotTab.Assets -> {
-        item {
-          AssetLibraryTab(
-            assets = albumAssets,
-            visibleCount = albumVisibleCount,
-            loading = albumLoading,
-            errorMessage = albumError,
-            usageByAssetId = assetUsage,
-            decisions = decisions,
-            manifest = eventSelection,
-            onLoad = {
-              requireAlbumPermission {
-                viewModel.loadAlbumAssets()
-              }
-            },
-            onRefresh = {
-              requireAlbumPermission {
-                viewModel.loadAlbumAssets(force = true)
-              }
-            },
-            onLoadMore = viewModel::loadMoreAlbumAssets,
-            onOpenStory = { eventId ->
-              selectedStoryId = eventId
-              selectedTab = VlogPilotTab.Create
-            },
-            onOpenVideo = { eventId ->
-              focusedVideoEventId = eventId
-              selectedTab = VlogPilotTab.Works
-            },
-          )
-        }
+        assetLibraryItems(
+          state = albumState,
+          assets = albumAssets,
+          visibleCount = albumVisibleCount,
+          loading = albumLoading,
+          errorMessage = albumError,
+          usageByAssetId = assetUsage,
+          onLoad = {
+            requireAlbumPermission {
+              viewModel.loadAlbumAssets()
+            }
+          },
+          onRefresh = {
+            requireAlbumPermission {
+              viewModel.loadAlbumAssets(force = true)
+            }
+          },
+          onLoadMore = viewModel::loadMoreAlbumAssets,
+        )
       }
 
       VlogPilotTab.Settings -> {
@@ -400,6 +426,22 @@ fun VlogPilotScreen(
       }
     }
   }
+
+  com.google.ai.edge.gallery.customtasks.vlogpilot.AssetLibraryDialog(
+    state = albumState,
+    assets = albumAssets,
+    usageByAssetId = assetUsage,
+    decisions = decisions,
+    manifest = eventSelection,
+    onOpenStory = { eventId ->
+      selectedStoryId = eventId
+      selectedTab = VlogPilotTab.Create
+    },
+    onOpenVideo = { eventId ->
+      detailEventId = eventId
+      selectedTab = VlogPilotTab.Works
+    },
+  )
 
   eventSelection?.candidates
     ?.firstOrNull { it.eventId == selectedStoryId }

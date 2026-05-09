@@ -27,10 +27,16 @@ import kotlin.math.max
 
 object VideoFrameSheetBuilder {
 
-  private const val CELL_W = 320
-  private const val CELL_H = 426
-  private const val MAX_LOW_POWER_FRAME_COUNT = 16
-  private const val MAX_HIGH_QUALITY_FRAME_COUNT = 20
+  // Smaller cells = fewer image tokens for Gemma's visual encoder, which is
+  // the dominant cost in VLM annotation. Pixel count drops from 320×426
+  // (~136k/cell) to 240×320 (~77k/cell), roughly halving encoder work.
+  // 240px is still readable for scene/subject identification at the small
+  // crop sizes in the contact sheet — verified against Gemma 4 E2B's
+  // visual recall on 240px tiles.
+  private const val CELL_W = 240
+  private const val CELL_H = 320
+  private const val MAX_LOW_POWER_FRAME_COUNT = 12
+  private const val MAX_HIGH_QUALITY_FRAME_COUNT = 16
 
   data class Sheet(
     val bitmap: Bitmap,

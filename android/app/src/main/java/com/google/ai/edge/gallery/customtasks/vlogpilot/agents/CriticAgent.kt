@@ -152,6 +152,9 @@ Return Critique JSON only.
       captionText = obj["caption_text"]?.jsonPrimitive?.contentOrNull.orEmpty(),
       kenBurnsHint = obj["ken_burns_hint"]?.jsonPrimitive?.contentOrNull.orEmpty(),
       transitionInHint = obj["transition_in_hint"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+      speedHint = (obj["speed_hint"]?.jsonPrimitive?.floatOrNull ?: 1.0f).coerceIn(0.5f, 1.75f),
+      kenBurnsIntensity = (obj["ken_burns_intensity"]?.jsonPrimitive?.floatOrNull ?: 1.08f).coerceIn(1.0f, 1.20f),
+      cutReason = obj["cut_reason"]?.jsonPrimitive?.contentOrNull.orEmpty(),
     )
   }
 }

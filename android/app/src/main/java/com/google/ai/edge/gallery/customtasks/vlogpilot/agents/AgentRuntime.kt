@@ -33,6 +33,8 @@ import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 
 class AgentRuntime(
@@ -121,37 +123,41 @@ class AgentRuntime(
       logEvent(label, 0, "no_engine", null)
       return ""
     }
+    val finalLabel = contextTag?.let { "$it/$label" } ?: label
     val t0 = System.nanoTime()
     val sb = StringBuilder()
     var outcome = "ok"
     try {
-      withTimeout(ASK_TIMEOUT_MS) {
-        suspendCancellableCoroutine<Unit> { cont ->
-          LlmChatModelHelper.resetConversation(
-            model = gemmaModel,
-            supportImage = images.isNotEmpty(),
-            supportAudio = false,
-            systemInstruction = Contents.of(systemPrompt),
-            enableConversationConstrainedDecoding = false,
-          )
-          LlmChatModelHelper.runInference(
-            model = gemmaModel,
-            input = userText,
-            resultListener = { partial, done, _ ->
-              sb.append(partial)
-              if (done && cont.isActive) cont.resume(Unit)
-            },
-            cleanUpListener = {},
-            onError = { msg ->
-              Log.w(TAG, "ask onError: $msg")
-              if (cont.isActive) cont.resume(Unit)
-            },
-            images = images,
-          )
-          // If the coroutine is cancelled (timeout fired), try to stop the
-          // running inference so it doesn't keep occupying the engine.
-          cont.invokeOnCancellation {
-            runCatching { LlmChatModelHelper.stopResponse(gemmaModel) }
+      MODEL_CALL_MUTEX.withLock {
+        writeLastAgentCall(finalLabel, userText, images)
+        withTimeout(ASK_TIMEOUT_MS) {
+          suspendCancellableCoroutine<Unit> { cont ->
+            LlmChatModelHelper.resetConversation(
+              model = gemmaModel,
+              supportImage = images.isNotEmpty(),
+              supportAudio = false,
+              systemInstruction = Contents.of(systemPrompt),
+              enableConversationConstrainedDecoding = false,
+            )
+            LlmChatModelHelper.runInference(
+              model = gemmaModel,
+              input = userText,
+              resultListener = { partial, done, _ ->
+                sb.append(partial)
+                if (done && cont.isActive) cont.resume(Unit)
+              },
+              cleanUpListener = {},
+              onError = { msg ->
+                Log.w(TAG, "ask onError: $msg")
+                if (cont.isActive) cont.resume(Unit)
+              },
+              images = images,
+            )
+            // If the coroutine is cancelled (timeout fired), try to stop the
+            // running inference so it doesn't keep occupying the engine.
+            cont.invokeOnCancellation {
+              runCatching { LlmChatModelHelper.stopResponse(gemmaModel) }
+            }
           }
         }
       }
@@ -167,11 +173,31 @@ class AgentRuntime(
       outcome = "error:${t::class.java.simpleName}"
     }
     val ms = (System.nanoTime() - t0) / 1_000_000
-    val finalLabel = contextTag?.let { "$it/$label" } ?: label
-    logEvent(finalLabel, ms, outcome, "chars=${sb.length} images=${images.size}")
+    logEvent(finalLabel, ms, outcome, "chars=${sb.length} images=${images.size} dims=${imageDims(images)}")
     PowerPacer.afterAgentCall()
     return sb.toString()
   }
+
+  private fun writeLastAgentCall(label: String, userText: String, images: List<Bitmap>) {
+    val text = buildString {
+      append("t=").append(System.currentTimeMillis()).append('\n')
+      append("label=").append(label).append('\n')
+      append("model=").append(gemmaModel.name).append('\n')
+      append("chars=").append(userText.length).append('\n')
+      append("images=").append(images.size).append('\n')
+      append("dims=").append(imageDims(images)).append('\n')
+    }
+    try {
+      synchronized(logLock) {
+        File(context.filesDir, "_last_agent_call.txt").writeText(text)
+      }
+    } catch (_: Throwable) {
+      // best-effort; diagnostics must never fail generation
+    }
+  }
+
+  private fun imageDims(images: List<Bitmap>): String =
+    images.joinToString(separator = ",", prefix = "[", postfix = "]") { "${it.width}x${it.height}" }
 
   private fun logEvent(label: String, ms: Long, outcome: String, detail: String?) {
     val line = buildString {
@@ -202,5 +228,6 @@ class AgentRuntime(
     private const val TAG = "AgentRuntime"
     const val TASK_ID = "vlog_pilot"
     private const val ASK_TIMEOUT_MS = 90_000L
+    private val MODEL_CALL_MUTEX = Mutex()
   }
 }

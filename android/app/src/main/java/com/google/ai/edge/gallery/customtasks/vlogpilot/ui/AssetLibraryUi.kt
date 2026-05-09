@@ -24,11 +24,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Visibility
@@ -69,62 +71,74 @@ import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+/** Holds the album-tab UI state across the LazyListScope items + the
+ *  detail dialog. Hoisted so the dialog can render outside the list scope
+ *  (Dialogs aren't valid inside LazyListScope). */
+internal class AssetLibraryUiState {
+  var selectedAssetId by mutableStateOf<String?>(null)
+  internal var selectedScope by mutableStateOf(AlbumScope.All)
+  var autoLoadRequested by mutableStateOf(false)
+}
+
 @Composable
-internal fun AssetLibraryTab(
+internal fun rememberAssetLibraryUiState(): AssetLibraryUiState =
+  remember { AssetLibraryUiState() }
+
+/** Yields the album browser into a parent [LazyListScope]. Each photo row
+ *  becomes its own LazyColumn item — the OS only composes / decodes the
+ *  rows currently in the viewport, which is the difference between "smooth
+ *  like the system gallery" and "redecode 60 thumbnails on every scroll
+ *  tick". The detail dialog is rendered separately via [AssetLibraryDialog]
+ *  because Dialog cannot live inside LazyListScope. */
+internal fun LazyListScope.assetLibraryItems(
+  state: AssetLibraryUiState,
   assets: List<Asset>,
   visibleCount: Int,
   loading: Boolean,
   errorMessage: String?,
   usageByAssetId: Map<String, AssetUsage>,
-  decisions: List<EventDecisions>,
-  manifest: EventSelectionManifest?,
   onLoad: () -> Unit,
   onRefresh: () -> Unit,
   onLoadMore: () -> Unit,
-  onOpenStory: (String) -> Unit,
-  onOpenVideo: (String) -> Unit,
 ) {
-  var autoLoadRequested by remember { mutableStateOf(false) }
-  LaunchedEffect(assets.isEmpty()) {
-    if (assets.isEmpty() && !autoLoadRequested) {
-      autoLoadRequested = true
-      onLoad()
+  // Filter snapshots — these are pure data so plain val is fine; LazyListScope
+  // body re-evaluates whenever a state read in the parent recomposes.
+  val filteredAssets = assets.filter { asset -> state.selectedScope.matches(asset, usageByAssetId[asset.id]) }
+  val visibleAssets = filteredAssets.take(visibleCount.coerceAtMost(filteredAssets.size))
+  val grouped = visibleAssets.groupBy { assetDayLabel(it.takenEpochMs) }
+  val loadedAssetIds = assets.mapTo(mutableSetOf()) { it.id }
+  val albumUsages = loadedAssetIds.mapNotNull { usageByAssetId[it] }
+  val annotatedCount = albumUsages.count { it.annotated }
+  val selectedCount = albumUsages.count { it.selectedStoryIds.isNotEmpty() }
+  val shotCount = albumUsages.count { it.shotOrdersByVideo.isNotEmpty() }
+  val renderedCount = albumUsages.count { it.finishedVideoIds.isNotEmpty() }
+
+  item(key = "album-auto-load") {
+    LaunchedEffect(assets.isEmpty()) {
+      if (assets.isEmpty() && !state.autoLoadRequested) {
+        state.autoLoadRequested = true
+        onLoad()
+      }
     }
   }
-
-  var selectedAssetId by remember { mutableStateOf<String?>(null) }
-  var selectedScope by remember { mutableStateOf(AlbumScope.All) }
-  val loadedAssetIds = remember(assets) { assets.mapTo(mutableSetOf()) { it.id } }
-  val albumUsages = remember(loadedAssetIds, usageByAssetId) {
-    loadedAssetIds.mapNotNull { usageByAssetId[it] }
-  }
-  val filteredAssets = remember(assets, usageByAssetId, selectedScope) {
-    assets.filter { asset -> selectedScope.matches(asset, usageByAssetId[asset.id]) }
-  }
-  val visibleAssets = remember(filteredAssets, visibleCount) {
-    filteredAssets.take(visibleCount.coerceAtMost(filteredAssets.size))
-  }
-  val grouped = remember(visibleAssets) { visibleAssets.groupBy { assetDayLabel(it.takenEpochMs) } }
-  val annotatedCount = remember(albumUsages) { albumUsages.count { it.annotated } }
-  val selectedCount = remember(albumUsages) { albumUsages.count { it.selectedStoryIds.isNotEmpty() } }
-  val shotCount = remember(albumUsages) { albumUsages.count { it.shotOrdersByVideo.isNotEmpty() } }
-  val renderedCount = remember(albumUsages) { albumUsages.count { it.finishedVideoIds.isNotEmpty() } }
-
-  Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+  item(key = "album-header") {
     AlbumHeader(
       totalCount = assets.size,
       filteredCount = filteredAssets.size,
       visibleCount = visibleAssets.size,
-      selectedScope = selectedScope,
+      selectedScope = state.selectedScope,
       loading = loading,
       onRefresh = onRefresh,
     )
+  }
+  item(key = "album-scope") {
     AlbumScopeBar(
-      selected = selectedScope,
-      onSelect = { selectedScope = it },
+      selected = state.selectedScope,
+      onSelect = { state.selectedScope = it },
     )
-
-    if (assets.isNotEmpty()) {
+  }
+  if (assets.isNotEmpty()) {
+    item(key = "album-summary") {
       AlbumAiSummary(
         annotatedCount = annotatedCount,
         selectedCount = selectedCount,
@@ -132,8 +146,9 @@ internal fun AssetLibraryTab(
         renderedCount = renderedCount,
       )
     }
-
-    if (loading) {
+  }
+  if (loading) {
+    item(key = "album-progress") {
       LinearProgressIndicator(
         modifier = Modifier
           .fillMaxWidth()
@@ -141,48 +156,79 @@ internal fun AssetLibraryTab(
           .clip(RoundedCornerShape(999.dp)),
       )
     }
-    errorMessage?.takeIf { it.isNotBlank() }?.let { message ->
+  }
+  errorMessage?.takeIf { it.isNotBlank() }?.let { message ->
+    item(key = "album-error") {
       Text(
         "相册读取失败：$message",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.error,
+        style = MaterialTheme.typography.bodyMedium,
+        color = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens.colors.systemRed,
       )
     }
-    if (assets.isEmpty() && !loading) {
+  }
+  if (assets.isEmpty() && !loading) {
+    item(key = "album-empty") {
       Text(
         "还没有读到相册内容。检查相册权限后点右上角重新读取。",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = MaterialTheme.typography.bodyMedium,
+        color = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens.colors.secondaryLabel,
       )
-    } else if (filteredAssets.isEmpty() && !loading) {
+    }
+  } else if (filteredAssets.isEmpty() && !loading) {
+    item(key = "album-empty-filter") {
       Text(
         "这个筛选下没有内容。",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = MaterialTheme.typography.bodyMedium,
+        color = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens.colors.secondaryLabel,
       )
-    }
-
-    grouped.forEach { (day, dayAssets) ->
-      AlbumDaySection(
-        day = day,
-        assets = dayAssets,
-        usageByAssetId = usageByAssetId,
-        onOpenAsset = { selectedAssetId = it },
-      )
-    }
-
-    if (visibleAssets.size < filteredAssets.size) {
-      FilledTonalButton(
-        modifier = Modifier.fillMaxWidth(),
-        onClick = onLoadMore,
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 9.dp),
-      ) {
-        Text("加载更多", fontWeight = FontWeight.SemiBold)
-      }
     }
   }
 
-  selectedAssetId
+  // Each day = 1 sticky-style header item + N row items. LazyColumn now
+  // virtualizes per-row rather than treating the whole album as one giant
+  // composable.
+  grouped.forEach { (day, dayAssets) ->
+    item(key = "day-$day", contentType = "day-header") {
+      AlbumDayHeader(day = day, count = dayAssets.size)
+    }
+    val rows = dayAssets.chunked(ALBUM_GRID_COLUMNS)
+    items(
+      count = rows.size,
+      key = { i -> "$day-row-$i" },
+      contentType = { "asset-row" },
+    ) { i ->
+      AlbumGridRow(
+        assets = rows[i],
+        usageByAssetId = usageByAssetId,
+        onOpenAsset = { state.selectedAssetId = it },
+      )
+    }
+  }
+
+  if (visibleAssets.size < filteredAssets.size) {
+    item(key = "album-load-more") {
+      com.google.ai.edge.gallery.customtasks.vlogpilot.ui.TintedActionButton(
+        text = "加载更多",
+        onClick = onLoadMore,
+        modifier = Modifier.fillMaxWidth(),
+      )
+    }
+  }
+}
+
+/** Renders the asset detail dialog (when an asset is selected). Call this
+ *  ALONGSIDE [assetLibraryItems] in the host composable. */
+@Composable
+internal fun AssetLibraryDialog(
+  state: AssetLibraryUiState,
+  assets: List<Asset>,
+  usageByAssetId: Map<String, AssetUsage>,
+  decisions: List<EventDecisions>,
+  manifest: EventSelectionManifest?,
+  onOpenStory: (String) -> Unit,
+  onOpenVideo: (String) -> Unit,
+) {
+  state.selectedAssetId
     ?.let { id -> assets.firstOrNull { it.id == id } }
     ?.let { asset ->
       AssetDetailDialog(
@@ -190,20 +236,64 @@ internal fun AssetLibraryTab(
         usage = usageByAssetId[asset.id] ?: AssetUsage(),
         decisions = decisions,
         manifest = manifest,
-        onDismiss = { selectedAssetId = null },
+        onDismiss = { state.selectedAssetId = null },
         onOpenStory = { eventId ->
-          selectedAssetId = null
+          state.selectedAssetId = null
           onOpenStory(eventId)
         },
         onOpenVideo = { eventId ->
-          selectedAssetId = null
+          state.selectedAssetId = null
           onOpenVideo(eventId)
         },
       )
     }
 }
 
-private enum class AlbumScope(val label: String) {
+/** Header row for a day group. Compact and aligned with iOS Photos' style. */
+@Composable
+private fun AlbumDayHeader(day: String, count: Int) {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
+  Row(
+    modifier = Modifier
+      .fillMaxWidth()
+      .padding(top = 8.dp, bottom = 4.dp),
+    horizontalArrangement = Arrangement.SpaceBetween,
+    verticalAlignment = Alignment.Bottom,
+  ) {
+    Text(day, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+    Text("$count 项", style = MaterialTheme.typography.labelSmall, color = tokens.colors.tertiaryLabel)
+  }
+}
+
+/** A single grid row of up to ALBUM_GRID_COLUMNS thumbnails. Stored as its
+ *  own composable so LazyColumn can recycle / skip it when off-screen. */
+@Composable
+private fun AlbumGridRow(
+  assets: List<Asset>,
+  usageByAssetId: Map<String, AssetUsage>,
+  onOpenAsset: (String) -> Unit,
+) {
+  Row(
+    modifier = Modifier.fillMaxWidth(),
+    horizontalArrangement = Arrangement.spacedBy(2.dp),
+  ) {
+    assets.forEach { asset ->
+      AssetGridTile(
+        asset = asset,
+        usage = usageByAssetId[asset.id],
+        onClick = { onOpenAsset(asset.id) },
+        modifier = Modifier
+          .weight(1f)
+          .aspectRatio(1f),
+      )
+    }
+    repeat(ALBUM_GRID_COLUMNS - assets.size) {
+      Spacer(modifier = Modifier.weight(1f).aspectRatio(1f))
+    }
+  }
+}
+
+internal enum class AlbumScope(val label: String) {
   All("全部"),
   Videos("视频"),
   Photos("照片"),
@@ -256,34 +346,31 @@ private fun AlbumScopeBar(
   selected: AlbumScope,
   onSelect: (AlbumScope) -> Unit,
 ) {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
   Row(
     modifier = Modifier.fillMaxWidth(),
-    horizontalArrangement = Arrangement.spacedBy(6.dp),
+    horizontalArrangement = Arrangement.spacedBy(tokens.spacing.xs),
   ) {
     AlbumScope.entries.forEach { scope ->
-      val selectedScope = selected == scope
+      val isSelected = selected == scope
+      val bg = if (isSelected) tokens.colors.accentTint
+               else if (tokens.colors.isDark) tokens.colors.groupedSurfaceRaised
+               else MaterialTheme.colorScheme.surface
+      val fg = if (isSelected) tokens.colors.accent else MaterialTheme.colorScheme.onSurface
       Surface(
         modifier = Modifier
           .weight(1f)
           .height(36.dp)
           .clickable { onSelect(scope) },
-        shape = RoundedCornerShape(999.dp),
-        color = if (selectedScope) {
-          MaterialTheme.colorScheme.primaryContainer
-        } else {
-          MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-        },
-        contentColor = if (selectedScope) {
-          MaterialTheme.colorScheme.onPrimaryContainer
-        } else {
-          MaterialTheme.colorScheme.onSurfaceVariant
-        },
+        shape = RoundedCornerShape(50),
+        color = bg,
+        contentColor = fg,
       ) {
         Box(contentAlignment = Alignment.Center) {
           Text(
             scope.label,
             style = MaterialTheme.typography.labelMedium,
-            fontWeight = if (selectedScope) FontWeight.SemiBold else FontWeight.Medium,
+            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
             maxLines = 1,
           )
         }
@@ -331,51 +418,6 @@ private fun AlbumStatPill(label: String, count: Int, color: Color, modifier: Mod
       )
       Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
       Text(count.toString(), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-    }
-  }
-}
-
-@Composable
-private fun AlbumDaySection(
-  day: String,
-  assets: List<Asset>,
-  usageByAssetId: Map<String, AssetUsage>,
-  onOpenAsset: (String) -> Unit,
-) {
-  Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-    Row(
-      modifier = Modifier
-        .fillMaxWidth()
-        .padding(top = 4.dp),
-      horizontalArrangement = Arrangement.SpaceBetween,
-      verticalAlignment = Alignment.Bottom,
-    ) {
-      Text(day, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-      Text("${assets.size} 项", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-    assets.chunked(ALBUM_GRID_COLUMNS).forEach { rowAssets ->
-      Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-      ) {
-        rowAssets.forEach { asset ->
-          AssetGridTile(
-            asset = asset,
-            usage = usageByAssetId[asset.id],
-            onClick = { onOpenAsset(asset.id) },
-            modifier = Modifier
-              .weight(1f)
-              .aspectRatio(1f),
-          )
-        }
-        repeat(ALBUM_GRID_COLUMNS - rowAssets.size) {
-          Spacer(
-            modifier = Modifier
-              .weight(1f)
-              .aspectRatio(1f),
-          )
-        }
-      }
     }
   }
 }
@@ -470,41 +512,48 @@ private fun AssetDetailDialog(
     }
   }
 
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
   Dialog(onDismissRequest = onDismiss) {
     Surface(
       modifier = Modifier
         .fillMaxWidth()
         .heightIn(max = 760.dp),
-      shape = RoundedCornerShape(18.dp),
-      color = MaterialTheme.colorScheme.surface,
-      tonalElevation = 6.dp,
+      shape = RoundedCornerShape(24.dp),
+      color = MaterialTheme.colorScheme.background,
+      tonalElevation = 0.dp,
     ) {
       Column(
         modifier = Modifier
           .verticalScroll(rememberScrollState())
-          .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+          .padding(horizontal = 18.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
       ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
+        // Hero: square thumbnail + name + meta lines, mirrors iOS Photos' info sheet.
+        Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
           AssetThumb(
             asset = asset,
             modifier = Modifier
-              .width(88.dp)
-              .height(112.dp),
+              .width(80.dp)
+              .height(80.dp),
           )
-          Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+          Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
               asset.displayName.ifBlank { shortId(asset.id) },
-              style = MaterialTheme.typography.titleMedium,
-              fontWeight = FontWeight.SemiBold,
+              style = MaterialTheme.typography.titleLarge,
+              fontWeight = FontWeight.Bold,
+              color = MaterialTheme.colorScheme.onBackground,
               maxLines = 2,
               overflow = TextOverflow.Ellipsis,
             )
-            Text(assetMeta(asset), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+              assetMeta(asset),
+              style = MaterialTheme.typography.bodyMedium,
+              color = tokens.colors.secondaryLabel,
+            )
             Text(
               assetDateTimeLabel(asset.takenEpochMs),
-              style = MaterialTheme.typography.labelSmall,
-              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              style = MaterialTheme.typography.bodyMedium,
+              color = tokens.colors.tertiaryLabel,
             )
           }
         }
@@ -512,23 +561,45 @@ private fun AssetDetailDialog(
         MetricGrid(
           items = listOf(
             MetricDatum("类型", friendlyMediaType(asset)),
-            MetricDatum("尺寸", if (asset.widthPx > 0 && asset.heightPx > 0) "${asset.widthPx}x${asset.heightPx}" else "-"),
+            MetricDatum("尺寸", if (asset.widthPx > 0 && asset.heightPx > 0) "${asset.widthPx}×${asset.heightPx}" else "-"),
             MetricDatum("时长", if (asset.durationMs > 0) formatSec(asset.durationMs / 1000.0) else "-"),
             MetricDatum("大小", readableBytes(asset.sizeBytes)),
           ),
           columns = 2,
         )
 
-        DecisionSection(icon = Icons.Outlined.Search, title = "VLM 标注", subtitle = annotationSummary(perception?.vlmTags, perception?.videoInsight?.summary)) {
+        DecisionSection(
+          icon = Icons.Outlined.Search,
+          title = "VLM 标注",
+          subtitle = annotationSummary(perception?.vlmTags, perception?.videoInsight?.summary),
+        ) {
           val p = perception
           if (p == null) {
-            Text("还没有 VLM 标注缓存。素材进入故事扫描或制作后会写入这里。", style = MaterialTheme.typography.bodySmall)
-          } else {
-            KeyValue(
-              "质量",
-              "sharp=${"%.2f".format(Locale.US, p.sharpness)} / bright=${"%.2f".format(Locale.US, p.brightness)} / faces=${p.faces.size} / nsfw=${"%.2f".format(Locale.US, p.nsfwScore)}",
+            Text(
+              "还没有 VLM 标注缓存。素材进入故事扫描或制作后会写入这里。",
+              style = MaterialTheme.typography.bodyMedium,
+              color = tokens.colors.secondaryLabel,
             )
-            KeyValue("过滤", if (p.isJunk) "junk: ${p.junkReason}" else "可用")
+          } else {
+            // Quality summary as inline metric pills — visually distinct from
+            // the long key/value list below.
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+              QualityPill("清晰", "%.2f".format(Locale.US, p.sharpness))
+              QualityPill("亮度", "%.2f".format(Locale.US, p.brightness))
+              QualityPill("人脸", p.faces.size.toString())
+              QualityPill("NSFW", "%.2f".format(Locale.US, p.nsfwScore))
+            }
+            if (p.isJunk) {
+              Text(
+                "已过滤：${p.junkReason}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = tokens.colors.systemOrange,
+              )
+            }
+            com.google.ai.edge.gallery.customtasks.vlogpilot.ui.HairlineDivider(startInset = 0.dp)
             AnnotationKeyValues(p.vlmTags)
             VideoInsightKeyValues(p)
           }
@@ -539,6 +610,7 @@ private fun AssetDetailDialog(
             usage.storyIds.take(4).forEach { eventId ->
               RelatedJumpRow(
                 label = "故事",
+                tint = tokens.colors.systemPurple,
                 title = storyLabel(eventId, decisions, manifest),
                 onClick = { onOpenStory(eventId) },
               )
@@ -546,17 +618,12 @@ private fun AssetDetailDialog(
             usage.shotOrdersByVideo.keys.take(4).forEach { eventId ->
               RelatedJumpRow(
                 label = "视频",
+                tint = tokens.colors.accent,
                 title = "${storyLabel(eventId, decisions, manifest)} · 镜头 ${usage.shotOrdersByVideo[eventId].orEmpty().joinToString(",")}",
                 onClick = { onOpenVideo(eventId) },
               )
             }
           }
-        } else {
-          Text(
-            "还没有关联到故事或成品视频。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-          )
         }
       }
     }
@@ -564,31 +631,65 @@ private fun AssetDetailDialog(
 }
 
 @Composable
-private fun RelatedJumpRow(label: String, title: String, onClick: () -> Unit) {
+private fun QualityPill(label: String, value: String) {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
+  Column(
+    modifier = Modifier
+      .clip(RoundedCornerShape(10.dp))
+      .background(if (tokens.colors.isDark) tokens.colors.groupedSurfaceRaised else MaterialTheme.colorScheme.surfaceVariant)
+      .padding(horizontal = 10.dp, vertical = 6.dp),
+  ) {
+    Text(label, style = MaterialTheme.typography.labelSmall, color = tokens.colors.tertiaryLabel)
+    Text(value, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+  }
+}
+
+@Composable
+private fun RelatedJumpRow(
+  label: String,
+  title: String,
+  tint: androidx.compose.ui.graphics.Color,
+  onClick: () -> Unit,
+) {
+  // Apple Settings-style cell: tinted category pill on left, title in middle,
+  // chevron on right; whole row is the tap target.
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
   Row(
-    modifier = Modifier.fillMaxWidth(),
-    horizontalArrangement = Arrangement.spacedBy(8.dp),
+    modifier = Modifier
+      .fillMaxWidth()
+      .clip(RoundedCornerShape(10.dp))
+      .clickable(onClick = onClick)
+      .padding(vertical = 8.dp),
+    horizontalArrangement = Arrangement.spacedBy(10.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
-    Surface(
-      shape = RoundedCornerShape(7.dp),
-      color = MaterialTheme.colorScheme.surfaceVariant,
-      contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+    Box(
+      modifier = Modifier
+        .clip(RoundedCornerShape(8.dp))
+        .background(tint.copy(alpha = if (tokens.colors.isDark) 0.24f else 0.14f))
+        .padding(horizontal = 9.dp, vertical = 4.dp),
     ) {
-      Text(label, modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp), style = MaterialTheme.typography.labelSmall)
+      Text(
+        label,
+        style = MaterialTheme.typography.labelMedium,
+        color = tint,
+        fontWeight = FontWeight.SemiBold,
+      )
     }
     Text(
       title,
       modifier = Modifier.weight(1f),
-      style = MaterialTheme.typography.bodySmall,
+      style = MaterialTheme.typography.bodyMedium,
+      color = MaterialTheme.colorScheme.onSurface,
       maxLines = 2,
       overflow = TextOverflow.Ellipsis,
     )
-    FilledTonalButton(onClick = onClick, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 7.dp)) {
-      Icon(Icons.Outlined.ExpandMore, contentDescription = null, modifier = Modifier.size(15.dp))
-      Spacer(Modifier.width(3.dp))
-      Text("打开", maxLines = 1)
-    }
+    Icon(
+      Icons.Outlined.ChevronRight,
+      contentDescription = "打开",
+      tint = tokens.colors.tertiaryLabel,
+      modifier = Modifier.size(20.dp),
+    )
   }
 }
 

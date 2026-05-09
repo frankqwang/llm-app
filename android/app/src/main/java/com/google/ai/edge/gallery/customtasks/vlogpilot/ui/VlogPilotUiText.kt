@@ -387,6 +387,22 @@ internal fun formatMs(ms: Long): String = when {
   else -> "${ms / 60_000}m${(ms % 60_000) / 1000}s"
 }
 
+/** "刚刚 / 5 分钟前 / 2 小时前 / 3 天前 / 06-15" — Apple-style relative
+ *  time, switching to absolute date when older than a week. */
+internal fun formatRelativeTime(timestampMs: Long): String {
+  if (timestampMs <= 0L) return ""
+  val now = System.currentTimeMillis()
+  val deltaSec = ((now - timestampMs) / 1000L).coerceAtLeast(0L)
+  return when {
+    deltaSec < 30 -> "刚刚"
+    deltaSec < 60 -> "${deltaSec}秒前"
+    deltaSec < 3600 -> "${deltaSec / 60}分钟前"
+    deltaSec < 86_400 -> "${deltaSec / 3600}小时前"
+    deltaSec < 604_800 -> "${deltaSec / 86_400}天前"
+    else -> SimpleDateFormat("MM-dd HH:mm", Locale.US).format(Date(timestampMs))
+  }
+}
+
 internal fun formatSec(sec: Double): String = when {
   sec <= 0.0 -> "0s"
   sec < 60.0 -> "${"%.1f".format(Locale.US, sec)}s"
@@ -409,11 +425,15 @@ internal fun annotationSummary(tags: VlmTags?, videoSummary: String? = null): St
     return "VLM 标签为空"
   }
   return listOfNotNull(
+    tags.visualDescription.takeIf { it.isNotBlank() },
     tags.scene.takeIf { it.isNotBlank() },
     tags.subjects.takeIf { it.isNotEmpty() }?.joinToString("、"),
     tags.action.takeIf { it.isNotBlank() },
     tags.mood.takeIf { it.isNotBlank() },
     tags.salient.takeIf { it.isNotBlank() },
+    tags.composition.takeIf { it.isNotBlank() },
+    tags.lighting.takeIf { it.isNotBlank() },
+    tags.motionHint.takeIf { it.isNotBlank() },
     videoSummary?.takeIf { it.isNotBlank() },
   ).joinToString(" · ")
 }

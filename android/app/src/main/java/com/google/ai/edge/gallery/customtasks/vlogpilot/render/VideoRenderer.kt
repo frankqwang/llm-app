@@ -21,6 +21,22 @@ class VideoRenderer(private val context: Context) {
     private const val TAG = "VideoRenderer"
     const val CANDIDATES_DIR = "candidates"
     const val FONT_FILE = "fonts/SourceHanSansSC-Bold.otf"
+
+    /** Unpack the bundled CJK font into filesDir on first use; null if missing. */
+    fun ensureFont(context: Context): File? {
+      val target = File(context.filesDir, FONT_FILE)
+      if (target.isFile) return target
+      return try {
+        target.parentFile?.mkdirs()
+        context.assets.open(FONT_FILE).use { input ->
+          target.outputStream().use { input.copyTo(it) }
+        }
+        target
+      } catch (_: Throwable) {
+        Log.w(TAG, "font asset missing — captions will use ffmpeg's default font (may render boxes for CJK)")
+        null
+      }
+    }
   }
 
   data class RenderOutput(val outputPath: String, val timeline: Timeline)
@@ -64,18 +80,4 @@ class VideoRenderer(private val context: Context) {
     return RenderOutput(outFile.absolutePath, timeline.copy(shots = updatedShots, final = true))
   }
 
-  private fun ensureFont(context: Context): File? {
-    val target = File(context.filesDir, FONT_FILE)
-    if (target.isFile) return target
-    return try {
-      target.parentFile?.mkdirs()
-      context.assets.open(FONT_FILE).use { input ->
-        target.outputStream().use { input.copyTo(it) }
-      }
-      target
-    } catch (_: Throwable) {
-      Log.w(TAG, "font asset missing — captions will use ffmpeg's default font (may render boxes for CJK)")
-      null
-    }
-  }
 }

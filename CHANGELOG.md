@@ -6,6 +6,179 @@ to find it in the tree.
 
 ---
 
+## v6.0 — Editing intelligence + Apple-style UI + export loop (2026-05-09)
+
+The pipeline gained richer **AI editing language** (per-shot speed / Ken
+Burns zoom / cut reason), the album browser stopped jankying on scroll,
+the result page became publishable (save to gallery + share to 小红书 /
+微信), and the entire VlogPilot module got an iOS-flavored visual overhaul
+with a Claude-style **work-process timeline** that lets users watch the
+agent chain do its job.
+
+Five themes shipped together:
+
+### Theme A — V1 editing improvements (transition variety, pan, longer templates)
+
+`EditorAgent.transitionFor()` no longer downgrades 7 advanced transitions
+(slide / circle / zoom / smooth) to CROSSFADE — the `CompositeRenderer`
+xfade map already supports them all, the downgrade was a leftover
+conservative gate. ([`agents/EditorAgent.kt:290-303`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/agents/EditorAgent.kt))
+
+`ShotRenderer.kenBurnsExpr()` finally implements `pan_left` / `pan_right` —
+they were accepted in `normalizeKenBurns` but the zoompan filter only
+wired up `in` / `out`, so the AI's intent was silently dropped.
+([`render/ShotRenderer.kt:78-91`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/render/ShotRenderer.kt))
+
+Two longer structure templates joined the catalog — `travel_long` (8 slots)
+and `event_recap` (9 slots) — driven by keyword routing in
+`TemplateCatalog.selectFromText` so multi-day trips and weddings get a
+richer narrative arc than the original 5-slot daily/people templates.
+([`TemplateCatalog.kt:124-167`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/TemplateCatalog.kt))
+
+`EditorAgent.enforceTransitionDiversity` is a new post-process — when 3+
+consecutive shots share the same transition, the third gets bumped to CUT
+(short shots) or FADE (longer ones). Director prompts also gained a
+role × transition recommendation table so Gemma uses the full vocabulary.
+([`agents/EditorAgent.kt:elif diversity helper`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/agents/EditorAgent.kt))
+
+`TimelineStoryboardBuilder` got Claude-readable visual symbols overlaid
+on the storyboard image: top-left badge shows duration + Ken Burns arrow,
+top-right colored pill shows the entering transition (硬切 / 淡入 / 叠化 /
+推近 / etc.), bottom strip renders an actual caption preview in the CJK
+font. Critic's prompt was updated to read these symbols, gaining 4 new
+rules (transitions monotone, weak opening, missing climax, caption length).
+([`pipeline/TimelineStoryboardBuilder.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/TimelineStoryboardBuilder.kt))
+
+`PipelineOrchestrator.softTimelineWarnings` is a new log-only critic gate
+— detects monotone transitions, consecutive same-role shots, weak openings,
+and missing climax, breadcrumbs them to `_state_history.jsonl` for now
+(promotion to hard triggers planned after a quiet observation week).
+
+### Theme B — V2.1 schema for AI editing intent
+
+`ShotRequest` and `ShotSpec` gained three new fields, all backward
+compatible (defaults match existing behavior, `Json { ignoreUnknownKeys
+= true }` keeps cache deserialization safe):
+
+- `speedHint` / `speedFactor` (0.5–1.75) — per-shot playback rate, layered
+  on top of the auto stretch-to-fill slow-mo. Renderer now supports
+  speed-up too (setpts < 1) for the first time, capped at 2×.
+- `kenBurnsIntensity` / `kenBurnsZoom` (1.0–1.20) — drift travel amount.
+  zoom-in/out went from a hard-coded 1.08 cap to a linear interpolation
+  to whatever the Director picks.
+- `cutReason` — Director's free-text justification for the cut, surfaced
+  to Critic so it can judge transition logic, not rendered.
+
+The Critic prompt patches dictionary, the IntentParserAgent feedback
+schema (so users can say "快一点" → `speed_factor: 1.3`), and
+`PipelineOrchestrator.applyPatches` were all updated in lockstep —
+landmine #8 (prompt + parser + applyPatches must co-edit) was easy to
+hit during this work and is now guarded by tests.
+([`schemas/Schemas.kt:171-201`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/schemas/Schemas.kt))
+
+`ShotRenderCache.signature()` was bumped to `CACHE_VERSION = 2` and
+includes `speedFactor` + `kbZoom` so existing cached MP4s don't get
+reused after the field semantics changed.
+
+`TimelineStoryboardBuilder` shows the speed badge (`0.7x⏪` / `1.3x⏩`)
+in the header next to the Ken Burns arrow when speedFactor != 1.0, so
+Critic can tell at a glance whether a shot is supposed to drag.
+
+### Theme C — Apple-style UI overhaul
+
+A new theme module under `ui/theme/` ships three pieces:
+- [`VlogPilotTokens.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/ui/theme/VlogPilotTokens.kt) — design tokens: iOS system color palette (System Blue / Gray1–6 / Red / Green / Orange / Purple / Pink), continuous-corner shapes, spring motion specs, spacing scale.
+- [`VlogPilotTheme.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/ui/theme/VlogPilotTheme.kt) — wraps the VlogPilot subtree with a Material3 colorScheme + shapes override that doesn't bleed into the rest of the gallery app.
+- [`AppleComponents.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/ui/AppleComponents.kt) — primitives: `LargeTitleHeader`, `InsetGroupedSurface`, `HairlineDivider`, `PrimaryActionButton`, `TintedActionButton`, `PlainTextButton`, `CapsuleChip`, `InsetGroupedCell`, `PressableSurface` (with subtle press scale-down), `AnimatedExpand`.
+
+All major screens were re-themed:
+- `VideoResultsUi.VideoShelf` — large-title header, capsule category chips, inset-grouped cards with hairline dividers, semantic tinted status pills, tinted action buttons (save in blue, share in blue, refine in purple, change-story in orange).
+- `NavigationUi.WorkspaceTabs` — iOS segmented control with smooth color transition (220ms tween, no ripple).
+- `IterationSheet` — drag handle on top, large title, semantic-tinted toggle chips (FASTER blue / SLOWER purple / REMOVE_CAPTIONS gray / CHANGE_COLOR_GRADE pink), `PrimaryActionButton` for submit.
+- `EmptyStateUi`, `CuratorScreen`, `StoryUi`, `SettingsUi`, `AdvancedPickerUi` — all polished to use the new tokens, tinted icon containers, hairline separators, no chunky FilledTonalButtons.
+- `CommonUi.PanelCard` — dropped tonalElevation + border, 20dp continuous corners, the global "card" look is much lighter.
+- `CommonUi.KeyValue` — bumped from `labelSmall + outline` (illegible gray) to `bodyMedium + secondaryLabel`, 64dp → 80dp label column. The Browse/Audience/Director panels suddenly read clearly.
+
+`AnnotationKeyValues` / `VideoInsightKeyValues` rewrote the English tag
+labels (scene / subjects / action / mood / time / salient / role / camera_work)
+into Chinese (场景 / 主体 / 动作 / 情绪 / 时间感 / 亮点 / 叙事角色 / 镜头运动) to
+match the rest of the user-facing copy.
+
+### Theme D — Album virtualization + thumbnail caching
+
+The 相册 tab was the worst-performing surface — 60+ thumbnails decoded
+from scratch on every recompose, no virtualization, ARGB_8888 wasting 2×
+memory vs RGB_565. Three fixes:
+
+- [`perception/ThumbnailCache.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/perception/ThumbnailCache.kt) — LRU memory cache sized at 1/8 heap (~32 MB), bucketed by (assetId, maxSide). `peek()` provides synchronous cache hits so scroll-back is instant; `loadOrDecode()` does the IO+decode when missing.
+- `MediaLoader.loadImage()` — added `preferRgb565: Boolean = false`, used by the cache for grid thumbnails. ~30% faster decode, 50% less memory.
+- `AssetLibraryTab` was refactored from `@Composable fun` (non-virtualized Column + forEach) to `LazyListScope.assetLibraryItems()` extension that yields each photo row as its own LazyColumn item. The asset detail dialog moved to `AssetLibraryDialog` rendered separately (Dialog isn't valid inside LazyListScope). Each row gets a stable `key` and matching `contentType` so LazyColumn can recycle holders.
+
+The `AssetThumb` itself was simplified — drops the always-on "IMG" pill
+in favor of a duration pill on videos only (Apple Photos pattern), and
+swapped `produceState` to consult `ThumbnailCache.peek()` synchronously
+on first composition so cached entries appear in the same frame, no flicker.
+
+### Theme E — Result page becomes publishable + Claude-style work timeline
+
+`VlogExporter` is a new module ([`export/VlogExporter.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/export/VlogExporter.kt)) closing the product loop:
+- `saveToGallery()` writes the rendered MP4 to `Movies/VlogPilot/<title>.mp4` via MediaStore (IS_PENDING → finalize), so 小红书 / 微信 / 系统相册 / 文件管理器 all see it.
+- `buildShareIntent()` wraps the MP4 in a FileProvider URI and launches the system chooser. `file_paths.xml` got a new `<files-path name="vlog_candidates" path="candidates/">` entry to authorize the URI.
+- Result-page action row now has 4 `TintedActionButton`s side-by-side: 保存到相册 + 分享 (publish row) and 改一改 + 换故事 (edit row).
+
+The result page itself moved from inline expand-collapse to dedicated
+detail navigation — `VlogDetailScreen` is a new full-page composable with
+a back-bar + scrollable detail content. `VlogPilotScreen` hoists a
+`detailEventId` state and short-circuits the LazyColumn when set,
+matching the iOS Photos / Settings drill-down pattern. The list itself
+stays a clean list of rows with chevron indicators, no expand state to
+get lost in.
+
+The biggest user-facing addition — `AgentTimelineCard` ([`ui/AgentTimelineCard.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/ui/AgentTimelineCard.kt)) — renders the work-process the way Claude shows tool calls: tinted dot + connector line + agent label + timestamp + detail snippet. Two surfaces:
+
+1. **During creation** — the StoryProgressCard now embeds the live
+   timeline (auto-scrolls to the latest step, max 320dp tall, scrollable
+   for history). Replaces the old "1 line of recent breadcrumb" approach
+   that hid most of the work.
+2. **In the detail page** — `ProcessOutputs` adds a "工作时间线" section
+   that replays the full per-event chain from `_state_history.jsonl` —
+   stays available indefinitely after the run ends.
+
+`AgentTimeline` ([`pipeline/AgentTimeline.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/AgentTimeline.kt)) is the data layer: parses the JSONL,
+filters per-event (by extracting `eventId` from the `detail` field's
+first space-separated token), maps each stage to a category (BROWSE /
+AUDIENCE / DIRECTOR / EDITOR / CRITIC / RENDER / DONE / ERROR / etc.) for
+UI tinting, and provides Chinese-friendly labels for raw stage tags.
+
+### Theme F — Editing perf + observability
+
+Per-asset VLM annotation was bottlenecked on contact-sheet size — Gemma's
+visual encoder is roughly linear in pixels. Cell dimensions dropped
+320×426 → 240×320 (~45% pixel reduction), max frames 20→16 (HIGH) /
+16→12 (LOW). Predicted ~30-40% inference speedup per asset.
+([`pipeline/VideoFrameSheetBuilder.kt:30-37`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/VideoFrameSheetBuilder.kt))
+
+A new `vlm_step` breadcrumb logs per-asset perf splits:
+`image <id> WxH load=Xms ask=Yms` for stills, `video <id> sheet=WxH
+frames=N build=Xms ask=Yms` for video. Without this, the UI only showed
+aggregate per-asset wall time and the bottleneck between frame
+sampling, sheet building, and Gemma inference was invisible. Read via:
+
+```bash
+adb exec-out run-as com.google.aiedge.gallery cat files/agent_log/agent.jsonl | grep vlm_step
+```
+
+### Tests
+
+Three new test files cover the V1/V2 schema and helpers:
+- `EditorAgentTest` — 6 cases for `enforceTransitionDiversity`
+- `TemplateCatalogTest` — 6 cases for the 2 new long templates' keyword routing
+- `ShotFieldDefaultsTest` — 3 cases for legacy JSON deserialization with new fields
+
+Total: 67 tests pass. Build green on `:app:installDebug` for vivo X200 Pro.
+
+---
+
 ## v5.0 — User-curated stories + reversible feedback iteration (2026-05-08)
 
 The pipeline gained two big capabilities: users can **pick their own

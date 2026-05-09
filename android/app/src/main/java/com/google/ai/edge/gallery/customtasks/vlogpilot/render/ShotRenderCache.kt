@@ -18,7 +18,9 @@ import java.util.Locale
 object ShotRenderCache {
   private const val TAG = "ShotRenderCache"
   private const val CACHE_DIR = "vlog_shot_cache"
-  private const val CACHE_VERSION = 1
+  // Bump when ShotSpec gains fields that affect the rendered MP4.
+  // v2: added speedFactor / kenBurnsZoom (V2.1).
+  private const val CACHE_VERSION = 2
 
   data class Entry(val file: File)
 
@@ -67,6 +69,8 @@ object ShotRenderCache {
       append("shotDuration=").append(spec.durationSec.fmt()).append('\n')
       append("trim=").append(trim?.startSec?.fmt()).append('-').append(trim?.endSec?.fmt()).append('\n')
       append("kenBurns=").append(spec.kenBurns).append('\n')
+      append("kbZoom=").append(spec.kenBurnsZoom.fmt()).append('\n')
+      append("speedFactor=").append(spec.speedFactor.fmt()).append('\n')
       append("grade=").append(spec.colorGrade.name).append('\n')
       append("caption=").append(spec.caption).append('\n')
       append("font=").append(fontAvailable).append('\n')

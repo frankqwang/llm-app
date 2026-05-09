@@ -195,15 +195,15 @@ internal data class PromptSpec(
 internal fun promptSpecs(): List<PromptSpec> = listOf(
   PromptSpec(
     title = "VLM 单素材标注",
-    subtitle = "图片缩略图 -> VlmTags",
+    subtitle = "图片缩略图 -> VlmTags（含构图/光线/动态）",
     systemPrompt = PromptStrings.VLM_IMAGE_SYSTEM,
-    userTemplate = "媒体类型: <image/video/live_photo>。请输出 VlmTags JSON。",
+    userTemplate = "媒体类型: <image/video/live_photo>。这是用于 vlog 剪辑的素材标注，请输出 VlmTags JSON。",
   ),
   PromptSpec(
     title = "VLM 视频多帧标注",
-    subtitle = "自适应多帧视频网格 -> VlmTags + VideoInsight",
+    subtitle = "自适应多帧视频网格 -> VlmTags + VideoInsight（含镜头运动/节奏/声音暗示）",
     systemPrompt = PromptStrings.VLM_VIDEO_SYSTEM,
-    userTemplate = "媒体类型: <video/live_photo>。帧编号和时间戳: 1=0.4s, 2=1.2s, ...。请输出 Video VlmTags JSON。",
+    userTemplate = "媒体类型: <video/live_photo>。帧编号和时间戳: 1=0.4s, 2=1.2s, ...。这是用于 vlog 剪辑的素材标注，请输出 Video VlmTags JSON。",
   ),
   PromptSpec(
     title = "Event Scout",

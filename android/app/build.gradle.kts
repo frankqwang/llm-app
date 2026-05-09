@@ -28,6 +28,44 @@ plugins {
   kotlin("kapt")
 }
 
+import java.net.URL
+
+tasks.register("downloadPerceptionModels") {
+  val modelsDir = file("src/main/assets/models")
+  modelsDir.mkdirs()
+  val models = mapOf(
+    "face_landmarker.task" to "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task",
+    "nsfw_vit_int8.onnx" to "https://huggingface.co/AdamCodd/vit-base-nsfw-detector/resolve/main/onnx/model_int8.onnx",
+  )
+  doLast {
+    models.forEach { (name, url) ->
+      val target = File(modelsDir, name)
+      if (!target.exists() || target.length() < 1_000) {
+        println("Downloading perception model: $name ...")
+        try {
+          URL(url).openStream().use { input: java.io.InputStream ->
+            target.outputStream().use { output: java.io.OutputStream -> input.copyTo(output) }
+          }
+          println("Downloaded $name (${target.length()} bytes)")
+        } catch (t: Throwable) {
+          println("WARN: Failed to download $name: ${t.message}")
+          println("      Place the file manually at: ${target.absolutePath}")
+          // Don't fail the build — let the developer copy manually or rely on OTA at runtime.
+        }
+      } else {
+        println("Perception model $name already exists (${target.length()} bytes), skipping")
+      }
+    }
+  }
+}
+
+// Ensure models are present before assets are merged into the APK.
+// Use afterEvaluate so Android Gradle Plugin has already created merge*Assets tasks.
+afterEvaluate {
+  tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
+    .configureEach { dependsOn("downloadPerceptionModels") }
+}
+
 android {
   namespace = "com.google.ai.edge.gallery"
   compileSdk = 35

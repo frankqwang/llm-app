@@ -122,53 +122,64 @@ internal fun StoryHeroCard(
   onVideosClick: () -> Unit,
   onCurateClick: () -> Unit,
 ) {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
   PanelCard {
-    Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
       SectionHeader(
         icon = Icons.Outlined.Movie,
         title = "创作一条 AI 回忆",
-        subtitle = "我会从最近 90 天里找出适合轻剪辑的故事，也可以由你手动挑素材。",
+        subtitle = "我会从最近 90 天里找出适合轻剪辑的故事，也可以由你手动挑素材",
       )
       if (state is PipelineState.Error) {
         Text(
           state.message,
-          style = MaterialTheme.typography.bodySmall,
-          color = MaterialTheme.colorScheme.error,
+          style = MaterialTheme.typography.bodyMedium,
+          color = tokens.colors.systemRed,
         )
       } else {
         Text(
           "点一下开始，我会先帮你看相册，再把适合剪的故事放到这里。",
           style = MaterialTheme.typography.bodyMedium,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          color = tokens.colors.secondaryLabel,
         )
       }
-      Button(modifier = Modifier.fillMaxWidth(), onClick = onStartClick) {
-        Text("扫描推荐")
-      }
+      com.google.ai.edge.gallery.customtasks.vlogpilot.ui.PrimaryActionButton(
+        text = "扫描推荐",
+        icon = Icons.Outlined.Search,
+        onClick = onStartClick,
+        modifier = Modifier.fillMaxWidth(),
+      )
       // Secondary CTA — same level visually but "或者" framing makes it
       // optional. Power users who already know what they want skip the auto
       // discovery and go straight to curation.
-      androidx.compose.material3.TextButton(
-        modifier = Modifier.fillMaxWidth(),
+      com.google.ai.edge.gallery.customtasks.vlogpilot.ui.PlainTextButton(
+        text = "或者，我自己挑素材",
         onClick = onCurateClick,
-      ) {
-        Text("或者，我自己挑素材")
-      }
+        modifier = Modifier.fillMaxWidth(),
+      )
       if (recentDecisions.isNotEmpty()) {
-        HorizontalDivider()
-        Text("最近生成", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+        com.google.ai.edge.gallery.customtasks.vlogpilot.ui.HairlineDivider(startInset = 0.dp)
+        Text(
+          "最近生成",
+          style = MaterialTheme.typography.titleSmall,
+          fontWeight = FontWeight.SemiBold,
+          color = MaterialTheme.colorScheme.onSurface,
+        )
         recentDecisions.forEach { decision ->
           Text(
             storyTitle(decision),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodyMedium,
+            color = tokens.colors.secondaryLabel,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
           )
         }
-        FilledTonalButton(modifier = Modifier.fillMaxWidth(), onClick = onVideosClick) {
-          Text("查看作品")
-        }
+        com.google.ai.edge.gallery.customtasks.vlogpilot.ui.TintedActionButton(
+          text = "查看作品",
+          icon = Icons.Outlined.Movie,
+          onClick = onVideosClick,
+          modifier = Modifier.fillMaxWidth(),
+        )
       }
     }
   }
@@ -180,12 +191,26 @@ internal fun StoryProgressCard(
   progress: ProgressSnapshot,
   onCancel: () -> Unit,
 ) {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
+  val context = androidx.compose.ui.platform.LocalContext.current
   val friendly = friendlyProgress(progress, making = state is PipelineState.Running)
   val fraction = remember(friendly.current, friendly.total) {
     if (friendly.total > 0) (friendly.current.toFloat() / friendly.total.toFloat()).coerceIn(0f, 1f) else null
   }
+  // Re-read the persistent timeline whenever the live progress ticks. Reads
+  // from filesDir so it survives process death (the worker keeps appending
+  // even when the UI hasn't re-subscribed yet).
+  val timelineEntries by androidx.compose.runtime.produceState(
+    initialValue = emptyList<com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.AgentTimelineEntry>(),
+    progress.stage,
+    progress.recent,
+  ) {
+    value = withContext(kotlinx.coroutines.Dispatchers.IO) {
+      com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.AgentTimeline.read(context, tailLimit = 200)
+    }
+  }
   PanelCard {
-    Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
       SectionHeader(
         icon = if (state is PipelineState.Running) Icons.Outlined.Movie else Icons.Outlined.Search,
         title = friendly.title,
@@ -196,27 +221,36 @@ internal fun StoryProgressCard(
           progress = { fraction },
           modifier = Modifier
             .fillMaxWidth()
-            .height(7.dp)
+            .height(6.dp)
             .clip(RoundedCornerShape(999.dp)),
         )
         Text(
           "已完成 ${friendly.current}/${friendly.total}",
-          style = MaterialTheme.typography.labelSmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          style = MaterialTheme.typography.labelMedium,
+          color = tokens.colors.secondaryLabel,
         )
       }
-      if (progress.recent.isNotEmpty()) {
-        Text(
-          progress.recent.first(),
-          style = MaterialTheme.typography.labelSmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-        )
-      }
-      FilledTonalButton(modifier = Modifier.fillMaxWidth(), onClick = onCancel) {
-        Text("取消")
-      }
+      // Claude-style timeline: shows what the AI is doing right now and the
+      // chain of agents that fed into it. Cap height so the card doesn't
+      // dominate the viewport, but make it scrollable so the user can scroll
+      // back through earlier steps.
+      Text(
+        "工作过程",
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.SemiBold,
+        color = tokens.colors.secondaryLabel,
+      )
+      com.google.ai.edge.gallery.customtasks.vlogpilot.ui.AgentTimelineCard(
+        entries = timelineEntries,
+        pulse = state is PipelineState.Running,
+        maxVisibleHeight = 320.dp,
+      )
+      com.google.ai.edge.gallery.customtasks.vlogpilot.ui.TintedActionButton(
+        text = "取消",
+        onClick = onCancel,
+        tint = tokens.colors.systemRed,
+        modifier = Modifier.fillMaxWidth(),
+      )
     }
   }
 }
@@ -536,47 +570,97 @@ internal fun StoryShelfHeader(
           overflow = TextOverflow.Ellipsis,
         )
       }
-      FilledTonalButton(onClick = onStartClick, enabled = !running) { Text("重扫") }
+      com.google.ai.edge.gallery.customtasks.vlogpilot.ui.TintedActionButton(
+        text = "重扫",
+        icon = Icons.Outlined.Search,
+        onClick = onStartClick,
+        enabled = !running,
+      )
     }
 
     if (selectedStories.isNotEmpty()) {
+      val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
       val selectedTitle = if (selectedStories.size == 1) {
         storyTitle(selectedStories.first())
       } else {
         "${storyTitle(selectedStories.first())} 等 ${selectedStories.size} 组故事"
       }
+      // Subtle accent-tinted card — accent for icon and emphasis text only,
+      // with a clear PrimaryActionButton on the right. Avoids the all-blue
+      // wash that drowned the title in earlier iterations.
       Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.82f),
-        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        shape = RoundedCornerShape(16.dp),
+        color = tokens.colors.accentTint,
+        tonalElevation = 0.dp,
       ) {
         Row(
-          modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-          horizontalArrangement = Arrangement.spacedBy(10.dp),
+          modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+          horizontalArrangement = Arrangement.spacedBy(12.dp),
           verticalAlignment = Alignment.CenterVertically,
         ) {
-          Icon(Icons.Outlined.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+          Box(
+            modifier = Modifier
+              .size(34.dp)
+              .clip(RoundedCornerShape(50))
+              .background(tokens.colors.accent),
+            contentAlignment = Alignment.Center,
+          ) {
+            Icon(
+              Icons.Outlined.CheckCircle,
+              contentDescription = null,
+              tint = Color.White,
+              modifier = Modifier.size(20.dp),
+            )
+          }
           Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text("已选择 ${selectedStories.size} 组", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium)
+            Text(
+              "已选择 ${selectedStories.size} 组",
+              style = MaterialTheme.typography.labelMedium,
+              color = tokens.colors.accent,
+              fontWeight = FontWeight.SemiBold,
+            )
             Text(
               selectedTitle,
-              style = MaterialTheme.typography.labelLarge,
+              style = MaterialTheme.typography.titleSmall,
               fontWeight = FontWeight.SemiBold,
+              color = MaterialTheme.colorScheme.onSurface,
               maxLines = 1,
               overflow = TextOverflow.Ellipsis,
             )
-          }
-          Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Button(onClick = onMakeSelectedStories, enabled = !running) {
-              Text(if (running) if (refreshOnly) "重扫中" else "制作中" else "开始制作")
+            if (running) {
+              Text(
+                if (refreshOnly) "正在更新候选" else "制作进行中",
+                style = MaterialTheme.typography.labelSmall,
+                color = tokens.colors.secondaryLabel,
+              )
+            } else {
+              Text(
+                "取消选择",
+                modifier = Modifier.clickable { onClearOnly() },
+                style = MaterialTheme.typography.labelSmall,
+                color = tokens.colors.secondaryLabel,
+              )
             }
-            Text(
-              if (running) if (refreshOnly) "正在更新候选" else "制作进行中" else "取消选择",
-              modifier = Modifier.clickable(enabled = !running) { onClearOnly() },
-              style = MaterialTheme.typography.labelSmall,
-              color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.78f),
-              fontWeight = FontWeight.Medium,
+          }
+          if (running) {
+            Box(
+              modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(tokens.colors.accent.copy(alpha = 0.5f))
+                .padding(horizontal = 14.dp, vertical = 9.dp),
+            ) {
+              Text(
+                if (refreshOnly) "重扫中" else "制作中",
+                style = MaterialTheme.typography.labelMedium,
+                color = Color.White,
+                fontWeight = FontWeight.SemiBold,
+              )
+            }
+          } else {
+            com.google.ai.edge.gallery.customtasks.vlogpilot.ui.PrimaryActionButton(
+              text = "开始制作",
+              onClick = onMakeSelectedStories,
             )
           }
         }
@@ -595,20 +679,11 @@ internal fun StoryShelfHeader(
       Text("排序", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
       StorySortMode.entries.forEach { sort ->
         val active = sort == selectedSort
-        Surface(
-          modifier = Modifier.clickable { onSortSelect(sort) },
-          shape = RoundedCornerShape(999.dp),
-          color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
-          contentColor = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (active) 0f else 0.45f)),
-        ) {
-          Text(
-            sort.label,
-            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.SemiBold,
-          )
-        }
+        com.google.ai.edge.gallery.customtasks.vlogpilot.ui.CapsuleChip(
+          text = sort.label,
+          selected = active,
+          onClick = { onSortSelect(sort) },
+        )
       }
       Spacer(modifier = Modifier.weight(1f))
       if (runConfig.pinnedEventIds.isNotEmpty()) {
@@ -630,27 +705,16 @@ internal fun StoryCategoryChips(
 ) {
   LazyRow(
     modifier = Modifier.fillMaxWidth(),
-    horizontalArrangement = Arrangement.spacedBy(7.dp),
+    horizontalArrangement = Arrangement.spacedBy(6.dp),
     contentPadding = PaddingValues(horizontal = 1.dp),
   ) {
     items(categories) { category ->
-      val active = category == selected
       val count = candidates.count { matchesStoryCategory(it, category) }
-      Surface(
-        modifier = Modifier.clickable { onSelect(category) },
-        shape = RoundedCornerShape(999.dp),
-        color = if (active) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.82f) else MaterialTheme.colorScheme.surface,
-        contentColor = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (active) 0f else 0.42f)),
-      ) {
-        Text(
-          "${category.label} $count",
-          modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-          style = MaterialTheme.typography.labelSmall,
-          fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
-          maxLines = 1,
-        )
-      }
+      com.google.ai.edge.gallery.customtasks.vlogpilot.ui.CapsuleChip(
+        text = if (count > 0) "${category.label} $count" else category.label,
+        selected = category == selected,
+        onClick = { onSelect(category) },
+      )
     }
   }
 }

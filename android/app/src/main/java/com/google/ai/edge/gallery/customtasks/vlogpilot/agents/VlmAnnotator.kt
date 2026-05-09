@@ -109,6 +109,10 @@ class VlmAnnotator(private val agent: AgentRuntime) {
         bestMomentWindowStart = winStart,
         bestMomentWindowEnd = winEnd,
         badMomentIndices = badIndices,
+        cameraWork = obj["camera_work"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+        pacing = obj["pacing"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+        audioVisualHint = obj["audio_visual_hint"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+        visualDescription = obj["visual_description"]?.jsonPrimitive?.contentOrNull.orEmpty(),
       ),
     )
   }
@@ -122,5 +126,9 @@ class VlmAnnotator(private val agent: AgentRuntime) {
       timeFeel = obj["time_feel"]?.jsonPrimitive?.contentOrNull.orEmpty(),
       salient = obj["salient"]?.jsonPrimitive?.contentOrNull.orEmpty(),
       narrativeRoleHint = obj["narrative_role_hint"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+      composition = obj["composition"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+      lighting = obj["lighting"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+      motionHint = obj["motion_hint"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+      visualDescription = obj["visual_description"]?.jsonPrimitive?.contentOrNull.orEmpty(),
     )
 }

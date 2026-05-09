@@ -119,25 +119,46 @@ internal fun AdvancedTabPicker(
   selected: VlogPilotAdvancedTab,
   onSelect: (VlogPilotAdvancedTab) -> Unit,
 ) {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
   Surface(
     modifier = Modifier.fillMaxWidth(),
-    shape = RoundedCornerShape(18.dp),
-    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+    shape = RoundedCornerShape(50),
+    color = if (tokens.colors.isDark) tokens.colors.groupedSurfaceRaised
+            else MaterialTheme.colorScheme.surface,
+    tonalElevation = 0.dp,
   ) {
-    Row(modifier = Modifier.padding(5.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    Row(modifier = Modifier.padding(4.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
       VlogPilotAdvancedTab.entries.forEach { tab ->
         val active = tab == selected
+        val containerColor by androidx.compose.animation.animateColorAsState(
+          targetValue = if (active) tokens.colors.accentTint else Color.Transparent,
+          animationSpec = androidx.compose.animation.core.tween(durationMillis = 220),
+          label = "adv-tab-bg",
+        )
+        val contentColor by androidx.compose.animation.animateColorAsState(
+          targetValue = if (active) tokens.colors.accent else tokens.colors.secondaryLabel,
+          animationSpec = androidx.compose.animation.core.tween(durationMillis = 220),
+          label = "adv-tab-fg",
+        )
         Surface(
           modifier = Modifier
             .weight(1f)
-            .clickable { onSelect(tab) },
-          shape = RoundedCornerShape(14.dp),
-          color = if (active) MaterialTheme.colorScheme.surface else Color.Transparent,
-          contentColor = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-          tonalElevation = if (active) 2.dp else 0.dp,
+            .clickable(
+              interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+              indication = null,
+              onClick = { onSelect(tab) },
+            ),
+          shape = RoundedCornerShape(50),
+          color = containerColor,
+          contentColor = contentColor,
+          tonalElevation = 0.dp,
         ) {
           Box(modifier = Modifier.padding(vertical = 9.dp), contentAlignment = Alignment.Center) {
-            Text(tab.label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+            Text(
+              tab.label,
+              style = MaterialTheme.typography.labelLarge,
+              fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+            )
           }
         }
       }

@@ -12,6 +12,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Build
 import android.widget.MediaController
+import android.widget.Toast
 import android.widget.VideoView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -41,6 +42,8 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.ErrorOutline
@@ -51,7 +54,9 @@ import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.SaveAlt
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material.icons.outlined.Tune
@@ -71,10 +76,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -91,6 +98,14 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.PromptStrings
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.EventScoutAgent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.VlmAnnotator
+import com.google.ai.edge.gallery.customtasks.vlogpilot.export.VlogExporter
+import com.google.ai.edge.gallery.customtasks.vlogpilot.ui.AnimatedExpand
+import com.google.ai.edge.gallery.customtasks.vlogpilot.ui.CapsuleChip
+import com.google.ai.edge.gallery.customtasks.vlogpilot.ui.HairlineDivider
+import com.google.ai.edge.gallery.customtasks.vlogpilot.ui.InsetGroupedSurface
+import com.google.ai.edge.gallery.customtasks.vlogpilot.ui.LargeTitleHeader
+import com.google.ai.edge.gallery.customtasks.vlogpilot.ui.TintedActionButton
+import com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.MediaLoader
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.GenerationIntent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.PowerProfile
@@ -115,6 +130,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 internal enum class VideoBrowseCategory(val label: String) {
@@ -141,13 +157,9 @@ internal fun VideoShelf(
   selectedSort: VideoSortMode,
   onCategorySelect: (VideoBrowseCategory) -> Unit,
   onSortSelect: (VideoSortMode) -> Unit,
-  onOpenIterationSheet: (String, Int?) -> Unit,
-  onChangeStory: () -> Unit,
+  onOpenDetail: (String) -> Unit,
   onDismissIteration: () -> Unit,
-  focusedEventId: String? = null,
-  onFocusConsumed: () -> Unit = {},
 ) {
-  var expandedEventId by remember(decisions) { mutableStateOf<String?>(null) }
   // Counts and category list depend only on decisions; filtered list also
   // depends on the user's category/sort choice. Each remember key is the
   // minimum the result actually depends on — recomputing 6 chip counts
@@ -176,94 +188,61 @@ internal fun VideoShelf(
   val visibleDraftProjects = remember(draftProjects, selectedCategory) {
     if (selectedCategory == VideoBrowseCategory.All || selectedCategory == VideoBrowseCategory.Draft) draftProjects else emptyList()
   }
-  // If the currently expanded card is no longer in the filtered list (user
-  // changed category to one that excludes it, or the data refresh dropped
-  // it), auto-collapse so the next card down doesn't appear randomly
-  // expanded under the user's finger.
-  LaunchedEffect(selectedCategory, decisions) {
-    val current = expandedEventId ?: return@LaunchedEffect
-    if (filtered.none { it.eventId == current }) {
-      expandedEventId = null
-    }
-  }
-  LaunchedEffect(focusedEventId, decisions) {
-    val target = focusedEventId ?: return@LaunchedEffect
-    if (decisions.any { it.eventId == target }) {
-      expandedEventId = target
-      onFocusConsumed()
-    }
-  }
 
-  PanelCard(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.16f)) {
-    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-      VideoShelfHeader(
-        projects = projects,
-        decisions = decisions,
-        shownCount = filtered.size + visibleDraftProjects.size,
-        selectedSort = selectedSort,
-        activeIteration = activeIteration,
-        onSortSelect = onSortSelect,
-        onDismissIteration = onDismissIteration,
-      )
+  Column(verticalArrangement = Arrangement.spacedBy(VlogPilotTokens.spacing.sm)) {
+    VideoShelfHeader(
+      projects = projects,
+      decisions = decisions,
+      shownCount = filtered.size + visibleDraftProjects.size,
+      selectedSort = selectedSort,
+      activeIteration = activeIteration,
+      onSortSelect = onSortSelect,
+      onDismissIteration = onDismissIteration,
+    )
 
-      VideoCategoryChips(
-        categories = categories,
-        selected = selectedCategory,
-        counts = categoryCounts,
-        onSelect = onCategorySelect,
-      )
+    VideoCategoryChips(
+      categories = categories,
+      selected = selectedCategory,
+      counts = categoryCounts,
+      onSelect = onCategorySelect,
+    )
 
-      Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f)),
-      ) {
-        Column {
-          if (filtered.isEmpty() && visibleDraftProjects.isEmpty()) {
-            Box(
-              modifier = Modifier
-                .fillMaxWidth()
-                .padding(18.dp),
-              contentAlignment = Alignment.Center,
-            ) {
-              Text("这一类暂时没有视频", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-          } else {
-            filtered.forEachIndexed { index, decision ->
-              val expanded = expandedEventId == decision.eventId
-              val project = projectForDecision(projects, decision)
-              VideoListItem(
-                d = decision,
-                project = project,
-                expanded = expanded,
-                onToggleExpand = {
-                  expandedEventId = if (expanded) null else decision.eventId
-                },
-                onOpenIterationSheet = onOpenIterationSheet,
-              )
-              if (expanded) {
-                VideoExpandedDetail(
-                  d = decision,
-                  project = project,
-                  onOpenIterationSheet = onOpenIterationSheet,
-                  onChangeStory = onChangeStory,
-                )
-              }
-              if (index != filtered.lastIndex || visibleDraftProjects.isNotEmpty()) {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.32f))
-              }
-            }
-            visibleDraftProjects.forEachIndexed { index, project ->
-              ProjectDraftListItem(project)
-              if (index != visibleDraftProjects.lastIndex) {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.32f))
-              }
-            }
+    InsetGroupedSurface {
+      if (filtered.isEmpty() && visibleDraftProjects.isEmpty()) {
+        Box(
+          modifier = Modifier
+            .fillMaxWidth()
+            .padding(VlogPilotTokens.spacing.xl),
+          contentAlignment = Alignment.Center,
+        ) {
+          Text(
+            "这一类暂时没有视频",
+            style = MaterialTheme.typography.bodyMedium,
+            color = VlogPilotTokens.colors.secondaryLabel,
+          )
+        }
+      } else {
+        filtered.forEachIndexed { index, decision ->
+          val project = projectForDecision(projects, decision)
+          VideoListItem(
+            d = decision,
+            project = project,
+            onOpen = { onOpenDetail(decision.eventId) },
+          )
+          if (index != filtered.lastIndex || visibleDraftProjects.isNotEmpty()) {
+            HairlineDivider(startInset = 96.dp)
+          }
+        }
+        visibleDraftProjects.forEachIndexed { index, project ->
+          ProjectDraftListItem(project)
+          if (index != visibleDraftProjects.lastIndex) {
+            HairlineDivider(startInset = 96.dp)
           }
         }
       }
     }
+
+    Spacer(Modifier.size(VlogPilotTokens.spacing.lg))
   }
 }
 
@@ -282,53 +261,37 @@ private fun VideoShelfHeader(
     decisions.count { it.versionCount > 1 || it.previousMp4Path != null }
   }
   val projectCount = remember(projects, decisions) { projects.size.coerceAtLeast(decisions.size) }
-  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-    Row(
-      modifier = Modifier.fillMaxWidth(),
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
-      verticalAlignment = Alignment.CenterVertically,
-    ) {
-      Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-      ) {
-        Icon(Icons.Outlined.Movie, contentDescription = null, modifier = Modifier.padding(9.dp))
-      }
-      Column(modifier = Modifier.weight(1f)) {
-        Text("作品库", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Text(
-          "$projectCount 个作品 · 当前显示 $shownCount 个 · $readyCount 条可播放 · $iteratedCount 条已优化",
-          style = MaterialTheme.typography.labelSmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-        )
-      }
-    }
+  Column(verticalArrangement = Arrangement.spacedBy(VlogPilotTokens.spacing.sm)) {
+    LargeTitleHeader(
+      title = "作品库",
+      subtitle = "$projectCount 个作品 · ${readyCount} 条可播放 · ${iteratedCount} 条已优化",
+    )
 
     activeIteration?.let {
-      IterationProgressStrip(snapshot = it, onDismiss = onDismissIteration)
+      Box(modifier = Modifier.padding(horizontal = VlogPilotTokens.spacing.pageInset)) {
+        IterationProgressStrip(snapshot = it, onDismiss = onDismissIteration)
+      }
     }
 
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
-      Text("排序", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+    Row(
+      modifier = Modifier
+        .fillMaxWidth()
+        .padding(horizontal = VlogPilotTokens.spacing.pageInset),
+      horizontalArrangement = Arrangement.spacedBy(VlogPilotTokens.spacing.xs),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Text(
+        "排序",
+        style = MaterialTheme.typography.labelMedium,
+        color = VlogPilotTokens.colors.secondaryLabel,
+      )
+      Spacer(Modifier.width(VlogPilotTokens.spacing.xxs))
       VideoSortMode.entries.forEach { sort ->
-        val active = sort == selectedSort
-        Surface(
-          modifier = Modifier.clickable { onSortSelect(sort) },
-          shape = RoundedCornerShape(999.dp),
-          color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
-          contentColor = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (active) 0f else 0.45f)),
-        ) {
-          Text(
-            sort.label,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.SemiBold,
-          )
-        }
+        CapsuleChip(
+          text = sort.label,
+          selected = sort == selectedSort,
+          onClick = { onSortSelect(sort) },
+        )
       }
     }
   }
@@ -343,27 +306,16 @@ private fun VideoCategoryChips(
 ) {
   LazyRow(
     modifier = Modifier.fillMaxWidth(),
-    horizontalArrangement = Arrangement.spacedBy(7.dp),
-    contentPadding = PaddingValues(horizontal = 1.dp),
+    horizontalArrangement = Arrangement.spacedBy(VlogPilotTokens.spacing.xs),
+    contentPadding = PaddingValues(horizontal = VlogPilotTokens.spacing.pageInset),
   ) {
     items(categories) { category ->
-      val active = category == selected
       val count = counts[category] ?: 0
-      Surface(
-        modifier = Modifier.clickable { onSelect(category) },
-        shape = RoundedCornerShape(999.dp),
-        color = if (active) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.82f) else MaterialTheme.colorScheme.surface,
-        contentColor = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (active) 0f else 0.42f)),
-      ) {
-        Text(
-          "${category.label} $count",
-          modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-          style = MaterialTheme.typography.labelSmall,
-          fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
-          maxLines = 1,
-        )
-      }
+      CapsuleChip(
+        text = if (count > 0) "${category.label} $count" else category.label,
+        selected = category == selected,
+        onClick = { onSelect(category) },
+      )
     }
   }
 }
@@ -372,9 +324,7 @@ private fun VideoCategoryChips(
 private fun VideoListItem(
   d: EventDecisions,
   project: VlogProject?,
-  expanded: Boolean,
-  onToggleExpand: () -> Unit,
-  onOpenIterationSheet: (String, Int?) -> Unit,
+  onOpen: () -> Unit,
 ) {
   val timeline = d.videoTimeline()
   val durationSec = d.videoDurationSec()
@@ -383,90 +333,91 @@ private fun VideoListItem(
   Row(
     modifier = Modifier
       .fillMaxWidth()
-      .clickable { onToggleExpand() }
-      .padding(horizontal = 10.dp, vertical = 8.dp),
-    horizontalArrangement = Arrangement.spacedBy(9.dp),
+      .clickable { onOpen() }
+      .padding(horizontal = VlogPilotTokens.spacing.lg, vertical = VlogPilotTokens.spacing.md),
+    horizontalArrangement = Arrangement.spacedBy(VlogPilotTokens.spacing.md),
     verticalAlignment = Alignment.CenterVertically,
   ) {
-    if (cover != null) {
-      AssetThumb(
-        asset = cover,
-        modifier = Modifier
-          .width(62.dp)
-          .height(66.dp),
-      )
-    } else {
+    Box(
+      modifier = Modifier
+        .size(72.dp)
+        .clip(RoundedCornerShape(12.dp))
+        .background(VlogPilotTokens.colors.groupedSurfaceRaised),
+    ) {
+      if (cover != null) {
+        AssetThumb(
+          asset = cover,
+          modifier = Modifier.size(72.dp),
+        )
+      } else {
+        Box(
+          modifier = Modifier.size(72.dp),
+          contentAlignment = Alignment.Center,
+        ) {
+          Icon(
+            Icons.Outlined.Movie,
+            contentDescription = null,
+            tint = VlogPilotTokens.colors.tertiaryLabel,
+          )
+        }
+      }
+      // Duration pill bottom-right of the thumbnail (Apple Photos pattern)
       Box(
         modifier = Modifier
-          .width(62.dp)
-          .height(66.dp)
-          .clip(RoundedCornerShape(12.dp))
-          .background(MaterialTheme.colorScheme.surfaceVariant),
-        contentAlignment = Alignment.Center,
+          .align(Alignment.BottomEnd)
+          .padding(4.dp)
+          .clip(RoundedCornerShape(6.dp))
+          .background(Color.Black.copy(alpha = 0.55f))
+          .padding(horizontal = 5.dp, vertical = 1.dp),
       ) {
-        Icon(Icons.Outlined.Movie, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+          formatSec(durationSec),
+          style = MaterialTheme.typography.labelSmall,
+          color = Color.White,
+          fontWeight = FontWeight.Medium,
+        )
       }
     }
-    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.Top) {
+
+    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+      Text(
+        project?.title ?: storyTitle(d),
+        style = MaterialTheme.typography.bodyLarge,
+        color = MaterialTheme.colorScheme.onSurface,
+        fontWeight = FontWeight.SemiBold,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+      Text(
+        videoCompactMeta(d, project),
+        style = MaterialTheme.typography.bodySmall,
+        color = VlogPilotTokens.colors.secondaryLabel,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+      Row(
+        horizontalArrangement = Arrangement.spacedBy(VlogPilotTokens.spacing.xs),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
         Text(
-          project?.title ?: storyTitle(d),
+          "${timeline?.shots?.size ?: 0} 镜头 · ${d.inputAssets.size} 素材${if (d.versionCount > 1) " · v${d.versionCount}" else ""}",
           modifier = Modifier.weight(1f),
-          style = MaterialTheme.typography.titleSmall,
-          fontWeight = FontWeight.SemiBold,
-          maxLines = 2,
+          style = MaterialTheme.typography.labelMedium,
+          color = VlogPilotTokens.colors.tertiaryLabel,
+          maxLines = 1,
           overflow = TextOverflow.Ellipsis,
         )
         d.event?.userCuration?.let { UserCuratedBadge() }
         VideoStatusPill(d, project)
       }
-      Text(
-        videoCompactMeta(d, project),
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-      )
-      Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(
-          "${timeline?.shots?.size ?: 0} 镜头",
-          style = MaterialTheme.typography.labelSmall,
-          color = MaterialTheme.colorScheme.primary,
-          fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-          listOf(
-            formatSec(durationSec),
-            "${d.inputAssets.size}素材",
-            if (d.versionCount > 1) "v${d.versionCount}" else "v1",
-          ).joinToString(" · "),
-          modifier = Modifier.weight(1f),
-          style = MaterialTheme.typography.labelSmall,
-          color = MaterialTheme.colorScheme.outline,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-        )
-      }
     }
-    Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-      Surface(
-        modifier = Modifier
-          .size(width = 42.dp, height = 32.dp)
-          .clickable(enabled = d.mp4Path != null) { onOpenIterationSheet(d.eventId, null) },
-        shape = RoundedCornerShape(999.dp),
-        color = if (d.mp4Path != null) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-        contentColor = if (d.mp4Path != null) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.outline,
-      ) {
-        Box(contentAlignment = Alignment.Center) {
-          Text("改", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-        }
-      }
-      Icon(
-        imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-        contentDescription = null,
-        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-      )
-    }
+
+    Icon(
+      imageVector = Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+      contentDescription = "打开详情",
+      tint = VlogPilotTokens.colors.tertiaryLabel,
+      modifier = Modifier.size(20.dp),
+    )
   }
 }
 
@@ -481,18 +432,107 @@ private fun VideoStatusPill(d: EventDecisions, project: VlogProject?) {
     d.versionCount > 1 || d.previousMp4Path != null -> "已优化"
     else -> "初版"
   }
-  val accent = d.mp4Path != null || project?.status == ProjectStatus.MAKING || project?.status == ProjectStatus.OPTIMIZING
-  Surface(
-    shape = RoundedCornerShape(7.dp),
-    color = if (accent) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-    contentColor = if (accent) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+  val tint = when {
+    project?.status == ProjectStatus.FAILED -> VlogPilotTokens.colors.systemRed
+    project?.status == ProjectStatus.MAKING || project?.status == ProjectStatus.OPTIMIZING ->
+      VlogPilotTokens.colors.systemOrange
+    d.mp4Path == null -> VlogPilotTokens.colors.tertiaryLabel
+    d.versionCount > 1 || d.previousMp4Path != null -> VlogPilotTokens.colors.systemGreen
+    else -> VlogPilotTokens.colors.accent
+  }
+  Box(
+    modifier = Modifier
+      .clip(RoundedCornerShape(6.dp))
+      .background(tint.copy(alpha = if (VlogPilotTokens.colors.isDark) 0.22f else 0.14f))
+      .padding(horizontal = 7.dp, vertical = 2.dp),
   ) {
     Text(
       label,
-      modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
       style = MaterialTheme.typography.labelSmall,
+      color = tint,
       fontWeight = FontWeight.SemiBold,
     )
+  }
+}
+
+/**
+ * Full-screen vlog detail page. Replaces the previous inline expand pattern —
+ * tapping a row in [VideoShelf] navigates here. Ships with a translucent back
+ * bar at the top so users always know how to return to the list.
+ */
+@Composable
+internal fun VlogDetailScreen(
+  decisions: List<EventDecisions>,
+  projects: List<VlogProject>,
+  eventId: String,
+  onBack: () -> Unit,
+  onOpenIterationSheet: (String, Int?) -> Unit,
+  onChangeStory: () -> Unit,
+) {
+  val tokens = VlogPilotTokens
+  val decision = remember(decisions, eventId) { decisions.firstOrNull { it.eventId == eventId } }
+  val project = remember(projects, decision) { decision?.let { projectForDecision(projects, it) } }
+
+  androidx.compose.foundation.lazy.LazyColumn(
+    modifier = Modifier
+      .fillMaxWidth()
+      .background(MaterialTheme.colorScheme.background),
+    contentPadding = PaddingValues(top = tokens.spacing.sm, bottom = tokens.spacing.xxl),
+  ) {
+    item(key = "detail-back-bar") {
+      Row(
+        modifier = Modifier
+          .fillMaxWidth()
+          .padding(horizontal = tokens.spacing.xs, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        IconButton(onClick = onBack) {
+          Icon(
+            Icons.Outlined.ArrowBack,
+            contentDescription = "返回",
+            tint = tokens.colors.accent,
+          )
+        }
+        Text(
+          decision?.let { project?.title ?: storyTitle(it) } ?: "作品详情",
+          modifier = Modifier
+            .weight(1f)
+            .padding(horizontal = 4.dp),
+          style = MaterialTheme.typography.titleMedium,
+          fontWeight = FontWeight.SemiBold,
+          color = MaterialTheme.colorScheme.onBackground,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
+      HairlineDivider(startInset = 0.dp)
+      Spacer(Modifier.height(tokens.spacing.sm))
+    }
+    if (decision == null) {
+      item(key = "detail-missing") {
+        Box(
+          modifier = Modifier
+            .fillMaxWidth()
+            .padding(tokens.spacing.xxl),
+          contentAlignment = Alignment.Center,
+        ) {
+          Text(
+            "找不到这条作品。它可能已经被刷新清理。",
+            style = MaterialTheme.typography.bodyMedium,
+            color = tokens.colors.secondaryLabel,
+          )
+        }
+      }
+    } else {
+      item(key = "detail-content") {
+        VideoExpandedDetail(
+          d = decision,
+          project = project,
+          onOpenIterationSheet = onOpenIterationSheet,
+          onChangeStory = onChangeStory,
+        )
+      }
+    }
   }
 }
 
@@ -505,6 +545,7 @@ private fun VideoExpandedDetail(
 ) {
   var showingPrevious by remember(d.eventId, d.mp4Path, d.previousMp4Path) { mutableStateOf(false) }
   val context = LocalContext.current
+  val scope = rememberCoroutineScope()
   val timeline = d.videoTimeline()
   val assetMap = remember(d.inputAssets) { d.inputAssets.associateBy { it.id } }
   val playablePath = if (showingPrevious) d.previousMp4Path else d.mp4Path
@@ -513,86 +554,153 @@ private fun VideoExpandedDetail(
     value = withContext(Dispatchers.IO) { IterationStore.loadHistory(context, d.eventId) }
   }
 
-  Surface(
+  Column(
     modifier = Modifier
       .fillMaxWidth()
-      .padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
-    shape = RoundedCornerShape(12.dp),
-    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.20f),
+      .padding(
+        start = VlogPilotTokens.spacing.lg,
+        end = VlogPilotTokens.spacing.lg,
+        top = VlogPilotTokens.spacing.xs,
+        bottom = VlogPilotTokens.spacing.lg,
+      ),
+    verticalArrangement = Arrangement.spacedBy(VlogPilotTokens.spacing.md),
   ) {
-    Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(
-          if (showingPrevious) "正在查看上一版" else videoSubtitle(d),
-          modifier = Modifier.weight(1f),
-          style = MaterialTheme.typography.labelSmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-        )
+    if (playablePath != null) {
+      // Video on top with an optional translucent History toggle pinned to
+      // the corner — same affordance as before, no extra row stealing
+      // vertical space.
+      Box(modifier = Modifier.fillMaxWidth()) {
+        VideoPreview(mp4Path = playablePath)
         if (canShowPrevious) {
-          IconButton(onClick = { showingPrevious = !showingPrevious }) {
-            Icon(
-              imageVector = Icons.Outlined.History,
-              contentDescription = if (showingPrevious) "回到最新版" else "查看上一版",
-              tint = if (showingPrevious) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+          Box(
+            modifier = Modifier
+              .align(Alignment.TopEnd)
+              .padding(10.dp)
+              .clip(RoundedCornerShape(50))
+              .background(Color.Black.copy(alpha = 0.55f))
+              .clickable { showingPrevious = !showingPrevious }
+              .padding(horizontal = 10.dp, vertical = 5.dp),
+          ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+              Icon(
+                Icons.Outlined.History,
+                contentDescription = if (showingPrevious) "回到最新版" else "查看上一版",
+                tint = Color.White,
+                modifier = Modifier.size(14.dp),
+              )
+              Spacer(Modifier.width(4.dp))
+              Text(
+                if (showingPrevious) "上一版" else "v${d.versionCount}",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White,
+                fontWeight = FontWeight.SemiBold,
+              )
+            }
           }
         }
       }
-
-      if (playablePath != null) {
-        VideoPreview(mp4Path = playablePath)
-      } else {
+    } else {
+      Box(
+        modifier = Modifier
+          .fillMaxWidth()
+          .clip(RoundedCornerShape(16.dp))
+          .background(VlogPilotTokens.colors.groupedSurfaceRaised)
+          .padding(VlogPilotTokens.spacing.xl),
+        contentAlignment = Alignment.Center,
+      ) {
         Text(
-          "这组作品还没有导出视频。可以回到创作页重新制作。",
-          style = MaterialTheme.typography.bodySmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          "这组作品还没有导出视频\n可以回到创作页重新制作",
+          style = MaterialTheme.typography.bodyMedium,
+          color = VlogPilotTokens.colors.secondaryLabel,
+          textAlign = androidx.compose.ui.text.style.TextAlign.Center,
         )
       }
+    }
 
-      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        FilledTonalButton(
-          modifier = Modifier.weight(1f),
-          onClick = { onOpenIterationSheet(d.eventId, null) },
-          enabled = d.mp4Path != null,
-          contentPadding = PaddingValues(horizontal = 10.dp, vertical = 7.dp),
-        ) {
-          Icon(Icons.Outlined.Tune, contentDescription = null, modifier = Modifier.size(16.dp))
-          Spacer(Modifier.width(4.dp))
-          Text(text = "改一改", fontWeight = FontWeight.SemiBold, maxLines = 1)
-        }
-        FilledTonalButton(
-          modifier = Modifier.weight(1f),
-          onClick = onChangeStory,
-          contentPadding = PaddingValues(horizontal = 10.dp, vertical = 7.dp),
-        ) {
-          Text("换故事", maxLines = 1)
-        }
-      }
+    var exporting by remember(d.eventId) { mutableStateOf(false) }
+    // Primary actions row — share is the primary publish moment, save is
+    // tinted-secondary so users notice it but the visual weight stays balanced.
+    Row(
+      modifier = Modifier.fillMaxWidth(),
+      horizontalArrangement = Arrangement.spacedBy(VlogPilotTokens.spacing.sm),
+    ) {
+      TintedActionButton(
+        text = if (exporting) "保存中…" else "保存到相册",
+        icon = Icons.Outlined.SaveAlt,
+        onClick = {
+          val path = playablePath ?: return@TintedActionButton
+          if (exporting) return@TintedActionButton
+          exporting = true
+          val title = storyTitle(d)
+          scope.launch {
+            val result = withContext(Dispatchers.IO) {
+              VlogExporter.saveToGallery(context, path, title)
+            }
+            exporting = false
+            Toast.makeText(
+              context,
+              if (result != null) "已保存到相册：${result.displayName}" else "保存失败，请确认空间充足",
+              Toast.LENGTH_SHORT,
+            ).show()
+          }
+        },
+        enabled = playablePath != null && !exporting,
+        modifier = Modifier.weight(1f),
+      )
+      TintedActionButton(
+        text = "分享",
+        icon = Icons.Outlined.Share,
+        onClick = {
+          val path = playablePath ?: return@TintedActionButton
+          val intent = VlogExporter.buildShareIntent(context, path, storyTitle(d))
+          if (intent == null) {
+            Toast.makeText(context, "分享失败，文件不存在", Toast.LENGTH_SHORT).show()
+            return@TintedActionButton
+          }
+          runCatching { context.startActivity(intent) }
+            .onFailure { Toast.makeText(context, "没有可用的分享应用", Toast.LENGTH_SHORT).show() }
+        },
+        enabled = playablePath != null,
+        modifier = Modifier.weight(1f),
+      )
+    }
 
-      timeline?.let {
-        ShotEditTimeline(
-          eventId = d.eventId,
-          timeline = it,
-          assetMap = assetMap,
-          canEdit = d.mp4Path != null,
-          onOpenIterationSheet = onOpenIterationSheet,
-        )
-      }
+    Row(
+      modifier = Modifier.fillMaxWidth(),
+      horizontalArrangement = Arrangement.spacedBy(VlogPilotTokens.spacing.sm),
+    ) {
+      TintedActionButton(
+        text = "改一改",
+        icon = Icons.Outlined.Tune,
+        onClick = { onOpenIterationSheet(d.eventId, null) },
+        enabled = d.mp4Path != null,
+        tint = VlogPilotTokens.colors.systemPurple,
+        modifier = Modifier.weight(1f),
+      )
+      TintedActionButton(
+        text = "换故事",
+        icon = Icons.Outlined.Edit,
+        onClick = onChangeStory,
+        tint = VlogPilotTokens.colors.systemOrange,
+        modifier = Modifier.weight(1f),
+      )
+    }
 
-      StageRail(d)
-      VersionHistorySection(project = project, d = d, history = history)
-      if (d.memory != null || d.audience != null || d.director != null || timeline != null || d.critique != null || d.perf != null) {
-        SectionHeader(Icons.Outlined.Visibility, "制作过程", "Browse / Audience / Director / Editor / Critic / Render")
-        ProcessOutputs(d = d, timeline = timeline, assetMap = assetMap)
-      } else {
-        Text(
-          "还没有制作过程记录。",
-          style = MaterialTheme.typography.bodySmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-      }
+    timeline?.let {
+      ShotEditTimeline(
+        eventId = d.eventId,
+        timeline = it,
+        assetMap = assetMap,
+        canEdit = d.mp4Path != null,
+        onOpenIterationSheet = onOpenIterationSheet,
+      )
+    }
+
+    StageRail(d)
+    VersionHistorySection(project = project, d = d, history = history)
+    if (d.memory != null || d.audience != null || d.director != null || timeline != null || d.critique != null || d.perf != null) {
+      SectionHeader(Icons.Outlined.Visibility, "制作过程", "Browse / Audience / Director / Editor / Critic / Render")
+      ProcessOutputs(d = d, timeline = timeline, assetMap = assetMap)
     }
   }
 }

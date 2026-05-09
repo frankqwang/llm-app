@@ -229,28 +229,41 @@ internal fun AssetAnnotationRow(asset: Asset, perception: Perception?, usedOrder
 
 @Composable
 internal fun AnnotationKeyValues(tags: VlmTags) {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
   if (tags.scene.isBlank() && tags.subjects.isEmpty() && tags.action.isBlank() && tags.mood.isBlank()) {
-    Text("VLM 标签为空。Recall 会退化到质量/时序/时长信号。", style = MaterialTheme.typography.bodySmall)
+    Text(
+      "VLM 标签为空。Recall 会退化到质量 / 时序 / 时长信号。",
+      style = MaterialTheme.typography.bodyMedium,
+      color = tokens.colors.secondaryLabel,
+    )
     return
   }
-  KeyValue("scene", tags.scene)
-  if (tags.subjects.isNotEmpty()) KeyValue("subjects", tags.subjects.joinToString("、"))
-  KeyValue("action", tags.action)
-  KeyValue("mood", tags.mood)
-  KeyValue("time", tags.timeFeel)
-  KeyValue("salient", tags.salient)
-  KeyValue("role", tags.narrativeRoleHint)
+  if (tags.visualDescription.isNotBlank()) KeyValue("画面描述", tags.visualDescription)
+  KeyValue("场景", tags.scene)
+  if (tags.subjects.isNotEmpty()) KeyValue("主体", tags.subjects.joinToString("、"))
+  KeyValue("动作", tags.action)
+  KeyValue("情绪", tags.mood)
+  KeyValue("时间感", tags.timeFeel)
+  KeyValue("亮点", tags.salient)
+  KeyValue("叙事角色", tags.narrativeRoleHint)
+  if (tags.composition.isNotBlank()) KeyValue("构图", tags.composition)
+  if (tags.lighting.isNotBlank()) KeyValue("光线", tags.lighting)
+  if (tags.motionHint.isNotBlank()) KeyValue("动态", tags.motionHint)
 }
 
 @Composable
 internal fun VideoInsightKeyValues(perception: Perception) {
   val insight = perception.videoInsight
-  if (insight.frameTimestampsSec.isEmpty() && insight.summary.isBlank()) return
-  KeyValue("video summary", insight.summary)
-  KeyValue("action arc", insight.actionArc)
-  if (insight.bestMomentSec > 0f) KeyValue("best moment", "%.1fs (#%d)".format(Locale.US, insight.bestMomentSec, insight.bestMomentIndex))
-  if (insight.badMomentIndices.isNotEmpty()) KeyValue("avoid frames", insight.badMomentIndices.joinToString(", "))
-  if (insight.frameTimestampsSec.isNotEmpty()) KeyValue("sample frames", insight.frameTimestampsSec.joinToString(", ") { "%.1fs".format(Locale.US, it) })
+  if (insight.frameTimestampsSec.isEmpty() && insight.summary.isBlank() && insight.visualDescription.isBlank()) return
+  if (insight.visualDescription.isNotBlank()) KeyValue("画面描述", insight.visualDescription)
+  KeyValue("视频概括", insight.summary)
+  KeyValue("动作弧线", insight.actionArc)
+  if (insight.bestMomentSec > 0f) KeyValue("最佳瞬间", "%.1fs · 第 %d 帧".format(Locale.US, insight.bestMomentSec, insight.bestMomentIndex))
+  if (insight.badMomentIndices.isNotEmpty()) KeyValue("避开帧", insight.badMomentIndices.joinToString(", "))
+  if (insight.frameTimestampsSec.isNotEmpty()) KeyValue("采样帧", insight.frameTimestampsSec.joinToString(", ") { "%.1fs".format(Locale.US, it) })
+  if (insight.cameraWork.isNotBlank()) KeyValue("镜头运动", insight.cameraWork)
+  if (insight.pacing.isNotBlank()) KeyValue("节奏", insight.pacing)
+  if (insight.audioVisualHint.isNotBlank()) KeyValue("声音线索", insight.audioVisualHint)
 }
 
 @Composable
@@ -423,17 +436,51 @@ internal fun ProcessOutputs(
   timeline: Timeline?,
   assetMap: Map<String, Asset>,
 ) {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
+  val context = androidx.compose.ui.platform.LocalContext.current
+
+  // Replay the agent's work for THIS event from the persistent breadcrumb log.
+  // Loaded once when the section becomes visible — the file is append-only so
+  // re-reads aren't necessary unless the user re-iterates.
+  val timelineEntries by androidx.compose.runtime.produceState(
+    initialValue = emptyList<com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.AgentTimelineEntry>(),
+    d.eventId,
+    d.versionCount,
+  ) {
+    value = withContext(kotlinx.coroutines.Dispatchers.IO) {
+      val all = com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.AgentTimeline.read(context, tailLimit = 1500)
+      com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.AgentTimeline.forEvent(all, d.eventId)
+    }
+  }
+  if (timelineEntries.isNotEmpty()) {
+    DecisionSection(
+      icon = Icons.Outlined.Timer,
+      title = "工作时间线",
+      subtitle = "${timelineEntries.size} 步 · 最早 ${formatRelativeTime(timelineEntries.first().timestampMs)}",
+    ) {
+      com.google.ai.edge.gallery.customtasks.vlogpilot.ui.AgentTimelineCard(
+        entries = timelineEntries,
+        pulse = false,
+        maxVisibleHeight = null,
+      )
+    }
+  }
+
   d.memory?.let { memory ->
     DecisionSection(icon = Icons.Outlined.Visibility, title = "Browse", subtitle = "事件记忆") {
-      Text(memory.storylineSummary, style = MaterialTheme.typography.bodySmall)
+      Text(
+        memory.storylineSummary,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurface,
+      )
       if (memory.emotionalArc.isNotBlank()) KeyValue("情绪弧线", memory.emotionalArc)
-      if (memory.charactersObserved.isNotEmpty()) KeyValue("人物", memory.charactersObserved.joinToString(", "))
+      if (memory.charactersObserved.isNotEmpty()) KeyValue("人物", memory.charactersObserved.joinToString("、"))
       if (memory.visualStyleSignals.isNotBlank()) KeyValue("视觉信号", memory.visualStyleSignals)
       memory.keyMoments.take(4).forEach { moment ->
         Text(
-          "#${moment.imageIndex} ${shortId(moment.assetId)} · ${moment.why}",
-          style = MaterialTheme.typography.labelSmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          "#${moment.imageIndex} · ${moment.why}",
+          style = MaterialTheme.typography.bodySmall,
+          color = tokens.colors.secondaryLabel,
         )
       }
     }
@@ -445,26 +492,33 @@ internal fun ProcessOutputs(
       if (audience.hookStrategy.isNotBlank()) KeyValue("开头钩子", audience.hookStrategy)
       if (audience.povVoice.isNotBlank()) KeyValue("视角", audience.povVoice)
       if (audience.pacingGuidance.isNotBlank()) KeyValue("节奏", audience.pacingGuidance)
-      if (audience.avoidList.isNotEmpty()) KeyValue("避免", audience.avoidList.joinToString(", "))
+      if (audience.avoidList.isNotEmpty()) KeyValue("避免", audience.avoidList.joinToString("、"))
     }
   }
 
   d.director?.let { director ->
     DecisionSection(icon = Icons.Outlined.Movie, title = "Director", subtitle = "叙事脚本") {
       if (director.title.isNotBlank()) {
-        Text(director.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+        Text(
+          director.title,
+          style = MaterialTheme.typography.titleMedium,
+          fontWeight = FontWeight.Bold,
+          color = MaterialTheme.colorScheme.onSurface,
+        )
       }
       KeyValue("基调", director.tone)
       KeyValue("目标时长", formatSec(director.targetDurationSec.toDouble()))
-      if (director.narrativeArc.isNotEmpty()) KeyValue("叙事弧线", director.narrativeArc.joinToString(" -> "))
-      director.shotBlueprint.take(8).forEach { req ->
-        Text(
-          "${req.position}. ${req.role.name.lowercase()} · ${"%.1f".format(Locale.US, req.durationSec)}s · ${req.visualRequirements}",
-          style = MaterialTheme.typography.labelSmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
-          maxLines = 2,
-          overflow = TextOverflow.Ellipsis,
-        )
+      if (director.narrativeArc.isNotEmpty()) KeyValue("叙事弧线", director.narrativeArc.joinToString("  →  "))
+      if (director.shotBlueprint.isNotEmpty()) {
+        Spacer(Modifier.height(4.dp))
+        director.shotBlueprint.take(10).forEach { req ->
+          ShotBlueprintRow(
+            position = req.position,
+            role = req.role.name.lowercase(),
+            durationSec = req.durationSec,
+            requirement = req.visualRequirements,
+          )
+        }
       }
     }
   }
@@ -482,14 +536,31 @@ internal fun ProcessOutputs(
     DecisionSection(icon = Icons.Outlined.Search, title = "Critic", subtitle = "审片反馈") {
       val critique = d.critique ?: critiqueHistory.lastOrNull()
       if (critique == null || (critique.issues.isEmpty() && critique.revisedRequests.isEmpty())) {
-        Text("没有发现需要修改的问题。", style = MaterialTheme.typography.bodySmall)
+        Text(
+          "没有发现需要修改的问题。",
+          style = MaterialTheme.typography.bodyMedium,
+          color = tokens.colors.systemGreen,
+        )
       } else {
         critique.issues.forEach { issue ->
-          Text(
-            "• $issue",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-          )
+          Row(
+            modifier = Modifier.padding(vertical = 3.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.Top,
+          ) {
+            Text(
+              "•",
+              style = MaterialTheme.typography.bodyMedium,
+              color = tokens.colors.systemOrange,
+              fontWeight = FontWeight.Bold,
+            )
+            Text(
+              issue,
+              modifier = Modifier.weight(1f),
+              style = MaterialTheme.typography.bodyMedium,
+              color = MaterialTheme.colorScheme.onSurface,
+            )
+          }
         }
         if (critique.revisedRequests.isNotEmpty()) {
           KeyValue("重选镜头", "${critique.revisedRequests.size} 个")
@@ -504,6 +575,69 @@ internal fun ProcessOutputs(
   d.perf?.let { perf ->
     DecisionSection(icon = Icons.Outlined.Timer, title = "Timing", subtitle = "阶段耗时") {
       PerfGrid(perf)
+    }
+  }
+}
+
+/** Single bullet row inside the Director section. Tinted color for the role
+ *  pulls the eye to structure (opening / climax / closing) rather than to the
+ *  faint requirement description. */
+@Composable
+private fun ShotBlueprintRow(
+  position: Int,
+  role: String,
+  durationSec: Float,
+  requirement: String,
+) {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
+  val roleTint = when (role) {
+    "opening" -> tokens.colors.systemGreen
+    "climax" -> tokens.colors.systemOrange
+    "closing" -> tokens.colors.systemPurple
+    "action" -> tokens.colors.accent
+    else -> tokens.colors.secondaryLabel
+  }
+  Row(
+    modifier = Modifier
+      .fillMaxWidth()
+      .padding(vertical = 6.dp),
+    horizontalArrangement = Arrangement.spacedBy(10.dp),
+    verticalAlignment = Alignment.Top,
+  ) {
+    Text(
+      "$position",
+      modifier = Modifier
+        .size(22.dp)
+        .clip(RoundedCornerShape(50))
+        .background(roleTint.copy(alpha = if (tokens.colors.isDark) 0.24f else 0.14f)),
+      style = MaterialTheme.typography.labelMedium,
+      fontWeight = FontWeight.Bold,
+      color = roleTint,
+      textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+    )
+    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+          role,
+          style = MaterialTheme.typography.labelMedium,
+          fontWeight = FontWeight.SemiBold,
+          color = roleTint,
+        )
+        Text(
+          "${"%.1f".format(Locale.US, durationSec)}s",
+          style = MaterialTheme.typography.labelSmall,
+          color = tokens.colors.tertiaryLabel,
+        )
+      }
+      if (requirement.isNotBlank()) {
+        Text(
+          requirement,
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.onSurface,
+          maxLines = 2,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
     }
   }
 }

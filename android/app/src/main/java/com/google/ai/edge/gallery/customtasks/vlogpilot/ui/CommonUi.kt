@@ -148,17 +148,22 @@ internal fun AssetThumb(
   showType: Boolean = true,
 ) {
   val context = LocalContext.current
-  val bitmap by produceState<Bitmap?>(initialValue = null, asset.id, asset.contentUri) {
-    value = withContext(Dispatchers.IO) {
-      MediaLoader.loadImage(context, asset, maxSide = 180)
-    }
+  // Synchronous peek lets a cache hit render in the same frame (no flicker
+  // when scrolling back), and the produceState only fires when we need a
+  // real decode. Bitmaps live in ThumbnailCache; we don't recycle them here.
+  val initialBitmap = remember(asset.id) {
+    com.google.ai.edge.gallery.customtasks.vlogpilot.perception.ThumbnailCache.peek(asset, THUMB_MAX_SIDE)
+  }
+  val bitmap by produceState<Bitmap?>(initialValue = initialBitmap, asset.id) {
+    if (value != null) return@produceState
+    value = com.google.ai.edge.gallery.customtasks.vlogpilot.perception.ThumbnailCache
+      .loadOrDecode(context, asset, maxSide = THUMB_MAX_SIDE)
   }
 
   Box(
     modifier = modifier
       .clip(RoundedCornerShape(12.dp))
-      .background(MaterialTheme.colorScheme.surfaceVariant)
-      .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f), RoundedCornerShape(12.dp)),
+      .background(MaterialTheme.colorScheme.surfaceVariant),
     contentAlignment = Alignment.Center,
   ) {
     val bmp = bitmap
@@ -177,68 +182,63 @@ internal fun AssetThumb(
         modifier = Modifier.size(22.dp),
       )
     }
-    if (showType) {
+    if (showType && asset.mediaType == MediaType.VIDEO) {
+      // Apple Photos pattern: only show duration pill on videos, not "IMG"
+      // on every photo. Less visual noise in dense grids.
       Surface(
         modifier = Modifier
-          .align(Alignment.BottomStart)
-          .padding(5.dp),
-        shape = RoundedCornerShape(999.dp),
-        color = Color.Black.copy(alpha = 0.58f),
+          .align(Alignment.BottomEnd)
+          .padding(4.dp),
+        shape = RoundedCornerShape(6.dp),
+        color = Color.Black.copy(alpha = 0.55f),
         contentColor = Color.White,
       ) {
         Text(
-          if (asset.mediaType == MediaType.VIDEO) "VID" else "IMG",
-          modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-          fontSize = 9.sp,
-          fontWeight = FontWeight.Bold,
+          if (asset.durationMs > 0) formatSec(asset.durationMs / 1000.0) else "VID",
+          modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+          fontSize = 10.sp,
+          fontWeight = FontWeight.Medium,
         )
       }
     }
   }
 }
 
+private const val THUMB_MAX_SIDE = 240
+
 @Composable
 internal fun VideoPreview(mp4Path: String) {
-  Surface(
-    modifier = Modifier.fillMaxWidth(),
-    shape = RoundedCornerShape(18.dp),
-    color = Color.Black,
-  ) {
-    Box(
-      modifier = Modifier
-        .fillMaxWidth()
-        .background(Color.Black)
-        .padding(vertical = 10.dp),
-      contentAlignment = Alignment.Center,
-    ) {
-      AndroidView(
-        factory = { ctx ->
-          VideoView(ctx).apply {
-            tag = mp4Path
-            setVideoPath(mp4Path)
-            setMediaController(MediaController(ctx).also { it.setAnchorView(this) })
-            setOnPreparedListener { player ->
-              player.isLooping = true
-              seekTo(1)
-            }
-            seekTo(1)
-          }
-        },
-        update = { view ->
-          if (view.tag != mp4Path) {
-            view.tag = mp4Path
-            view.setVideoPath(mp4Path)
-            view.seekTo(1)
-          }
-        },
-        modifier = Modifier
-          .fillMaxWidth(0.72f)
-          .widthIn(max = 360.dp)
-          .aspectRatio(9f / 16f)
-          .clip(RoundedCornerShape(14.dp)),
-      )
-    }
-  }
+  // The rendered MP4 is already a self-contained 9:16 frame (with its own
+  // blurred-bg compose for non-vertical sources). No outer letterboxing
+  // needed — we clip directly to the player and cap the height so the
+  // result page doesn't get dominated by a single tall preview.
+  AndroidView(
+    factory = { ctx ->
+      VideoView(ctx).apply {
+        tag = mp4Path
+        setVideoPath(mp4Path)
+        setMediaController(MediaController(ctx).also { it.setAnchorView(this) })
+        setOnPreparedListener { player ->
+          player.isLooping = true
+          seekTo(1)
+        }
+        seekTo(1)
+      }
+    },
+    update = { view ->
+      if (view.tag != mp4Path) {
+        view.tag = mp4Path
+        view.setVideoPath(mp4Path)
+        view.seekTo(1)
+      }
+    },
+    modifier = Modifier
+      .fillMaxWidth()
+      .heightIn(max = 540.dp)
+      .aspectRatio(9f / 16f)
+      .clip(RoundedCornerShape(20.dp))
+      .background(Color.Black),
+  )
 }
 
 @Composable
@@ -248,14 +248,16 @@ internal fun DecisionSection(
   subtitle: String? = null,
   content: @Composable ColumnScope.() -> Unit,
 ) {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
   Surface(
     modifier = Modifier.fillMaxWidth(),
-    shape = RoundedCornerShape(12.dp),
-    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.22f),
+    shape = RoundedCornerShape(16.dp),
+    color = MaterialTheme.colorScheme.surface,
+    tonalElevation = 0.dp,
   ) {
     Column(
-      modifier = Modifier.padding(12.dp),
-      verticalArrangement = Arrangement.spacedBy(8.dp),
+      modifier = Modifier.padding(tokens.spacing.lg),
+      verticalArrangement = Arrangement.spacedBy(tokens.spacing.sm),
     ) {
       SectionHeader(icon = icon, title = title, subtitle = subtitle)
       content()
@@ -265,18 +267,32 @@ internal fun DecisionSection(
 
 @Composable
 internal fun SectionHeader(icon: ImageVector, title: String, subtitle: String? = null) {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
   Row(
-    horizontalArrangement = Arrangement.spacedBy(8.dp),
+    horizontalArrangement = Arrangement.spacedBy(10.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
-    Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-    Column {
-      Text(title, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+    Box(
+      modifier = Modifier
+        .size(28.dp)
+        .clip(RoundedCornerShape(8.dp))
+        .background(tokens.colors.accentTint),
+      contentAlignment = Alignment.Center,
+    ) {
+      Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp), tint = tokens.colors.accent)
+    }
+    Column(modifier = Modifier.weight(1f)) {
+      Text(
+        title,
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.onSurface,
+      )
       if (!subtitle.isNullOrBlank()) {
         Text(
           subtitle,
-          style = MaterialTheme.typography.labelSmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          style = MaterialTheme.typography.labelMedium,
+          color = tokens.colors.secondaryLabel,
           maxLines = 1,
           overflow = TextOverflow.Ellipsis,
         )
@@ -288,18 +304,27 @@ internal fun SectionHeader(icon: ImageVector, title: String, subtitle: String? =
 @Composable
 internal fun KeyValue(label: String, value: String) {
   if (value.isBlank()) return
-  Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
+  // iOS Settings-style row: light label on the left, sharp on-surface value
+  // on the right; both readable, with proper vertical breathing room.
+  Row(
+    modifier = Modifier
+      .fillMaxWidth()
+      .padding(vertical = 4.dp),
+    horizontalArrangement = Arrangement.spacedBy(12.dp),
+    verticalAlignment = Alignment.Top,
+  ) {
     Text(
       label,
-      modifier = Modifier.width(64.dp),
-      style = MaterialTheme.typography.labelSmall,
-      color = MaterialTheme.colorScheme.outline,
+      modifier = Modifier.width(80.dp),
+      style = MaterialTheme.typography.bodyMedium,
+      color = tokens.colors.secondaryLabel,
     )
     Text(
       value,
       modifier = Modifier.weight(1f),
-      style = MaterialTheme.typography.bodySmall,
-      color = MaterialTheme.colorScheme.onSurfaceVariant,
+      style = MaterialTheme.typography.bodyMedium,
+      color = MaterialTheme.colorScheme.onSurface,
     )
   }
 }
@@ -333,10 +358,10 @@ internal fun PanelCard(
 ) {
   Surface(
     modifier = modifier.fillMaxWidth(),
-    shape = RoundedCornerShape(18.dp),
+    shape = RoundedCornerShape(20.dp),
     color = color,
-    tonalElevation = 3.dp,
-    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.34f)),
+    tonalElevation = 0.dp,
+    shadowElevation = 0.dp,
     content = content,
   )
 }
@@ -372,30 +397,31 @@ internal fun MetricBadge(
   accent: Boolean = false,
   modifier: Modifier = Modifier,
 ) {
-  val container = if (accent) {
-    MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.78f)
-  } else {
-    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.34f)
-  }
-  val content = if (accent) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
+  val container = if (accent) tokens.colors.accentTint
+                  else if (tokens.colors.isDark) tokens.colors.groupedSurfaceRaised
+                  else MaterialTheme.colorScheme.surfaceVariant
+  val accentText = if (accent) tokens.colors.accent else MaterialTheme.colorScheme.onSurface
   Surface(
     modifier = modifier,
-    shape = RoundedCornerShape(10.dp),
+    shape = RoundedCornerShape(12.dp),
     color = container,
-    contentColor = content,
+    tonalElevation = 0.dp,
   ) {
-    Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
       Text(
         label,
         style = MaterialTheme.typography.labelSmall,
-        color = if (accent) content.copy(alpha = 0.75f) else MaterialTheme.colorScheme.outline,
+        color = tokens.colors.secondaryLabel,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
       )
+      Spacer(Modifier.size(2.dp))
       Text(
         value,
-        style = MaterialTheme.typography.labelLarge,
+        style = MaterialTheme.typography.titleSmall,
         fontWeight = FontWeight.SemiBold,
+        color = accentText,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
       )

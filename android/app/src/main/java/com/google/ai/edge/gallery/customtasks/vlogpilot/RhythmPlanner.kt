@@ -41,6 +41,9 @@ internal object RhythmPlanner {
         captionText = raw?.captionText?.takeIf { it.isNotBlank() } ?: slot.captionHint,
         kenBurnsHint = raw?.kenBurnsHint?.takeIf { it.isNotBlank() } ?: slot.kenBurnsHint,
         transitionInHint = raw?.transitionInHint?.takeIf { it.isNotBlank() } ?: slot.transitionInHint,
+        speedHint = raw?.speedHint ?: 1.0f,
+        kenBurnsIntensity = raw?.kenBurnsIntensity ?: 1.08f,
+        cutReason = raw?.cutReason.orEmpty(),
       )
     }
 

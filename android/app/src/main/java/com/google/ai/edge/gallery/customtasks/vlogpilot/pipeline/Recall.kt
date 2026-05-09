@@ -131,15 +131,22 @@ object Recall {
       return 0f
     }
     val tagText = buildString {
+      append(tags.visualDescription); append(' ')
       append(tags.scene); append(' ')
       tags.subjects.forEach { append(it); append(' ') }
       append(tags.action); append(' ')
       append(tags.mood); append(' ')
       append(tags.timeFeel); append(' ')
-      append(tags.salient)
-      append(' ')
+      append(tags.salient); append(' ')
+      append(tags.composition); append(' ')
+      append(tags.lighting); append(' ')
+      append(tags.motionHint); append(' ')
+      append(video.visualDescription); append(' ')
       append(video.summary); append(' ')
-      append(video.actionArc)
+      append(video.actionArc); append(' ')
+      append(video.cameraWork); append(' ')
+      append(video.pacing); append(' ')
+      append(video.audioVisualHint)
     }
     val tagTokens = tokenize(tagText)
     if (tagTokens.isEmpty()) return 0f

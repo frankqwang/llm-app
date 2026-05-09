@@ -24,10 +24,17 @@ object MediaLoader {
    *  - IMAGE / LIVE_PHOTO: decode the still (contentUri).
    *  - VIDEO: pull a frame from the middle of the clip via MediaMetadataRetriever.
    *           BitmapFactory.decodeStream cannot decode an MP4 container, which is
-   *           why all `content://media/external/video/...` URIs were failing here. */
-  fun loadImage(context: Context, asset: Asset, maxSide: Int = 1024): Bitmap? {
+   *           why all `content://media/external/video/...` URIs were failing here.
+   *  @param preferRgb565 when true, decodes at 16-bit color (half the memory + ~30%
+   *     faster decode). Use for grid thumbnails where ARGB_8888 is overkill. */
+  fun loadImage(
+    context: Context,
+    asset: Asset,
+    maxSide: Int = 1024,
+    preferRgb565: Boolean = false,
+  ): Bitmap? {
     return when (asset.mediaType) {
-      MediaType.IMAGE, MediaType.LIVE_PHOTO -> decodeStillImage(context, asset, maxSide)
+      MediaType.IMAGE, MediaType.LIVE_PHOTO -> decodeStillImage(context, asset, maxSide, preferRgb565)
       MediaType.VIDEO -> {
         val midSec = if (asset.durationMs > 0) (asset.durationMs / 2_000f) else 0.5f
         loadVideoFrame(context, asset, midSec, maxSide)
@@ -35,13 +42,21 @@ object MediaLoader {
     }
   }
 
-  private fun decodeStillImage(context: Context, asset: Asset, maxSide: Int): Bitmap? {
+  private fun decodeStillImage(
+    context: Context,
+    asset: Asset,
+    maxSide: Int,
+    preferRgb565: Boolean,
+  ): Bitmap? {
     val uri = Uri.parse(asset.contentUri)
     return try {
       val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
       context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
       val sampleSize = computeSampleSize(bounds.outWidth, bounds.outHeight, maxSide)
-      val opts = BitmapFactory.Options().apply { inSampleSize = sampleSize; inPreferredConfig = Bitmap.Config.ARGB_8888 }
+      val opts = BitmapFactory.Options().apply {
+        inSampleSize = sampleSize
+        inPreferredConfig = if (preferRgb565) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888
+      }
       val raw = context.contentResolver.openInputStream(uri)?.use {
         BitmapFactory.decodeStream(it, null, opts)
       } ?: return null

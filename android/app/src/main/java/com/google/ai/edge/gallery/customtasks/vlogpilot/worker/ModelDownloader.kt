@@ -45,12 +45,12 @@ object ModelDownloader {
     ModelSpec(
       fileName = "face_landmarker.task",
       url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task",
-      sizeBytes = 5_400_000L,
+      sizeBytes = 3_800_000L,  // actual ~3.58 MB (float16 latest)
     ),
     ModelSpec(
       fileName = "nsfw_vit_int8.onnx",
       url = "https://huggingface.co/AdamCodd/vit-base-nsfw-detector/resolve/main/onnx/model_int8.onnx",
-      sizeBytes = 88_500_000L,
+      sizeBytes = 88_600_000L,  // actual ~88.5 MB
     ),
   )
 
@@ -66,6 +66,20 @@ object ModelDownloader {
         emit(((bytesSoFar * 100) / totalBytes).toInt() to spec.fileName)
         continue
       }
+      // If the model is bundled in assets (build-time download), copy it to filesDir
+      // so ONNX Runtime / MediaPipe can mmap it without network.
+      val copiedFromAssets = try {
+        copyFromAssets(context, spec.fileName, target)
+      } catch (t: Throwable) {
+        Log.w(TAG, "assets copy failed for ${spec.fileName}: ${t.message}")
+        false
+      }
+      if (copiedFromAssets) {
+        bytesSoFar += spec.sizeBytes
+        emit(((bytesSoFar * 100) / totalBytes).toInt() to spec.fileName)
+        continue
+      }
+      // Fallback: OTA download
       try {
         val downloaded = downloadOne(spec, target)
         bytesSoFar += downloaded
@@ -77,6 +91,21 @@ object ModelDownloader {
     }
     emit(100 to "done")
   }.flowOn(Dispatchers.IO)
+
+  /** Copy a model from APK assets to filesDir so native libraries can mmap it. */
+  private fun copyFromAssets(context: Context, fileName: String, target: File): Boolean {
+    val assetPath = "models/$fileName"
+    val exists = try {
+      context.assets.open(assetPath).close()
+      true
+    } catch (_: Throwable) { false }
+    if (!exists) return false
+    Log.i(TAG, "copying $fileName from assets to ${target.absolutePath}")
+    context.assets.open(assetPath).use { input ->
+      target.outputStream().use { output -> input.copyTo(output) }
+    }
+    return true
+  }
 
   private fun downloadOne(spec: ModelSpec, target: File): Long {
     val tmp = File(target.parentFile, "${target.name}.part")

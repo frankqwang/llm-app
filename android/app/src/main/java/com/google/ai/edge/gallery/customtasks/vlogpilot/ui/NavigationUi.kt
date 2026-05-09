@@ -145,33 +145,66 @@ internal enum class StorySortMode(val label: String) {
   Oldest("最早"),
 }
 
+/**
+ * Apple-style segmented tab bar. Each tab is a capsule that fades from gray
+ * to accent-tint when selected; selection animates with a subtle spring so
+ * the bar feels alive rather than flicker-switching state.
+ */
 @Composable
 internal fun WorkspaceTabs(selected: VlogPilotTab, onSelect: (VlogPilotTab) -> Unit) {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
   Surface(
-    modifier = Modifier.fillMaxWidth(),
-    shape = RoundedCornerShape(18.dp),
-    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+    modifier = Modifier
+      .fillMaxWidth()
+      .padding(horizontal = tokens.spacing.pageInset),
+    shape = RoundedCornerShape(50),
+    color = if (tokens.colors.isDark) tokens.colors.groupedSurfaceRaised
+            else MaterialTheme.colorScheme.surface,
+    tonalElevation = 0.dp,
+    shadowElevation = 0.dp,
   ) {
-    LazyRow(
-      modifier = Modifier.padding(5.dp),
-      horizontalArrangement = Arrangement.spacedBy(6.dp),
+    Row(
+      modifier = Modifier.padding(4.dp),
+      horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-      items(VlogPilotTab.entries) { tab ->
+      VlogPilotTab.entries.forEach { tab ->
         val active = tab == selected
+        val containerColor by androidx.compose.animation.animateColorAsState(
+          targetValue = if (active) tokens.colors.accentTint else Color.Transparent,
+          animationSpec = androidx.compose.animation.core.tween(durationMillis = 220),
+          label = "tab-bg",
+        )
+        val contentColor by androidx.compose.animation.animateColorAsState(
+          targetValue = if (active) tokens.colors.accent else tokens.colors.secondaryLabel,
+          animationSpec = androidx.compose.animation.core.tween(durationMillis = 220),
+          label = "tab-fg",
+        )
         Surface(
-          modifier = Modifier.clickable { onSelect(tab) },
-          shape = RoundedCornerShape(14.dp),
-          color = if (active) MaterialTheme.colorScheme.surface else Color.Transparent,
-          contentColor = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-          tonalElevation = if (active) 2.dp else 0.dp,
+          modifier = Modifier
+            .weight(1f)
+            .clickable(
+              interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+              indication = null,
+              onClick = { onSelect(tab) },
+            ),
+          shape = RoundedCornerShape(50),
+          color = containerColor,
+          contentColor = contentColor,
+          tonalElevation = 0.dp,
+          shadowElevation = 0.dp,
         ) {
           Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-            horizontalArrangement = Arrangement.spacedBy(7.dp),
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+            horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
           ) {
             Icon(tab.icon, contentDescription = null, modifier = Modifier.size(16.dp))
-            Text(tab.label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.width(6.dp))
+            Text(
+              tab.label,
+              style = MaterialTheme.typography.labelLarge,
+              fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+            )
           }
         }
       }
@@ -188,45 +221,47 @@ internal fun <T> ControlSegment(
   onSelect: (T) -> Unit,
   enabled: Boolean,
 ) {
-  Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-    Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
+  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Text(
+      label,
+      style = MaterialTheme.typography.labelMedium,
+      color = tokens.colors.secondaryLabel,
+    )
     if (!enabled) {
       Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f),
-        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        shape = RoundedCornerShape(12.dp),
+        color = if (tokens.colors.isDark) tokens.colors.groupedSurfaceRaised
+                else MaterialTheme.colorScheme.surface,
+        tonalElevation = 0.dp,
       ) {
         Row(
-          modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+          modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
           horizontalArrangement = Arrangement.SpaceBetween,
           verticalAlignment = Alignment.CenterVertically,
         ) {
           Text(
             optionLabel(selected),
-            style = MaterialTheme.typography.labelMedium,
+            style = MaterialTheme.typography.bodyLarge,
             fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
           )
-          Text("运行中锁定", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+          Text(
+            "运行中锁定",
+            style = MaterialTheme.typography.labelMedium,
+            color = tokens.colors.tertiaryLabel,
+          )
         }
       }
     } else {
       LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         items(options) { option ->
-          val active = option == selected
-          Surface(
-            modifier = Modifier.clickable { onSelect(option) },
-            shape = RoundedCornerShape(999.dp),
-            color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-            contentColor = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-          ) {
-            Text(
-              optionLabel(option),
-              modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-              style = MaterialTheme.typography.labelMedium,
-              fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
-            )
-          }
+          com.google.ai.edge.gallery.customtasks.vlogpilot.ui.CapsuleChip(
+            text = optionLabel(option),
+            selected = option == selected,
+            onClick = { onSelect(option) },
+          )
         }
       }
     }

@@ -19,4 +19,9 @@
     <cache-path
         name="cache_pictures"
         path="images/" />
+    <!-- Exposed so we can hand a content:// URI to a share Intent for the
+         user-facing "share to other app" flow on rendered vlog MP4s. -->
+    <files-path
+        name="vlog_candidates"
+        path="candidates/" />
 </paths>

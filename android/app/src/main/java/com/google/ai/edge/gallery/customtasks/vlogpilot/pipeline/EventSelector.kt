@@ -356,13 +356,21 @@ object EventSelector {
     val video = perception?.videoInsight
     return buildString {
       append(asset.displayName); append(' ')
+      append(tags?.visualDescription.orEmpty()); append(' ')
       append(tags?.scene.orEmpty()); append(' ')
       tags?.subjects.orEmpty().forEach { append(it); append(' ') }
       append(tags?.action.orEmpty()); append(' ')
       append(tags?.mood.orEmpty()); append(' ')
       append(tags?.salient.orEmpty()); append(' ')
+      append(tags?.composition.orEmpty()); append(' ')
+      append(tags?.lighting.orEmpty()); append(' ')
+      append(tags?.motionHint.orEmpty()); append(' ')
+      append(video?.visualDescription.orEmpty()); append(' ')
       append(video?.summary.orEmpty()); append(' ')
-      append(video?.actionArc.orEmpty())
+      append(video?.actionArc.orEmpty()); append(' ')
+      append(video?.cameraWork.orEmpty()); append(' ')
+      append(video?.pacing.orEmpty()); append(' ')
+      append(video?.audioVisualHint.orEmpty())
     }.lowercase(Locale.ROOT)
   }
 

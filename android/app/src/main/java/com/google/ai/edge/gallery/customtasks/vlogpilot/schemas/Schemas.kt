@@ -62,6 +62,12 @@ data class VlmTags(
   val timeFeel: String = "",               // "傍晚" / "清晨"
   val salient: String = "",                // <=40字 这张图最值得选的细节
   val narrativeRoleHint: String = "",      // opening/establishing/portrait/action/climax/transition/closing 之一，或空
+  // ---- v4.1 剪辑增强字段 ----
+  val composition: String = "",            // <=12字 构图（全景/中景/特写/仰拍/俯拍/对称/框架）
+  val lighting: String = "",               // <=12字 光线（金色侧光/逆光剪影/柔光/硬光/散射）
+  val motionHint: String = "",             // <=12字 动态（静态/主体运动/抓拍瞬间/模糊拖影）
+  // ---- v4.2 自然语言画面描述（给下游 VLM 读）----
+  val visualDescription: String = "",      // <=100字 连贯自然语言画面描述，融合场景/主体/光线/构图/情绪
 )
 
 @Serializable
@@ -78,6 +84,12 @@ data class VideoInsight(
   val bestMomentWindowStart: Int = 0,
   val bestMomentWindowEnd: Int = 0,
   val badMomentIndices: List<Int> = emptyList(),     // 1-based indices to avoid when trimming
+  // ---- v4.1 剪辑增强字段 ----
+  val cameraWork: String = "",           // <=15字 镜头运动（固定/推近/拉远/跟拍/手持晃动/摇镜）
+  val pacing: String = "",               // <=10字 整体节奏（急促/舒缓/稳定/顿挫/流动）
+  val audioVisualHint: String = "",      // <=15字 画面暗示的声音环境（人群嘈杂/海浪/风声/安静/音乐）
+  // ---- v4.2 自然语言画面描述（给下游 VLM 读）----
+  val visualDescription: String = "",    // <=120字 连贯自然语言画面描述，融合场景/动作/镜头运动/节奏
 )
 
 @Serializable
@@ -179,6 +191,14 @@ data class ShotRequest(
   val captionText: String = "",
   val kenBurnsHint: String = "",        // "in" / "out" / "pan_left" / ""
   val transitionInHint: String = "",    // "fade" / "fadewhite" / "smoothleft" / "cut" / ""
+  // Director's playback-rate intent. 1.0 = natural, <1 = slow-mo, >1 = fast.
+  // Renderer clamps the realized rate to hardware caps (see ShotRenderer).
+  val speedHint: Float = 1.0f,
+  // Director's Ken Burns travel intensity. 1.0 = static, 1.20 = strong drift.
+  val kenBurnsIntensity: Float = 1.08f,
+  // Free-text justification for why the cut sits here (used by Critic to
+  // judge transition logic, not by renderer).
+  val cutReason: String = "",
 )
 
 @Serializable
@@ -239,6 +259,15 @@ data class ShotSpec(
   val transitionIn: TransitionKind = TransitionKind.CUT,
   val videoTrim: VideoTrim? = null,
   val rationale: String = "",
+  // Realized playback rate, clamped from ShotRequest.speedHint. ShotRenderer
+  // multiplies setpts by 1/speedFactor on top of any auto stretch-to-fill.
+  // CACHE: changes here invalidate ShotRenderCache.
+  val speedFactor: Float = 1.0f,
+  // Realized Ken Burns max zoom (or pan z). 1.0 = static, 1.20 = strong.
+  // CACHE: changes here invalidate ShotRenderCache.
+  val kenBurnsZoom: Float = 1.08f,
+  // Director-supplied reason for this cut (for Critic, not renderer).
+  val cutReason: String = "",
 )
 
 @Serializable

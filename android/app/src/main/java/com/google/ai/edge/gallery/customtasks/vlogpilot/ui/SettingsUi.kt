@@ -150,34 +150,54 @@ internal fun SettingsCard(
 
 @Composable
 internal fun PromptDebugCard() {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
   var expanded by remember { mutableStateOf(false) }
   PanelCard {
-    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
       Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+          .fillMaxWidth()
+          .clickable { expanded = !expanded },
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,
       ) {
-        Icon(Icons.Outlined.Visibility, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-          Text("系统 Prompt / 调试信息", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-          Text("默认收起，需要排查生成策略时再展开。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        FilledTonalButton(
-          onClick = { expanded = !expanded },
-          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        Box(
+          modifier = Modifier
+            .size(28.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(tokens.colors.accentTint),
+          contentAlignment = Alignment.Center,
         ) {
           Icon(
-            imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+            Icons.Outlined.Visibility,
             contentDescription = null,
+            tint = tokens.colors.accent,
             modifier = Modifier.size(16.dp),
           )
-          Spacer(Modifier.width(4.dp))
-          Text(if (expanded) "收起" else "展开", maxLines = 1)
         }
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+          Text(
+            "系统 Prompt / 调试信息",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+          )
+          Text(
+            "默认收起，需要排查生成策略时再展开",
+            style = MaterialTheme.typography.bodyMedium,
+            color = tokens.colors.secondaryLabel,
+          )
+        }
+        Icon(
+          imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+          contentDescription = null,
+          tint = tokens.colors.tertiaryLabel,
+          modifier = Modifier.size(20.dp),
+        )
       }
-      if (expanded) {
-        HorizontalDivider()
+      com.google.ai.edge.gallery.customtasks.vlogpilot.ui.AnimatedExpand(expanded = expanded) {
+        com.google.ai.edge.gallery.customtasks.vlogpilot.ui.HairlineDivider(startInset = 0.dp)
+        Spacer(Modifier.height(12.dp))
         PromptCatalogInline()
       }
     }

@@ -17,6 +17,7 @@
  */
 package com.google.ai.edge.gallery.customtasks.vlogpilot
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -96,16 +97,28 @@ internal fun CuratorScreen(
   }
 
   Scaffold(
+    containerColor = MaterialTheme.colorScheme.background,
     topBar = {
-      TopAppBar(
-        title = { },
+      androidx.compose.material3.CenterAlignedTopAppBar(
+        title = {
+          Text(
+            "新作品",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+          )
+        },
         navigationIcon = {
           IconButton(onClick = onBack) {
-            Icon(Icons.Outlined.ArrowBack, contentDescription = "返回")
+            Icon(
+              Icons.Outlined.ArrowBack,
+              contentDescription = "返回",
+              tint = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens.colors.accent,
+            )
           }
         },
-        colors = TopAppBarDefaults.topAppBarColors(
-          containerColor = MaterialTheme.colorScheme.surface,
+        colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+          containerColor = MaterialTheme.colorScheme.background,
+          scrolledContainerColor = MaterialTheme.colorScheme.background,
         ),
       )
     },
@@ -148,14 +161,20 @@ internal fun CuratorScreen(
           onValueChange = { intentText = it },
           modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 96.dp),
+            .heightIn(min = 110.dp),
           placeholder = {
             Text(
-              "比如：30秒怀旧风的成长vlog\n" +
-                "（不写也可以，AI 会自己想）",
-              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              "比如：30秒怀旧风的成长vlog\n（不写也可以，AI 会自己想）",
+              color = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens.colors.tertiaryLabel,
             )
           },
+          shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+          colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+            unfocusedBorderColor = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens.colors.opaqueSeparator,
+            focusedBorderColor = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens.colors.accent,
+            unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+            focusedContainerColor = MaterialTheme.colorScheme.surface,
+          ),
           maxLines = 6,
         )
       }
@@ -224,16 +243,26 @@ private fun CuratorBottomBar(
   canSubmit: Boolean,
   onSubmit: () -> Unit,
 ) {
-  Surface(
-    color = MaterialTheme.colorScheme.surface,
-    tonalElevation = 6.dp,
+  // Soft floating bottom bar — translucent enough that the asset grid above
+  // peeks through, with a hairline separator at the top.
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
+  Column(
+    modifier = Modifier
+      .fillMaxWidth()
+      .background(MaterialTheme.colorScheme.background.copy(alpha = 0.95f)),
   ) {
+    Box(
+      modifier = Modifier
+        .fillMaxWidth()
+        .height(0.5.dp)
+        .background(tokens.colors.opaqueSeparator),
+    )
     Column(
       modifier = Modifier
         .fillMaxWidth()
         .navigationBarsPadding()
-        .padding(horizontal = 20.dp, vertical = 12.dp),
-      verticalArrangement = Arrangement.spacedBy(8.dp),
+        .padding(horizontal = 20.dp, vertical = 14.dp),
+      verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
       val label = buildString {
         append("已选 $selectedCount 张")
@@ -248,22 +277,16 @@ private fun CuratorBottomBar(
       }
       Text(
         label,
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = MaterialTheme.typography.bodyMedium,
+        color = tokens.colors.secondaryLabel,
       )
-      Button(
-        modifier = Modifier
-          .fillMaxWidth()
-          .height(52.dp),
+      com.google.ai.edge.gallery.customtasks.vlogpilot.ui.PrimaryActionButton(
+        text = "开始制作",
+        icon = Icons.Outlined.AutoAwesome,
         onClick = onSubmit,
         enabled = canSubmit,
-      ) {
-        Icon(Icons.Outlined.AutoAwesome, contentDescription = null)
-        Text(
-          text = "  开始制作",
-          fontWeight = FontWeight.SemiBold,
-        )
-      }
+        modifier = Modifier.fillMaxWidth(),
+      )
     }
   }
 }
@@ -278,14 +301,15 @@ private fun estimatedDurationSec(selectedCount: Int, videoSec: Int): Int {
 
 @Composable
 private fun ErrorBanner(message: String, onDismiss: () -> Unit) {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
   androidx.compose.material3.Surface(
-    color = MaterialTheme.colorScheme.errorContainer,
-    contentColor = MaterialTheme.colorScheme.onErrorContainer,
-    shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+    color = tokens.colors.systemRed.copy(alpha = if (tokens.colors.isDark) 0.22f else 0.12f),
+    contentColor = tokens.colors.systemRed,
+    shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
     modifier = Modifier.fillMaxWidth(),
   ) {
     androidx.compose.foundation.layout.Row(
-      modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+      modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
       horizontalArrangement = Arrangement.spacedBy(10.dp),
       verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
     ) {
@@ -297,9 +321,13 @@ private fun ErrorBanner(message: String, onDismiss: () -> Unit) {
       Text(
         message,
         modifier = Modifier.weight(1f),
-        style = MaterialTheme.typography.bodySmall,
+        style = MaterialTheme.typography.bodyMedium,
       )
-      androidx.compose.material3.TextButton(onClick = onDismiss) { Text("知道了") }
+      com.google.ai.edge.gallery.customtasks.vlogpilot.ui.PlainTextButton(
+        text = "知道了",
+        onClick = onDismiss,
+        color = tokens.colors.systemRed,
+      )
     }
   }
 }

@@ -981,6 +981,49 @@ private fun cheapTimelineIssues(
     return issues
   }
 
+  /**
+   * Soft warnings about editing-language quality. Distinct from cheapTimelineIssues
+   * because these don't (yet) trigger a critic run — we only breadcrumb them so we
+   * can observe false-positive rate over a few real runs before promoting to hard
+   * triggers. Promotion plan: once confirmed precise, fold these into
+   * cheapTimelineIssues so visual critic actually fires on them.
+   */
+  private fun softTimelineWarnings(timeline: Timeline, director: DirectorBrief): List<String> {
+    val warnings = mutableListOf<String>()
+    val shots = timeline.shots.sortedBy { it.order }
+    if (shots.size < 3) return warnings
+
+    val roleByOrder = director.shotBlueprint.associate { it.position to it.role }
+
+    for (i in 2 until shots.size) {
+      val a = roleByOrder[shots[i - 2].order]
+      val b = roleByOrder[shots[i - 1].order]
+      val c = roleByOrder[shots[i].order]
+      if (a != null && a == b && b == c) {
+        warnings += "consecutive_same_role:${a.name.lowercase()}@${shots[i - 2].order}-${shots[i].order}"
+      }
+    }
+
+    for (i in 2 until shots.size) {
+      val t = shots[i].transitionIn
+      if (t == shots[i - 1].transitionIn && t == shots[i - 2].transitionIn) {
+        warnings += "transitions_monotone:${t.name.lowercase()}@${shots[i - 2].order}-${shots[i].order}"
+      }
+    }
+
+    val first = shots.first()
+    if (first.durationSec > 4f && first.caption.isBlank() && first.kenBurns.isBlank()) {
+      warnings += "weak_opening_hook:dur=${"%.1f".format(first.durationSec)}s,no_caption,no_kenburns"
+    }
+
+    val hasClimax = director.shotBlueprint.any { it.role == ShotRole.CLIMAX && it.position in shots.map { s -> s.order } }
+    if (!hasClimax && shots.size >= 4) {
+      warnings += "missing_climax_in_filled_shots"
+    }
+
+    return warnings
+  }
+
 private suspend fun buildTimeline(
     blueprint: List<ShotRequest>,
     director: DirectorBrief,
@@ -1032,7 +1075,8 @@ private suspend fun buildTimeline(
       used += spec.assetId
       prevSummary = "[${spec.mediaType.name.lowercase()}] ${req.role.name.lowercase()} dur=${spec.durationSec}s caption=${spec.caption}"
     }
-    return Timeline(eventId = event.eventId, directorBriefRef = "", shots = shots)
+    val diverse = EditorAgent.enforceTransitionDiversity(shots)
+    return Timeline(eventId = event.eventId, directorBriefRef = "", shots = diverse)
   }
 
   private fun isProcessableEvent(assets: List<Asset>): Boolean =
@@ -1081,15 +1125,27 @@ private suspend fun buildTimeline(
         "${v.durationMs / 1000}s $label"
       }}）"
 
-    // Salient highlights — pick a few of the brightest VLM tags so the director
-    // sees concrete moments (e.g. "中间男士笑容自然") not just scene names.
-    val salientLine = nonJunk.mapNotNull { perceptions[it.id]?.vlmTags?.salient?.takeIf { s -> s.isNotBlank() } }
+    // Visual descriptions — natural language summaries are more useful to Director
+    // than fragmented tags. Pick distinct ones so the director sees concrete imagery.
+    val visualDescLine = nonJunk.mapNotNull {
+      perceptions[it.id]?.vlmTags?.visualDescription?.takeIf { s -> s.isNotBlank() }
+        ?: perceptions[it.id]?.videoInsight?.visualDescription?.takeIf { s -> s.isNotBlank() }
+    }
       .distinct()
-      .take(5)
+      .take(4)
       .takeIf { it.isNotEmpty() }
-      ?.let { "  亮点提示: " + it.joinToString(" / ") }
+      ?.let { "  画面描述:\n" + it.joinToString("\n") { d -> "    · $d" } }
 
-    return (sceneLines + listOfNotNull(longVideoLine, salientLine)).joinToString("\n")
+    // Fallback to salient when visual_description is empty (legacy cache or annotation failure)
+    val salientLine = if (visualDescLine == null) {
+      nonJunk.mapNotNull { perceptions[it.id]?.vlmTags?.salient?.takeIf { s -> s.isNotBlank() } }
+        .distinct()
+        .take(5)
+        .takeIf { it.isNotEmpty() }
+        ?.let { "  亮点提示: " + it.joinToString(" / ") }
+    } else null
+
+    return (sceneLines + listOfNotNull(longVideoLine, visualDescLine, salientLine)).joinToString("\n")
   }
 
   private suspend fun applyRevisions(
@@ -1154,6 +1210,9 @@ private suspend fun buildTimeline(
     var caption = base.captionText
     var kenBurns = base.kenBurnsHint
     var transitionIn = base.transitionInHint
+    var speed = base.speedHint
+    var kbZoom = base.kenBurnsIntensity
+    var cutReason = base.cutReason
     for ((k, v) in patches) {
       when (k.trim().lowercase()) {
         "role" -> if (v.isNotBlank()) runCatching { role = com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRole.valueOf(v.uppercase()) }
@@ -1164,6 +1223,9 @@ private suspend fun buildTimeline(
         "caption_text", "caption" -> caption = v
         "ken_burns_hint", "ken_burns" -> kenBurns = v
         "transition_in_hint", "transition_in", "transition" -> transitionIn = v
+        "speed_factor", "speed_hint", "speed" -> v.toFloatOrNull()?.let { speed = it.coerceIn(0.5f, 1.75f) }
+        "ken_burns_zoom", "ken_burns_intensity", "kb_zoom" -> v.toFloatOrNull()?.let { kbZoom = it.coerceIn(1.0f, 1.20f) }
+        "cut_reason" -> if (v.isNotBlank()) cutReason = v
       }
     }
     return base.copy(
@@ -1175,6 +1237,9 @@ private suspend fun buildTimeline(
       captionText = caption,
       kenBurnsHint = kenBurns,
       transitionInHint = transitionIn,
+      speedHint = speed,
+      kenBurnsIntensity = kbZoom,
+      cutReason = cutReason,
     )
   }
 
@@ -1318,7 +1383,14 @@ private suspend fun buildTimeline(
     progress(PipelineProgress.AnnotationDone(annotatedCount, needsAnnotation.size, annotateMs))
   }
 
-  /** Annotate a single asset; returns null if loading failed or annotator threw. */
+  /** Annotate a single asset; returns null if loading failed or annotator threw.
+   *
+   *  Logs a `vlm_step` breadcrumb so we can see *where* the per-asset wall time
+   *  goes — without it, the UI shows only the aggregate (e.g. "45.9s") and the
+   *  bottleneck between frame sampling, sheet build, and Gemma inference is
+   *  invisible. Read the per-asset trace via:
+   *      adb exec-out run-as <pkg> cat files/agent_log/agent.jsonl | grep vlm_step
+   */
   private suspend fun annotateAsset(
     asset: Asset,
     annotator: VlmAnnotator,
@@ -1326,16 +1398,51 @@ private suspend fun buildTimeline(
   ): VlmAnnotator.Annotation? {
     return try {
       if (asset.mediaType == MediaType.IMAGE) {
+        val loadStart = System.nanoTime()
         val thumb = MediaLoader.loadImage(context, asset, maxSide = 512) ?: return null
-        try { annotator.annotate(thumb, asset.mediaType.name.lowercase()) } finally { runCatching { thumb.recycle() } }
+        val loadMs = (System.nanoTime() - loadStart) / 1_000_000
+        try {
+          val askStart = System.nanoTime()
+          val result = annotator.annotate(thumb, asset.mediaType.name.lowercase())
+          val askMs = (System.nanoTime() - askStart) / 1_000_000
+          StateBreadcrumb.mark(
+            context,
+            "vlm_step",
+            "image ${asset.id} ${thumb.width}x${thumb.height} load=${loadMs}ms ask=${askMs}ms",
+          )
+          result
+        } finally { runCatching { thumb.recycle() } }
       } else {
+        val sheetStart = System.nanoTime()
         val sheet = VideoFrameSheetBuilder.build(context, asset, sceneCutsSec)
+        val sheetMs = (System.nanoTime() - sheetStart) / 1_000_000
         if (sheet != null) {
-          try { annotator.annotateVideo(sheet.bitmap, sheet.frameTimestampsSec, asset.mediaType.name.lowercase()) }
-          finally { runCatching { sheet.bitmap.recycle() } }
+          try {
+            val askStart = System.nanoTime()
+            val result = annotator.annotateVideo(sheet.bitmap, sheet.frameTimestampsSec, asset.mediaType.name.lowercase())
+            val askMs = (System.nanoTime() - askStart) / 1_000_000
+            StateBreadcrumb.mark(
+              context,
+              "vlm_step",
+              "video ${asset.id} sheet=${sheet.bitmap.width}x${sheet.bitmap.height} frames=${sheet.frameTimestampsSec.size} build=${sheetMs}ms ask=${askMs}ms",
+            )
+            result
+          } finally { runCatching { sheet.bitmap.recycle() } }
         } else {
+          val loadStart = System.nanoTime()
           val thumb = MediaLoader.loadImage(context, asset, maxSide = 512) ?: return null
-          try { annotator.annotate(thumb, asset.mediaType.name.lowercase()) } finally { runCatching { thumb.recycle() } }
+          val loadMs = (System.nanoTime() - loadStart) / 1_000_000
+          try {
+            val askStart = System.nanoTime()
+            val result = annotator.annotate(thumb, asset.mediaType.name.lowercase())
+            val askMs = (System.nanoTime() - askStart) / 1_000_000
+            StateBreadcrumb.mark(
+              context,
+              "vlm_step",
+              "video-fallback ${asset.id} ${thumb.width}x${thumb.height} load=${loadMs}ms ask=${askMs}ms",
+            )
+            result
+          } finally { runCatching { thumb.recycle() } }
         }
       }
     } catch (t: Throwable) {
@@ -1459,6 +1566,14 @@ private suspend fun buildTimeline(
       var lastCritique: com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Critique? = null
       var aborted = false
       val cheapIssues = cheapTimelineIssues(v1, plan, eventAssets)
+      val softWarnings = softTimelineWarnings(v1, plan)
+      if (softWarnings.isNotEmpty()) {
+        StateBreadcrumb.mark(
+          context,
+          "soft_warnings",
+          "${event.eventId} ${softWarnings.take(4).joinToString("; ")}",
+        )
+      }
       if (cheapIssues.isEmpty()) {
         val skipped = Critique(
           iteration = 0,
