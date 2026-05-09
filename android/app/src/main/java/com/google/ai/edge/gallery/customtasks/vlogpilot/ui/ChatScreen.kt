@@ -137,8 +137,19 @@ internal fun ChatScreen(
 
     // ── Messages ────────────────────────────────────────────────────────────
     val listState = rememberLazyListState()
+    // Auto-scroll to the latest message ONLY when the user is already near
+    // the bottom — Apple Messages / Claude.ai both follow this rule so that
+    // reading older content isn't interrupted when new messages stream in.
+    val isNearBottom by remember {
+      androidx.compose.runtime.derivedStateOf {
+        val info = listState.layoutInfo
+        val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+        val total = info.totalItemsCount
+        total == 0 || lastVisible >= total - 2
+      }
+    }
     LaunchedEffect(messages.size) {
-      if (messages.isNotEmpty()) {
+      if (messages.isNotEmpty() && isNearBottom) {
         listState.animateScrollToItem(messages.size - 1)
       }
     }
