@@ -1,0 +1,50 @@
+# End-to-end smoke test for VlogPilot.
+# Validates: app launches, all 4 bottom tabs render, key copy is visible.
+# Run: maestro test .maestro/flows/smoke.yaml
+#
+# This flow does NOT depend on a Gemma model being imported — it only
+# verifies UI shell. For pipeline-end-to-end coverage, run a real device
+# with a model imported (no automated test for that path yet — pipeline
+# is too long-running for typical CI budgets).
+
+appId: com.google.aiedge.gallery
+name: smoke
+tags:
+  - smoke
+---
+- launchApp:
+    clearState: false
+    stopApp: true
+
+- assertVisible: "VlogPilot"
+
+# Bottom tabs all visible — these are the IA backbone.
+- assertVisible: "作品"
+- assertVisible: "对话"
+- assertVisible: "相册"
+- assertVisible: "设置"
+
+# Default landing tab is 作品.
+- assertVisible:
+    text: "作品"
+    enabled: true
+
+# 对话 tab — chat surface.
+- tapOn: "对话"
+- assertVisible: "和 AI 聊聊你想做什么..."
+
+# 相册 tab — album.
+- tapOn: "相册"
+- assertVisible: "相册"
+- assertVisible: "全部"
+- assertVisible: "视频"
+- assertVisible: "照片"
+
+# 设置 tab — Apple-style inset-grouped surfaces.
+- tapOn: "设置"
+- assertVisible: "视频设置"
+- assertVisible: "想做什么样的视频?"
+
+# Back to 作品 — round trip.
+- tapOn: "作品"
+- assertVisible: "作品"

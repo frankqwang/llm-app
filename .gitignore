@@ -20,5 +20,10 @@ models/
 # .run*, .ui*.xml, .screen.png, .sample_*.json at repo root.
 .debug/
 
+# Maestro UI test outputs — flows are committed under .maestro/flows/, but
+# per-run video / screenshot / report artifacts are local-only.
+.maestro/output/
+.maestro/.cache/
+
 # Third-party repos cloned at root (not part of this project, see pc-pilot/README.md)
 ACE-Step-1.5/

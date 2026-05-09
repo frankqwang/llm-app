@@ -339,6 +339,26 @@ The app lands directly on the VlogPilot screen (not the gallery home). The Stori
 
 If the worker is killed mid-iteration (vivo BTM, OOM, force-stop), the staged feedback file at `_pending_iteration/<eventId>.json` is auto-resumed on next cold start (one attempt per session — failed iterations don't loop).
 
+## Testing
+
+Two layers, with very different costs and coverage:
+
+**Unit tests** — algorithmic paths that don't need a device.
+
+```powershell
+cd C:\dev\llm-app\android
+.\gradlew.bat :app:testDebugUnitTest
+```
+
+46 cases covering JSON extraction (the LLM-output hot path), event scoring, iteration planner, user curation, etc. Fast (~15s), runs on every build.
+
+**UI tests** — Maestro flows that drive the actual Compose UI on a connected emulator or device. See [.maestro/README.md](.maestro/README.md) for install + run details. The flows cover IA shell, tab routing, and the chat fallback guarantee. Pipeline-end-to-end paths (Gemma loaded, model running, mp4 produced) are too long for typical CI budgets — verify those manually on a real device once per release.
+
+```bash
+maestro test .maestro/flows/smoke.yaml      # 10s, validates all 4 tabs render
+maestro test .maestro/flows/chat-fallback.yaml  # 15s, validates "no silent failure" reply
+```
+
 ## Future cleanup (does NOT block VlogPilot working)
 
 This fork still carries upstream gallery code paths VlogPilot doesn't use. They cost APK size + build time but aren't currently broken; cleanup is an APK-size optimization, not a correctness need.

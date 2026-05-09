@@ -1,0 +1,9 @@
+# Maestro project config — applied to every flow under .maestro/flows/.
+# Docs: https://maestro.mobile.dev/
+
+# Test outputs go here; gitignored via .gitignore root.
+executionOrder:
+  flowsOrder:
+    - smoke
+    - tab-walk
+    - chat-fallback

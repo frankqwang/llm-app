@@ -124,11 +124,12 @@ internal fun ChatScreen(
   }
 
   Column(modifier = Modifier.fillMaxWidth().heightIn(min = 600.dp)) {
-    // ── Header: title + new conversation + history ────────────────────────
+    // ── Header: title + rescan + history + new conversation ───────────────
     ChatHeader(
       conversation = activeConvo,
       onNew = { viewModel.newConversation() },
       onShowHistory = { showHistory = true },
+      onRescan = onRescan,
     )
 
     Spacer(Modifier.height(8.dp))
@@ -214,6 +215,7 @@ private fun ChatHeader(
   conversation: ChatConversation?,
   onNew: () -> Unit,
   onShowHistory: () -> Unit,
+  onRescan: () -> Unit,
 ) {
   val tokens = VlogPilotTokens
   Row(
@@ -254,6 +256,9 @@ private fun ChatHeader(
           color = tokens.colors.tertiaryLabel,
         )
       }
+    }
+    IconButton(onClick = onRescan) {
+      Icon(Icons.Outlined.AutoAwesome, contentDescription = "重扫相册", tint = tokens.colors.accent)
     }
     IconButton(onClick = onShowHistory) {
       Icon(Icons.Outlined.History, contentDescription = "历史对话", tint = tokens.colors.accent)

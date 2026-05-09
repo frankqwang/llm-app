@@ -1,0 +1,29 @@
+# Tab navigation walk — verifies every bottom tab is reachable and
+# renders its primary content. Lighter than smoke.yaml; useful when
+# iterating on tab-related UI changes.
+
+appId: com.google.aiedge.gallery
+name: tab-walk
+tags:
+  - quick
+---
+- launchApp:
+    clearState: false
+
+- tapOn: "作品"
+- assertVisible: "作品"
+
+- tapOn: "对话"
+- assertVisible: "和 AI 聊聊你想做什么..."
+# 重扫 button (icon-only — accessibility label "重扫相册") is now in the
+# chat header. Validates Phase-4 polish.
+- assertVisible:
+    id: "重扫相册"
+
+- tapOn: "相册"
+- assertVisible: "全部"
+
+- tapOn: "设置"
+- assertVisible: "视频设置"
+
+- tapOn: "作品"

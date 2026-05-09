@@ -464,6 +464,15 @@ class VlogPilotViewModel @Inject constructor(
     _progress.value = progressWithRecent(ProgressSnapshot("错误", message, "error"))
   }
 
+  /** Clear a sticky error state. Used when the user dismisses the error
+   *  card or starts another action — the error has already been
+   *  acknowledged, no point keeping it pinned to the screen. */
+  fun clearError() {
+    if (_state.value is PipelineState.Error) {
+      _state.value = PipelineState.Idle
+    }
+  }
+
   fun cancelPipeline() {
     StateBreadcrumb.mark(appContext, "ui_cancel_request", "cancel unique work")
     workManager.cancelUniqueWork(VlogPipelineWorker.WORK_NAME)

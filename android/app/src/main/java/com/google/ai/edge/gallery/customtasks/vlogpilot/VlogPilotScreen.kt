@@ -326,46 +326,51 @@ internal fun VlogPilotScreen(
             onSend = { text, currentEventId ->
               // Phase 3b keyword routing. Order matters: most specific first.
               // The chat VM has already appended the user message; this
-              // callback's job is to KICK OFF the right pipeline action.
+              // callback's job is to KICK OFF the right pipeline action AND
+              // make sure something visible happens — never sit silent on a
+              // user-typed message, that's the worst chat UX failure mode.
               val normalized = text.trim()
               val matchedCandidate = matchCandidateByTitle(normalized, eventSelection)
+              fun reply(text: String) = chatViewModel.appendAgentMessage(
+                com.google.ai.edge.gallery.customtasks.vlogpilot.chat.ChatRole.AGENT_STATUS,
+                text,
+              )
+              fun hasModel() = modelManagerViewModel.getAllDownloadedModels().isNotEmpty()
               when {
-                // 1) Candidate match: user said "做「夏夜烧烤」" → start that
-                //    specific candidate, not a fresh full scan.
-                matchedCandidate != null -> {
-                  // Mark only this candidate selected, then run.
+                matchedCandidate != null -> if (!hasModel()) {
+                  reply("还没有可用模型。先去 Models 页导入一个本地 Gemma 模型，回来我就能开工。")
+                } else {
                   viewModel.toggleSelectedEvent(matchedCandidate.eventId)
-                  // makeSelectedStories needs runConfig to actually have the
-                  // selected id — toggle is sync so by the time the next
-                  // call sees runConfig it should be there. If not, the
-                  // call returns early and we fall back to refresh.
                   requireAlbumPermission {
                     selectedModelOrReport()?.let { viewModel.runFullPipeline(it) }
                   }
+                  reply("好的，开始制作「${storyTitle(matchedCandidate)}」——读素材、写分镜、剪一条出来，过程会实时显示在这里。")
                 }
-                // 2) Iteration intent — apply to the currently linked vlog or
-                //    the most recent one.
                 isIterationCommand(normalized) -> {
                   val targetEventId = currentEventId ?: decisions.firstOrNull()?.eventId
-                  if (targetEventId != null) {
-                    val feedback = buildIterationFromText(
-                      normalized,
-                      eventId = targetEventId,
-                      baseVersion = decisions.firstOrNull { it.eventId == targetEventId }?.versionCount ?: 1,
-                    )
-                    viewModel.submitFeedback(targetEventId, feedback)
+                  when {
+                    targetEventId == null -> reply("还没有可以改的成片。你可以先让我做一条，比如「帮我做一条这周的家庭日常」。")
+                    !hasModel() -> reply("还没有可用模型，先去 Models 导入一个再来改。")
+                    else -> {
+                      val feedback = buildIterationFromText(
+                        normalized,
+                        eventId = targetEventId,
+                        baseVersion = decisions.firstOrNull { it.eventId == targetEventId }?.versionCount ?: 1,
+                      )
+                      viewModel.submitFeedback(targetEventId, feedback)
+                      reply("收到，按你的反馈在改了。")
+                    }
                   }
                 }
-                // 3) Generation intent without a specific candidate — scan
-                //    + let AI pick.
-                isGenerationCommand(normalized) -> {
+                isGenerationCommand(normalized) -> if (!hasModel()) {
+                  reply("还没有可用模型。先去 Models 导入一个本地 Gemma 模型再来。")
+                } else {
                   requireAlbumPermission {
                     selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
                   }
+                  reply("好的，正在扫相册、挑事件，挑完会出几个候选给你看。")
                 }
-                // 4) Else — no-op, the chat VM keeps the user's message
-                //    visible. AI waits for a clearer instruction.
-                else -> Unit
+                else -> reply("我没太听明白。试试这样说：\n• 「帮我做一条这周的家庭日常」（让我先扫相册）\n• 「再快一点」（已有成片时调节奏）\n或者点上面的「重扫」按钮，让 AI 推几个故事。")
               }
             },
             onRescan = {
@@ -404,6 +409,12 @@ internal fun VlogPilotScreen(
             manifest = eventSelection,
             onOpenVlog = { eventId -> detailEventId = eventId },
             onMakeCandidate = { snapshot ->
+              // Fresh conversation per candidate handoff. Otherwise the active
+              // convo may already be bound to a different eventId, which makes
+              // ChatViewModel.appendFromPipeline silently filter the new
+              // event's progress messages — i.e. the user sees no AI activity
+              // on the second candidate they tap.
+              chatViewModel.newConversation(initialTitle = storyTitle(snapshot))
               chatPrefill = "帮我做「${storyTitle(snapshot)}」这个候选故事"
               chatAutoSend = true
               onTabChange(VlogPilotTab.Chat)
@@ -417,7 +428,13 @@ internal fun VlogPilotScreen(
               title = "还没有作品",
               message = "去对话页让 AI 帮你创作第一条 vlog。",
               actionLabel = "开始对话",
-              onAction = { onTabChange(VlogPilotTab.Chat) },
+              onAction = {
+                // Clearing here lets the user tap-through the error variant
+                // back to a clean state. The error itself is still in the
+                // chat as an AGENT_STATUS message — no information lost.
+                viewModel.clearError()
+                onTabChange(VlogPilotTab.Chat)
+              },
             )
           }
         }
@@ -525,20 +542,29 @@ internal fun VlogPilotScreen(
 // keyword path covers the most common phrasings cheaply.
 // ─────────────────────────────────────────────────────────────────────────
 
+// All keywords are lowercase. Matching lowercases the input text first, so
+// "VLOG"/"Vlog"/"vlog"/"Make"/"MAKE" all hit the same entry.
 private val GENERATION_KEYWORDS = listOf(
-  "做一", "帮我做", "做条", "做一条", "做个", "做一个",
-  "推荐", "扫一下", "重扫", "重新扫", "看一下相册", "scan",
-  "做下", "整一个", "整一条", "整一下",
+  // 中文 — 命令式
+  "做一", "帮我做", "做条", "做一条", "做个", "做一个", "做下",
+  "整一个", "整一条", "整一下", "整一段", "弄一个", "弄一段",
+  "剪一", "帮我剪", "来一段", "来一条", "出一段", "出一条",
+  "生成", "做点", "搞一个", "搞一段",
+  // 中文 — 流程
+  "推荐", "扫一下", "扫相册", "重扫", "重新扫", "看一下相册",
+  "看看相册", "刷新候选", "看下我的相册",
+  // 英文 / 短词
+  "vlog", "scan", "make a", "create a",
 )
 
-private val ITERATION_FASTER_KEYWORDS = listOf("快一点", "再快", "加快", "更快", "动感")
-private val ITERATION_SLOWER_KEYWORDS = listOf("慢一点", "再慢", "慢点", "留白", "悠长")
-private val ITERATION_REMOVE_CAPTIONS_KEYWORDS = listOf("去字幕", "无字幕", "不要字幕")
-private val ITERATION_RECOLOR_KEYWORDS = listOf("换调色", "换色调", "换个色", "换色", "重调色")
+private val ITERATION_FASTER_KEYWORDS = listOf("快一点", "再快", "加快", "更快", "动感", "快点")
+private val ITERATION_SLOWER_KEYWORDS = listOf("慢一点", "再慢", "慢点", "留白", "悠长", "慢一些")
+private val ITERATION_REMOVE_CAPTIONS_KEYWORDS = listOf("去字幕", "无字幕", "不要字幕", "去掉字幕", "字幕去掉")
+private val ITERATION_RECOLOR_KEYWORDS = listOf("换调色", "换色调", "换个色", "换色", "重调色", "调色")
 private val ITERATION_VERBS = listOf("改", "修改", "调整", "再")
 
 internal fun isGenerationCommand(text: String): Boolean =
-  GENERATION_KEYWORDS.any { it in text }
+  text.lowercase().let { lowered -> GENERATION_KEYWORDS.any { it in lowered } }
 
 /** If the user's text contains a candidate's title (or its core date / type
  *  tokens), return that candidate. Powers the chat handoff: tap a candidate
