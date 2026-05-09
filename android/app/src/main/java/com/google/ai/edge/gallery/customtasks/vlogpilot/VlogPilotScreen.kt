@@ -118,6 +118,7 @@ import kotlinx.coroutines.withContext
 internal fun VlogPilotScreen(
   selectedTab: VlogPilotTab,
   onTabChange: (VlogPilotTab) -> Unit,
+  chatViewModel: com.google.ai.edge.gallery.customtasks.vlogpilot.chat.ChatViewModel,
   bottomPadding: Dp,
   modelManagerViewModel: ModelManagerViewModel,
   modifier: Modifier = Modifier,
@@ -312,6 +313,7 @@ internal fun VlogPilotScreen(
       VlogPilotTab.Chat -> {
         item {
           com.google.ai.edge.gallery.customtasks.vlogpilot.ui.ChatScreen(
+            viewModel = chatViewModel,
             decisions = decisions,
             eventSelection = eventSelection,
             pendingPrefill = chatPrefill,

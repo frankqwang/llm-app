@@ -51,6 +51,17 @@ fun VlogPilotRootScreen(
 ) {
   VlogPilotTheme {
     var selectedTab by remember { mutableStateOf(VlogPilotTab.Works) }
+    // Hoisted here so the chat VM survives tab switches — otherwise
+    // PipelineEventBus events that fire while the user is on a non-Chat
+    // tab would be dropped (the bus uses replay=1, so a freshly recreated
+    // VM only sees the latest event, not the ones in between).
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val chatViewModel = remember {
+      com.google.ai.edge.gallery.customtasks.vlogpilot.chat.ChatViewModel(context.applicationContext)
+    }
+    androidx.compose.runtime.DisposableEffect(chatViewModel) {
+      onDispose { chatViewModel.close() }
+    }
     Scaffold(
       modifier = Modifier
         .fillMaxSize()
@@ -83,6 +94,7 @@ fun VlogPilotRootScreen(
       VlogPilotScreen(
         selectedTab = selectedTab,
         onTabChange = { selectedTab = it },
+        chatViewModel = chatViewModel,
         bottomPadding = innerPadding.calculateBottomPadding(),
         modelManagerViewModel = modelManagerViewModel,
         modifier = Modifier.padding(top = innerPadding.calculateTopPadding()),

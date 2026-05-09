@@ -85,6 +85,7 @@ import kotlinx.coroutines.flow.collect
  *  inline because the chat is fully self-contained. */
 @Composable
 internal fun ChatScreen(
+  viewModel: ChatViewModel,
   decisions: List<EventDecisions>,
   eventSelection: EventSelectionManifest?,
   onSend: (text: String, currentEventId: String?) -> Unit,
@@ -95,11 +96,6 @@ internal fun ChatScreen(
   onRescan: () -> Unit = {},
   onOpenCurator: () -> Unit = {},
 ) {
-  val context = LocalContext.current
-  val viewModel = remember { ChatViewModel(context.applicationContext) }
-  DisposableEffect(viewModel) {
-    onDispose { viewModel.close() }
-  }
 
   val tokens = VlogPilotTokens
   val conversations by viewModel.conversations.collectAsStateSafe()
