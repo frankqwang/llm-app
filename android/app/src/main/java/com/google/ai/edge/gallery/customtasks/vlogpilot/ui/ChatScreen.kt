@@ -1,182 +1,323 @@
 /*
  * Copyright 2026 The pc-pilot v3 authors
  *
- * Phase 1 placeholder for the Chat tab. Renders a guided welcome message
- * and a "重扫" button at the top so users can refresh the AI's
- * understanding of their album. The real conversation surface (Phase 3)
- * will replace this with a full message-list + tool-call cards + input
- * bar wired into the worker pipeline.
- *
- * For now this just establishes the visual home so the bottom-tab
- * navigation has somewhere to land.
+ * Claude-style chat surface — message list (USER bubbles right, agent
+ * messages left) + input bar at the bottom + conversation header at the
+ * top with multi-session switcher. Wired to [ChatViewModel] which persists
+ * to ChatStore and bridges PipelineEventBus into the message stream so the
+ * AI's work shows up live as it happens.
  */
 package com.google.ai.edge.gallery.customtasks.vlogpilot.ui
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.AutoAwesome
-import androidx.compose.material.icons.outlined.PhotoLibrary
-import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.google.ai.edge.gallery.customtasks.vlogpilot.chat.ChatConversation
+import com.google.ai.edge.gallery.customtasks.vlogpilot.chat.ChatMessage
+import com.google.ai.edge.gallery.customtasks.vlogpilot.chat.ChatRole
+import com.google.ai.edge.gallery.customtasks.vlogpilot.chat.ChatViewModel
 import com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventDecisions
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventSelectionManifest
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlinx.coroutines.flow.collect
 
+/** Phase 3 entry point — replaces the placeholder. Pulls all state from a
+ *  ChatViewModel created lazily per VM lifetime; the parent owns this VM
+ *  if it wants to share it across recompositions. For now we instantiate
+ *  inline because the chat is fully self-contained. */
 @Composable
 internal fun ChatScreen(
   decisions: List<EventDecisions>,
   eventSelection: EventSelectionManifest?,
-  onRescan: () -> Unit,
-  onOpenCurator: () -> Unit,
-  @Suppress("UNUSED_PARAMETER") onOpenCandidate: (String) -> Unit,
+  onSend: (text: String, currentEventId: String?) -> Unit,
+  pendingPrefill: String? = null,
+  onPrefillConsumed: () -> Unit = {},
+  // Phase 1 fallback callbacks — kept so the empty-state buttons still work.
+  onRescan: () -> Unit = {},
+  onOpenCurator: () -> Unit = {},
 ) {
+  val context = LocalContext.current
+  val viewModel = remember { ChatViewModel(context.applicationContext) }
+  DisposableEffect(viewModel) {
+    onDispose { viewModel.close() }
+  }
+
   val tokens = VlogPilotTokens
-  val candidateCount = eventSelection?.candidates?.size ?: 0
-  val completedCount = decisions.count { it.mp4Path != null }
+  val conversations by viewModel.conversations.collectAsStateSafe()
+  val activeConvoId by viewModel.activeConversationId.collectAsStateSafe()
+  val messages by viewModel.messages.collectAsStateSafe()
+  val activeConvo = conversations.firstOrNull { it.id == activeConvoId }
 
-  Column(
-    modifier = Modifier.fillMaxWidth(),
-    verticalArrangement = Arrangement.spacedBy(tokens.spacing.md),
-  ) {
-    // Top action bar — primary "重扫" + secondary "我自己挑素材"
-    Row(
-      modifier = Modifier.fillMaxWidth(),
-      horizontalArrangement = Arrangement.spacedBy(tokens.spacing.sm),
-    ) {
-      TintedActionButton(
-        text = "重扫相册",
-        icon = Icons.Outlined.Search,
-        onClick = onRescan,
-        modifier = Modifier.fillMaxWidth(0.5f),
-      )
-      TintedActionButton(
-        text = "挑素材",
-        icon = Icons.Outlined.PhotoLibrary,
-        onClick = onOpenCurator,
-        tint = tokens.colors.systemPurple,
-        modifier = Modifier.fillMaxWidth(),
-      )
+  var showHistory by remember { mutableStateOf(false) }
+  var inputText by remember { mutableStateOf("") }
+
+  // Consume any pending prefill from the Works tab handoff.
+  LaunchedEffect(pendingPrefill) {
+    if (!pendingPrefill.isNullOrBlank()) {
+      inputText = pendingPrefill
+      onPrefillConsumed()
     }
+  }
 
-    // Welcome card — Claude-like greeting + library stats so the user knows
-    // what the AI can already see, before any conversation starts.
-    Surface(
-      modifier = Modifier.fillMaxWidth(),
-      shape = RoundedCornerShape(20.dp),
-      color = MaterialTheme.colorScheme.surface,
-      tonalElevation = 0.dp,
-    ) {
-      Column(
-        modifier = Modifier.padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-      ) {
-        Box(
-          modifier = Modifier
-            .size(56.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(tokens.colors.accentTint),
-          contentAlignment = Alignment.Center,
-        ) {
-          Icon(
-            Icons.AutoMirrored.Outlined.Chat,
-            contentDescription = null,
-            tint = tokens.colors.accent,
-            modifier = Modifier.size(28.dp),
-          )
-        }
-        Text(
-          "你好，我是 VlogPilot",
-          style = MaterialTheme.typography.titleLarge,
-          fontWeight = FontWeight.Bold,
-          color = MaterialTheme.colorScheme.onSurface,
-          textAlign = TextAlign.Center,
-        )
-        Text(
-          "告诉我你想做什么 vlog——可以是「一个本周旅行的纪录」「妈妈的日常温馨」之类的描述，我会读你的相册，写分镜，帮你剪一条出来。",
-          style = MaterialTheme.typography.bodyMedium,
-          color = tokens.colors.secondaryLabel,
-          textAlign = TextAlign.Center,
-        )
-        if (candidateCount > 0 || completedCount > 0) {
-          Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-          ) {
-            ChatStat(label = "AI 推荐故事", value = candidateCount.toString())
-            ChatStat(label = "已生成作品", value = completedCount.toString())
-          }
-        }
+  Column(modifier = Modifier.fillMaxWidth().heightIn(min = 600.dp)) {
+    // ── Header: title + new conversation + history ────────────────────────
+    ChatHeader(
+      conversation = activeConvo,
+      onNew = { viewModel.newConversation() },
+      onShowHistory = { showHistory = true },
+    )
+
+    Spacer(Modifier.height(8.dp))
+
+    // ── Messages ────────────────────────────────────────────────────────────
+    val listState = rememberLazyListState()
+    LaunchedEffect(messages.size) {
+      if (messages.isNotEmpty()) {
+        listState.animateScrollToItem(messages.size - 1)
       }
     }
-
-    // Suggested starters — quick-tap chips that seed the conversation. In
-    // Phase 1 these don't actually send anything; they're a hint at what the
-    // chat will accept once Phase 3 wires the agent in.
-    Surface(
-      modifier = Modifier.fillMaxWidth(),
-      shape = RoundedCornerShape(20.dp),
-      color = MaterialTheme.colorScheme.surface,
-      tonalElevation = 0.dp,
-    ) {
-      Column(
-        modifier = Modifier.padding(20.dp),
+    if (messages.isEmpty()) {
+      ChatWelcomeBlock(
+        decisionsCount = decisions.count { it.mp4Path != null },
+        candidateCount = eventSelection?.candidates?.size ?: 0,
+        onRescan = onRescan,
+        onOpenCurator = onOpenCurator,
+      )
+    } else {
+      LazyColumn(
+        state = listState,
+        modifier = Modifier
+          .fillMaxWidth()
+          .heightIn(min = 360.dp, max = 520.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
       ) {
-        Text(
-          "试试这样开始对话",
-          style = MaterialTheme.typography.titleSmall,
-          fontWeight = FontWeight.SemiBold,
-          color = MaterialTheme.colorScheme.onSurface,
-        )
-        SuggestionRow("💛 帮我做一条这周的家庭日常")
-        SuggestionRow("🍜 把上周的美食出片，要有食欲感")
-        SuggestionRow("🌅 把最近的旅行剪一条 30 秒怀旧风的")
-        SuggestionRow("👶 孩子的成长记录，慢节奏暖色")
+        items(messages, key = { it.id }) { msg -> ChatMessageRow(msg) }
       }
     }
 
-    // Disabled-state hint until Phase 3 lands.
+    Spacer(Modifier.height(12.dp))
+
+    // ── Suggestion chips (only on fresh conversation) ───────────────────────
+    if (messages.size <= 1) {
+      ChatSuggestions(
+        onTap = { suggestion -> inputText = suggestion },
+      )
+      Spacer(Modifier.height(12.dp))
+    }
+
+    // ── Input bar ───────────────────────────────────────────────────────────
+    ChatInputBar(
+      value = inputText,
+      onValueChange = { inputText = it },
+      onSend = {
+        val text = inputText.trim()
+        if (text.isNotBlank()) {
+          viewModel.appendUserMessage(text)
+          onSend(text, activeConvo?.eventId)
+          inputText = ""
+        }
+      },
+    )
+  }
+
+  if (showHistory) {
+    ChatHistorySheet(
+      conversations = conversations,
+      activeId = activeConvoId,
+      onSelect = {
+        viewModel.switchTo(it)
+        showHistory = false
+      },
+      onDelete = { viewModel.deleteConversation(it) },
+      onDismiss = { showHistory = false },
+    )
+  }
+}
+
+@Composable
+private fun ChatHeader(
+  conversation: ChatConversation?,
+  onNew: () -> Unit,
+  onShowHistory: () -> Unit,
+) {
+  val tokens = VlogPilotTokens
+  Row(
+    modifier = Modifier
+      .fillMaxWidth()
+      .padding(horizontal = 4.dp, vertical = 4.dp),
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(4.dp),
+  ) {
     Box(
       modifier = Modifier
-        .fillMaxWidth()
-        .clip(RoundedCornerShape(14.dp))
-        .background(tokens.colors.systemOrange.copy(alpha = if (tokens.colors.isDark) 0.18f else 0.10f))
-        .padding(14.dp),
+        .size(34.dp)
+        .clip(RoundedCornerShape(10.dp))
+        .background(tokens.colors.accentTint),
+      contentAlignment = Alignment.Center,
     ) {
-      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Icon(
-          Icons.Outlined.AutoAwesome,
-          contentDescription = null,
-          tint = tokens.colors.systemOrange,
-          modifier = Modifier.size(20.dp),
-        )
+      Icon(
+        Icons.AutoMirrored.Outlined.Chat,
+        contentDescription = null,
+        tint = tokens.colors.accent,
+        modifier = Modifier.size(20.dp),
+      )
+    }
+    Spacer(Modifier.size(8.dp))
+    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+      Text(
+        conversation?.title ?: "VlogPilot 对话",
+        style = MaterialTheme.typography.titleMedium,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.onBackground,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+      conversation?.let {
         Text(
-          "对话功能 Phase 3 接入。当前可以从「重扫相册」开始让 AI 先理解你的素材，然后到「作品」tab 选候选生成。",
+          SimpleDateFormat("M月d日 HH:mm", Locale.US).format(Date(it.createdAtMs)),
+          style = MaterialTheme.typography.labelSmall,
+          color = tokens.colors.tertiaryLabel,
+        )
+      }
+    }
+    IconButton(onClick = onShowHistory) {
+      Icon(Icons.Outlined.History, contentDescription = "历史对话", tint = tokens.colors.accent)
+    }
+    IconButton(onClick = onNew) {
+      Icon(Icons.Outlined.Edit, contentDescription = "新建对话", tint = tokens.colors.accent)
+    }
+  }
+}
+
+@Composable
+private fun ChatWelcomeBlock(
+  decisionsCount: Int,
+  candidateCount: Int,
+  onRescan: () -> Unit,
+  onOpenCurator: () -> Unit,
+) {
+  val tokens = VlogPilotTokens
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(20.dp),
+    color = MaterialTheme.colorScheme.surface,
+    tonalElevation = 0.dp,
+  ) {
+    Column(
+      modifier = Modifier.padding(20.dp),
+      verticalArrangement = Arrangement.spacedBy(12.dp),
+      horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+      Box(
+        modifier = Modifier
+          .size(56.dp)
+          .clip(RoundedCornerShape(16.dp))
+          .background(tokens.colors.accentTint),
+        contentAlignment = Alignment.Center,
+      ) {
+        Icon(
+          Icons.AutoMirrored.Outlined.Chat,
+          contentDescription = null,
+          tint = tokens.colors.accent,
+          modifier = Modifier.size(28.dp),
+        )
+      }
+      Text(
+        "你好，我是 VlogPilot",
+        style = MaterialTheme.typography.titleLarge,
+        fontWeight = FontWeight.Bold,
+        color = MaterialTheme.colorScheme.onSurface,
+        textAlign = TextAlign.Center,
+      )
+      Text(
+        "告诉我你想做什么 vlog——我会读你的相册，写分镜，剪一条出来。",
+        style = MaterialTheme.typography.bodyMedium,
+        color = tokens.colors.secondaryLabel,
+        textAlign = TextAlign.Center,
+      )
+      if (decisionsCount > 0 || candidateCount > 0) {
+        Row(
           modifier = Modifier.fillMaxWidth(),
-          style = MaterialTheme.typography.bodySmall,
-          color = tokens.colors.systemOrange,
+          horizontalArrangement = Arrangement.SpaceEvenly,
+        ) {
+          ChatStat("AI 推荐", candidateCount.toString())
+          ChatStat("已生成", decisionsCount.toString())
+        }
+      }
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        TintedActionButton(
+          text = "重扫相册",
+          icon = Icons.Outlined.AutoAwesome,
+          onClick = onRescan,
+          modifier = Modifier.fillMaxWidth(0.5f),
+        )
+        TintedActionButton(
+          text = "挑素材",
+          icon = Icons.Outlined.Movie,
+          tint = tokens.colors.systemPurple,
+          onClick = onOpenCurator,
+          modifier = Modifier.fillMaxWidth(),
         )
       }
     }
@@ -187,34 +328,353 @@ internal fun ChatScreen(
 private fun ChatStat(label: String, value: String) {
   val tokens = VlogPilotTokens
   Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    Text(value, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = tokens.colors.accent)
+    Text(label, style = MaterialTheme.typography.labelSmall, color = tokens.colors.secondaryLabel)
+  }
+}
+
+@Composable
+private fun ChatSuggestions(onTap: (String) -> Unit) {
+  val tokens = VlogPilotTokens
+  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
     Text(
-      value,
-      style = MaterialTheme.typography.headlineSmall,
-      fontWeight = FontWeight.Bold,
-      color = tokens.colors.accent,
+      "试试这样开始",
+      style = MaterialTheme.typography.labelMedium,
+      fontWeight = FontWeight.SemiBold,
+      color = tokens.colors.secondaryLabel,
+      modifier = Modifier.padding(start = 4.dp),
+    )
+    listOf(
+      "💛 帮我做一条这周的家庭日常",
+      "🍜 把上周的美食出片，要有食欲感",
+      "🌅 把最近的旅行剪一条 30 秒怀旧风的",
+    ).forEach { hint ->
+      Box(
+        modifier = Modifier
+          .fillMaxWidth()
+          .clip(RoundedCornerShape(12.dp))
+          .background(if (tokens.colors.isDark) tokens.colors.groupedSurfaceRaised else tokens.colors.groupedBackground)
+          .clickable { onTap(hint.substringAfter(' ')) }
+          .padding(horizontal = 14.dp, vertical = 12.dp),
+      ) {
+        Text(hint, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+      }
+    }
+  }
+}
+
+@Composable
+private fun ChatInputBar(
+  value: String,
+  onValueChange: (String) -> Unit,
+  onSend: () -> Unit,
+) {
+  val tokens = VlogPilotTokens
+  Row(
+    modifier = Modifier.fillMaxWidth(),
+    horizontalArrangement = Arrangement.spacedBy(8.dp),
+    verticalAlignment = Alignment.Bottom,
+  ) {
+    OutlinedTextField(
+      value = value,
+      onValueChange = onValueChange,
+      modifier = Modifier.weight(1f),
+      placeholder = {
+        Text(
+          "和 AI 聊聊你想做什么...",
+          color = tokens.colors.tertiaryLabel,
+          style = MaterialTheme.typography.bodyMedium,
+        )
+      },
+      shape = RoundedCornerShape(22.dp),
+      maxLines = 4,
+      keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+      keyboardActions = KeyboardActions(onSend = { onSend() }),
+      colors = OutlinedTextFieldDefaults.colors(
+        unfocusedBorderColor = tokens.colors.opaqueSeparator,
+        focusedBorderColor = tokens.colors.accent,
+        unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+        focusedContainerColor = MaterialTheme.colorScheme.surface,
+      ),
+    )
+    val canSend = value.isNotBlank()
+    Box(
+      modifier = Modifier
+        .size(50.dp)
+        .clip(CircleShape)
+        .background(if (canSend) tokens.colors.accent else tokens.colors.accent.copy(alpha = 0.4f))
+        .clickable(enabled = canSend) { onSend() },
+      contentAlignment = Alignment.Center,
+    ) {
+      Icon(
+        Icons.AutoMirrored.Outlined.Send,
+        contentDescription = "发送",
+        tint = Color.White,
+        modifier = Modifier.size(20.dp),
+      )
+    }
+  }
+}
+
+@Composable
+private fun ChatMessageRow(msg: ChatMessage) {
+  when (msg.role) {
+    ChatRole.USER -> UserBubble(msg.text)
+    ChatRole.AGENT_STATUS -> AgentStatusLine(msg.text)
+    ChatRole.SYSTEM -> SystemLine(msg.text)
+    ChatRole.AGENT_TOOL -> AgentToolCard(label = msg.text, stage = msg.agentStage)
+    ChatRole.RESULT -> ResultCard(msg)
+    ChatRole.LOADING -> LoadingDots()
+  }
+}
+
+@Composable
+private fun UserBubble(text: String) {
+  val tokens = VlogPilotTokens
+  Row(
+    modifier = Modifier.fillMaxWidth(),
+    horizontalArrangement = Arrangement.End,
+  ) {
+    Box(
+      modifier = Modifier
+        .widthIn(max = 280.dp)
+        .clip(RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = 18.dp, bottomEnd = 4.dp))
+        .background(tokens.colors.accent)
+        .padding(horizontal = 14.dp, vertical = 10.dp),
+    ) {
+      Text(text, style = MaterialTheme.typography.bodyLarge, color = Color.White)
+    }
+  }
+}
+
+@Composable
+private fun AgentStatusLine(text: String) {
+  val tokens = VlogPilotTokens
+  Row(
+    modifier = Modifier.fillMaxWidth(),
+    horizontalArrangement = Arrangement.spacedBy(8.dp),
+    verticalAlignment = Alignment.Top,
+  ) {
+    Box(
+      modifier = Modifier
+        .padding(top = 4.dp)
+        .size(6.dp)
+        .clip(CircleShape)
+        .background(tokens.colors.accent),
     )
     Text(
-      label,
-      style = MaterialTheme.typography.labelSmall,
-      color = tokens.colors.secondaryLabel,
+      text,
+      modifier = Modifier.weight(1f),
+      style = MaterialTheme.typography.bodyMedium,
+      color = MaterialTheme.colorScheme.onSurface,
     )
   }
 }
 
 @Composable
-private fun SuggestionRow(text: String) {
+private fun SystemLine(text: String) {
   val tokens = VlogPilotTokens
   Box(
     modifier = Modifier
       .fillMaxWidth()
-      .clip(RoundedCornerShape(12.dp))
-      .background(if (tokens.colors.isDark) tokens.colors.groupedSurfaceRaised else tokens.colors.groupedBackground)
-      .padding(horizontal = 14.dp, vertical = 12.dp),
+      .padding(vertical = 2.dp),
+    contentAlignment = Alignment.Center,
   ) {
     Text(
       text,
-      style = MaterialTheme.typography.bodyMedium,
-      color = MaterialTheme.colorScheme.onSurface,
+      style = MaterialTheme.typography.labelSmall,
+      color = tokens.colors.tertiaryLabel,
+      textAlign = TextAlign.Center,
     )
   }
+}
+
+@Composable
+private fun AgentToolCard(label: String, stage: String?) {
+  val tokens = VlogPilotTokens
+  val tint = when (stage) {
+    "browse" -> tokens.colors.accent
+    "audience" -> tokens.colors.systemPink
+    "director" -> tokens.colors.systemOrange
+    "editor" -> tokens.colors.systemPurple
+    "critic" -> tokens.colors.systemOrange
+    "render", "rendering" -> tokens.colors.accent
+    else -> tokens.colors.secondaryLabel
+  }
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(14.dp),
+    color = MaterialTheme.colorScheme.surface,
+    tonalElevation = 0.dp,
+  ) {
+    Row(
+      modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+      Box(
+        modifier = Modifier
+          .size(28.dp)
+          .clip(RoundedCornerShape(8.dp))
+          .background(tint.copy(alpha = if (tokens.colors.isDark) 0.22f else 0.12f)),
+        contentAlignment = Alignment.Center,
+      ) {
+        Icon(
+          Icons.Outlined.AutoAwesome,
+          contentDescription = null,
+          tint = tint,
+          modifier = Modifier.size(16.dp),
+        )
+      }
+      Text(
+        label,
+        modifier = Modifier.weight(1f),
+        style = MaterialTheme.typography.bodyMedium,
+        fontWeight = FontWeight.Medium,
+        color = MaterialTheme.colorScheme.onSurface,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+      LoadingDot(tint = tint)
+    }
+  }
+}
+
+@Composable
+private fun ResultCard(msg: ChatMessage) {
+  val tokens = VlogPilotTokens
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(16.dp),
+    color = tokens.colors.systemGreen.copy(alpha = if (tokens.colors.isDark) 0.18f else 0.10f),
+  ) {
+    Column(
+      modifier = Modifier.padding(14.dp),
+      verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Icon(
+          Icons.Outlined.AutoAwesome,
+          contentDescription = null,
+          tint = tokens.colors.systemGreen,
+          modifier = Modifier.size(20.dp),
+        )
+        Text(
+          msg.text.ifBlank { "搞定！" },
+          style = MaterialTheme.typography.titleSmall,
+          fontWeight = FontWeight.SemiBold,
+          color = tokens.colors.systemGreen,
+        )
+      }
+      msg.mp4Path?.let {
+        Text(
+          "输出：${it.substringAfterLast('/')}",
+          style = MaterialTheme.typography.labelSmall,
+          color = tokens.colors.secondaryLabel,
+        )
+      }
+      Text(
+        "去「作品」tab 查看完整结果，或继续输入「改一改」让我调整。",
+        style = MaterialTheme.typography.bodySmall,
+        color = tokens.colors.secondaryLabel,
+      )
+    }
+  }
+}
+
+@Composable
+private fun LoadingDots() {
+  Row(verticalAlignment = Alignment.CenterVertically) {
+    LoadingDot(tint = VlogPilotTokens.colors.accent)
+  }
+}
+
+@Composable
+private fun LoadingDot(tint: Color) {
+  val infinite = rememberInfiniteTransition(label = "loading-dot")
+  val scale by infinite.animateFloat(
+    initialValue = 0.6f,
+    targetValue = 1.4f,
+    animationSpec = infiniteRepeatable(
+      animation = tween(durationMillis = 800),
+      repeatMode = RepeatMode.Reverse,
+    ),
+    label = "scale",
+  )
+  Box(
+    modifier = Modifier
+      .size((6 * scale).dp)
+      .clip(CircleShape)
+      .background(tint),
+  )
+}
+
+@Composable
+private fun ChatHistorySheet(
+  conversations: List<ChatConversation>,
+  activeId: String?,
+  onSelect: (String) -> Unit,
+  onDelete: (String) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  val tokens = VlogPilotTokens
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    confirmButton = {
+      PlainTextButton(text = "完成", onClick = onDismiss)
+    },
+    title = {
+      Text("历史对话", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+    },
+    text = {
+      LazyColumn(
+        modifier = Modifier.heightIn(max = 400.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+      ) {
+        items(conversations, key = { it.id }) { convo ->
+          val isActive = convo.id == activeId
+          Row(
+            modifier = Modifier
+              .fillMaxWidth()
+              .clip(RoundedCornerShape(10.dp))
+              .background(if (isActive) tokens.colors.accentTint else Color.Transparent)
+              .clickable { onSelect(convo.id) }
+              .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+              Text(
+                convo.title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Medium,
+                color = if (isActive) tokens.colors.accent else MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+              )
+              Text(
+                SimpleDateFormat("MM-dd HH:mm", Locale.US).format(Date(convo.updatedAtMs)),
+                style = MaterialTheme.typography.labelSmall,
+                color = tokens.colors.tertiaryLabel,
+              )
+            }
+            IconButton(onClick = { onDelete(convo.id) }) {
+              Icon(Icons.Outlined.Delete, contentDescription = "删除", tint = tokens.colors.systemRed, modifier = Modifier.size(18.dp))
+            }
+          }
+        }
+      }
+    },
+    containerColor = MaterialTheme.colorScheme.background,
+  )
+}
+
+// ───────────── helper extension to avoid pulling in lifecycle-runtime ─────
+@Composable
+private fun <T> kotlinx.coroutines.flow.StateFlow<T>.collectAsStateSafe(): androidx.compose.runtime.State<T> {
+  val state = remember { androidx.compose.runtime.mutableStateOf(value) }
+  LaunchedEffect(this) {
+    collect { state.value = it }
+  }
+  return state
 }

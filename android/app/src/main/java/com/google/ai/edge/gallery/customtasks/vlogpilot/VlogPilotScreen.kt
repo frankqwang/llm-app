@@ -148,6 +148,10 @@ internal fun VlogPilotScreen(
   // When non-null, replaces the tab view with a full-screen vlog detail page.
   // Tap a row in 作品库 to navigate in; back-arrow on the detail page clears it.
   var detailEventId by remember { mutableStateOf<String?>(null) }
+  // Pending chat prefill — set when the user taps a candidate row in Works
+  // and we hop to Chat tab with "做这个候选" pre-typed. Cleared once Chat
+  // composes the message.
+  var chatPrefill by remember { mutableStateOf<String?>(null) }
   // When non-null, the bottom-sheet feedback editor is open targeting this event.
   var iterationSheetEventId by remember { mutableStateOf<String?>(null) }
   var iterationSheetTargetOrder by remember { mutableStateOf<Int?>(null) }
@@ -307,6 +311,41 @@ internal fun VlogPilotScreen(
           com.google.ai.edge.gallery.customtasks.vlogpilot.ui.ChatScreen(
             decisions = decisions,
             eventSelection = eventSelection,
+            pendingPrefill = chatPrefill,
+            onPrefillConsumed = { chatPrefill = null },
+            onSend = { text, currentEventId ->
+              // Simple keyword routing — Phase 3b. The chat VM has already
+              // appended the user message and the agent stream will append
+              // pipeline events as they fire; this callback's job is to
+              // KICK OFF the right pipeline action.
+              val normalized = text.trim()
+              when {
+                // Iteration intents — apply to the currently linked vlog or
+                // the most recent one.
+                isIterationCommand(normalized) -> {
+                  val targetEventId = currentEventId ?: decisions.firstOrNull()?.eventId
+                  if (targetEventId != null) {
+                    val feedback = buildIterationFromText(
+                      normalized,
+                      eventId = targetEventId,
+                      baseVersion = decisions.firstOrNull { it.eventId == targetEventId }?.versionCount ?: 1,
+                    )
+                    viewModel.submitFeedback(targetEventId, feedback)
+                  }
+                }
+                // Generation intent — kick off a fresh scan.
+                isGenerationCommand(normalized) -> {
+                  requireAlbumPermission {
+                    selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
+                  }
+                }
+                // Otherwise just acknowledge — the chat VM keeps the user
+                // message visible; AI silently waits for clearer instruction.
+                else -> {
+                  // No-op; chat VM already showed the user's text.
+                }
+              }
+            },
             onRescan = {
               requireAlbumPermission {
                 selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
@@ -318,23 +357,11 @@ internal fun VlogPilotScreen(
                 curatorOpen = true
               }
             },
-            onOpenCandidate = { eventId ->
-              // Phase 1: open the candidate's existing detail flow. Phase 3
-              // will replace this with a real chat conversation kicking off
-              // generation.
-              eventSelection?.candidates?.firstOrNull { it.eventId == eventId }?.let {
-                selectedStoryId = eventId
-              }
-            },
           )
         }
       }
       VlogPilotTab.Works -> {
-        // Phase 1: Works tab stacks (a) live progress when generating, (b)
-        // completed VideoShelf when there are works, (c) AI-clustered
-        // candidates StoryShelf for not-yet-generated stories. Phase 2 will
-        // merge candidates + completed into a single category-chip feed.
-        val manifest = eventSelection
+        // Live progress stays at the top so the user sees AI working.
         if (primaryPipelineRunning) {
           item {
             val liveDecision = decisions.firstOrNull { it.mp4Path == null } ?: decisions.firstOrNull()
@@ -346,46 +373,21 @@ internal fun VlogPilotScreen(
             )
           }
         }
-        if (decisions.isNotEmpty() || projects.isNotEmpty()) {
-          item {
-            VideoShelf(
-              projects = projects,
-              decisions = decisions,
-              activeIteration = activeIteration,
-              selectedCategory = selectedVideoCategory,
-              selectedSort = selectedVideoSort,
-              onCategorySelect = { selectedVideoCategory = it },
-              onSortSelect = { selectedVideoSort = it },
-              onOpenDetail = { eventId -> detailEventId = eventId },
-              onDismissIteration = viewModel::dismissIterationStatus,
-            )
-          }
+        // Unified feed: completed vlogs + AI-clustered candidates with shared
+        // category chips. Tap a candidate → bumps to Chat tab with prefilled
+        // "做这个" message; tap a vlog → opens its detail page.
+        item {
+          UnifiedWorksFeed(
+            decisions = decisions,
+            manifest = eventSelection,
+            onOpenVlog = { eventId -> detailEventId = eventId },
+            onMakeCandidate = { snapshot ->
+              chatPrefill = "帮我做「${storyTitle(snapshot)}」这个候选故事"
+              onTabChange(VlogPilotTab.Chat)
+            },
+          )
         }
-        if (manifest != null) {
-          item {
-            StoryShelf(
-              manifest = manifest,
-              runConfig = runConfig,
-              running = primaryPipelineRunning,
-              progress = progress,
-              decisions = decisions,
-              selectedCategory = selectedStoryCategory,
-              selectedSort = selectedStorySort,
-              onCategorySelect = { selectedStoryCategory = it },
-              onSortSelect = { selectedStorySort = it },
-              onOpenStory = { selectedStoryId = it },
-              onStartClick = {
-                requireAlbumPermission {
-                  selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
-                }
-              },
-              onClearOnly = viewModel::clearOnlySelected,
-              onCancel = viewModel::cancelPipeline,
-              onToggleStory = viewModel::toggleSelectedEvent,
-              onMakeSelectedStories = ::makeSelectedStories,
-            )
-          }
-        } else if (decisions.isEmpty() && projects.isEmpty() && !primaryPipelineRunning) {
+        if (decisions.isEmpty() && (eventSelection?.candidates.isNullOrEmpty()) && !primaryPipelineRunning) {
           item {
             EmptyActionCard(
               state = state,
@@ -491,5 +493,67 @@ internal fun VlogPilotScreen(
       )
     }
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Chat command routing — keyword heuristics for Phase 3b. Detects whether
+// the user typed a generation request, an iteration request, or neither.
+// Phase 4 (planned) will replace these with an LLM intent parser, but the
+// keyword path covers the most common phrasings cheaply.
+// ─────────────────────────────────────────────────────────────────────────
+
+private val GENERATION_KEYWORDS = listOf(
+  "做一", "帮我做", "做条", "做一条", "做个", "做一个",
+  "推荐", "扫一下", "重扫", "重新扫", "看一下相册", "scan",
+  "做下", "整一个", "整一条", "整一下",
+)
+
+private val ITERATION_FASTER_KEYWORDS = listOf("快一点", "再快", "加快", "更快", "动感")
+private val ITERATION_SLOWER_KEYWORDS = listOf("慢一点", "再慢", "慢点", "留白", "悠长")
+private val ITERATION_REMOVE_CAPTIONS_KEYWORDS = listOf("去字幕", "无字幕", "不要字幕")
+private val ITERATION_RECOLOR_KEYWORDS = listOf("换调色", "换色调", "换个色", "换色", "重调色")
+private val ITERATION_VERBS = listOf("改", "修改", "调整", "再")
+
+internal fun isGenerationCommand(text: String): Boolean =
+  GENERATION_KEYWORDS.any { it in text }
+
+internal fun isIterationCommand(text: String): Boolean =
+  ITERATION_FASTER_KEYWORDS.any { it in text } ||
+    ITERATION_SLOWER_KEYWORDS.any { it in text } ||
+    ITERATION_REMOVE_CAPTIONS_KEYWORDS.any { it in text } ||
+    ITERATION_RECOLOR_KEYWORDS.any { it in text } ||
+    ITERATION_VERBS.any { text.startsWith(it) || " $it" in text }
+
+/** Rough text → IterationFeedback mapping. Picks the matching QuickActions
+ *  and folds the original userText through so the worker's IntentParserAgent
+ *  can refine if it wants. */
+internal fun buildIterationFromText(
+  text: String,
+  eventId: String,
+  baseVersion: Int,
+): com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.IterationFeedback {
+  val actions = buildList {
+    if (ITERATION_FASTER_KEYWORDS.any { it in text }) {
+      add(com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.QuickAction.FASTER_OVERALL)
+    }
+    if (ITERATION_SLOWER_KEYWORDS.any { it in text }) {
+      add(com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.QuickAction.SLOWER_OVERALL)
+    }
+    if (ITERATION_REMOVE_CAPTIONS_KEYWORDS.any { it in text }) {
+      add(com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.QuickAction.REMOVE_CAPTIONS)
+    }
+    if (ITERATION_RECOLOR_KEYWORDS.any { it in text }) {
+      add(com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.QuickAction.CHANGE_COLOR_GRADE)
+    }
+  }
+  return com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.IterationPlanner.fromQuickActions(
+    iterationId = "iter_%03d".format(baseVersion + 1),
+    baseTimelineVersion = baseVersion,
+    actions = actions,
+    targetedShotOrders = emptyList(),
+    userText = text,
+    currentColorGrade = com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ColorGrade.NEUTRAL,
+    currentPace = com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Pace.BALANCED,
+  )
 }
 

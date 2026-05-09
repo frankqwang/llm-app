@@ -696,11 +696,91 @@ private fun VideoExpandedDetail(
       )
     }
 
+    // Reference assets section — what AI looked at to produce this vlog.
+    // Independent section per the design call so the user can scan the
+    // source pool without diving into the agent panel.
+    if (d.inputAssets.isNotEmpty()) {
+      ReferenceAssetsSection(assets = d.inputAssets)
+    }
+
     StageRail(d)
     VersionHistorySection(project = project, d = d, history = history)
     if (d.memory != null || d.audience != null || d.director != null || timeline != null || d.critique != null || d.perf != null) {
       SectionHeader(Icons.Outlined.Visibility, "制作过程", "Browse / Audience / Director / Editor / Critic / Render")
       ProcessOutputs(d = d, timeline = timeline, assetMap = assetMap)
+    }
+  }
+}
+
+/** Compact 4-column grid of every asset that fed into this vlog. Tappable
+ *  thumbnails would be nice eventually (jump to album entry) but for now
+ *  read-only is enough — the goal is "what did AI look at". */
+@Composable
+private fun ReferenceAssetsSection(assets: List<Asset>) {
+  val tokens = VlogPilotTokens
+  Column(
+    modifier = Modifier.fillMaxWidth(),
+    verticalArrangement = Arrangement.spacedBy(VlogPilotTokens.spacing.sm),
+  ) {
+    Row(
+      modifier = Modifier.fillMaxWidth(),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Box(
+        modifier = Modifier
+          .size(28.dp)
+          .clip(RoundedCornerShape(8.dp))
+          .background(tokens.colors.accentTint),
+        contentAlignment = Alignment.Center,
+      ) {
+        Icon(
+          Icons.Outlined.PhotoLibrary,
+          contentDescription = null,
+          tint = tokens.colors.accent,
+          modifier = Modifier.size(16.dp),
+        )
+      }
+      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+          "参考素材",
+          style = MaterialTheme.typography.titleSmall,
+          fontWeight = FontWeight.SemiBold,
+          color = MaterialTheme.colorScheme.onSurface,
+        )
+        Text(
+          "AI 看了 ${assets.size} 张素材生成本片",
+          style = MaterialTheme.typography.labelMedium,
+          color = tokens.colors.secondaryLabel,
+        )
+      }
+    }
+    val rows = remember(assets) { assets.chunked(4) }
+    rows.take(8).forEach { rowAssets ->
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+      ) {
+        rowAssets.forEach { asset ->
+          Box(modifier = Modifier.weight(1f).aspectRatio(1f)) {
+            AssetThumb(
+              asset = asset,
+              modifier = Modifier.fillMaxSize(),
+              showType = false,
+            )
+          }
+        }
+        repeat(4 - rowAssets.size) {
+          Spacer(modifier = Modifier.weight(1f).aspectRatio(1f))
+        }
+      }
+    }
+    if (rows.size > 8) {
+      Text(
+        "···  另外 ${assets.size - 8 * 4} 张素材",
+        style = MaterialTheme.typography.labelMedium,
+        color = tokens.colors.tertiaryLabel,
+      )
     }
   }
 }
@@ -1021,12 +1101,12 @@ private fun videoSortComparator(mode: VideoSortMode): Comparator<EventDecisions>
     .thenByDescending { it.videoModifiedMs() }
 }
 
-private fun EventDecisions.videoTimeline(): Timeline? = timelineFinal ?: timelineV1
+internal fun EventDecisions.videoTimeline(): Timeline? = timelineFinal ?: timelineV1
 
-private fun EventDecisions.videoDurationSec(): Double =
+internal fun EventDecisions.videoDurationSec(): Double =
   videoTimeline()?.shots?.sumOf { it.durationSec.toDouble() } ?: 0.0
 
-private fun EventDecisions.videoCoverAsset(): Asset? {
+internal fun EventDecisions.videoCoverAsset(): Asset? {
   val firstShotAssetId = videoTimeline()?.shots?.minByOrNull { it.order }?.assetId
   return inputAssets.firstOrNull { it.id == firstShotAssetId } ?: inputAssets.firstOrNull()
 }
@@ -1037,7 +1117,7 @@ private fun EventDecisions.videoModifiedMs(): Long {
   return maxOf(fileTime, event?.endEpochMs ?: 0L)
 }
 
-private fun videoCompactMeta(d: EventDecisions, project: VlogProject? = null): String {
+internal fun videoCompactMeta(d: EventDecisions, project: VlogProject? = null): String {
   val range = d.event?.let { formatEventRange(it.startEpochMs, it.endEpochMs) }
   return listOfNotNull(
     range,
