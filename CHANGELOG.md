@@ -1,1061 +1,272 @@
-# Changelog
+# 变更日志
 
-Cumulative engineering log for the on-device pipeline. Each version block
-covers WHAT changed, WHY (the bug or constraint that drove it), and where
-to find it in the tree.
+设备端流水线的工程变更记录。每个版本块记录**改了什么**、**为什么**（驱动变更的缺陷或约束），以及简要影响范围。
 
 ---
 
-## v6.0 — Editing intelligence + Apple-style UI + export loop (2026-05-09)
+## v6.0 — 智能剪辑 + Apple 风格 UI + 导出闭环 (2026-05-09)
 
-The pipeline gained richer **AI editing language** (per-shot speed / Ken
-Burns zoom / cut reason), the album browser stopped jankying on scroll,
-the result page became publishable (save to gallery + share to 小红书 /
-微信), and the entire VlogPilot module got an iOS-flavored visual overhaul
-with a Claude-style **work-process timeline** that lets users watch the
-agent chain do its job.
+流水线获得了更丰富的 **AI 剪辑语言**（逐镜头速度 / Ken Burns 缩放 / 剪辑理由），相册浏览器的滚动卡顿修复，结果页支持发布（保存到相册 + 分享至小红书/微信），整个 VlogPilot 模块进行了 iOS 风格视觉重塑，并新增了 Claude 风格的**工作进程时间线**，让用户实时观看智能体链的执行过程。
 
-Five themes shipped together:
+**A. V1 剪辑增强**
+- `EditorAgent.transitionFor()` 不再将 7 种高级转场降级为交叉淡化——`CompositeRenderer` 已支持全部转场，降级是遗留的保守门控。
+- 实现 `pan_left` / `pan_right` Ken Burns 效果（此前仅在归一化中接受，但缩放滤镜只接入了 `in` / `out`，导致 AI 意图被静默丢弃）。
+- 新增 `travel_long`（8  slot）和 `event_recap`（9 slot）两种长结构模板，多日游和婚礼等场景获得比原 5 slot 日常/人物模板更丰富的叙事弧。
+- 新增 `enforceTransitionDiversity` 后处理：3 个以上连续镜头使用相同转场时，第 3 个会被提升为硬切（短镜头）或淡化（长镜头）。Director 提示词也增加了角色 × 转场推荐表。
+- `TimelineStoryboardBuilder` 新增可视化符号：时长 + Ken Burns 箭头、进入转场色 pill、CJK 字幕预览。Critic 提示词同步更新，新增 4 条评审规则（转场单调、开场弱、缺少高潮、字幕长度）。
+- 新增 `softTimelineWarnings` 仅日志级别的审查门控，检测单调转场、连续同角色镜头、弱开场、缺少高潮，暂写入 `_state_history.jsonl`（计划观察一周后提升为硬触发）。
 
-### Theme A — V1 editing improvements (transition variety, pan, longer templates)
+**B. V2.1 AI 剪辑意图 Schema**
+- `ShotRequest` / `ShotSpec` 新增三个向后兼容的字段：
+  - `speedHint` / `speedFactor`（0.5–1.75）— 逐镜头播放速率，渲染器首次支持加速（setpts < 1，上限 2×）。
+  - `kenBurnsIntensity` / `kenBurnsZoom`（1.0–1.20）— 漂移幅度，从硬编码 1.08 上限改为线性插值到 Director 指定值。
+  - `cutReason` — Director 的剪辑自由文本理由， surfaced 给 Critic 评审，不渲染。
+- Critic 补丁字典、IntentParserAgent 反馈 schema、`applyPatches` 同步更新——提示词 + 解析器 + 应用补丁必须协同编辑（地雷 #8），现由测试保障。
+- `ShotRenderCache.signature()` 升级到 `CACHE_VERSION = 2`，包含 `speedFactor` + `kbZoom`，避免语义变更后复用旧缓存 MP4。
 
-`EditorAgent.transitionFor()` no longer downgrades 7 advanced transitions
-(slide / circle / zoom / smooth) to CROSSFADE — the `CompositeRenderer`
-xfade map already supports them all, the downgrade was a leftover
-conservative gate. ([`agents/EditorAgent.kt:290-303`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/agents/EditorAgent.kt))
+**C. Apple 风格 UI 重塑**
+- 新增主题模块 `ui/theme/`：`VlogPilotTokens`（iOS 系统色板、连续圆角、弹簧动画规格）、`VlogPilotTheme`（Material3 覆盖，不污染 gallery 其他部分）、`AppleComponents`（大标题、分组卡片、 hairline 分割线、主按钮、胶囊芯片、按压缩放等）。
+- 所有主要屏幕重新换肤：VideoResultsUi（大标题 + 胶囊分类芯片 + 分组卡片）、WorkspaceTabs（iOS 分段控件）、IterationSheet（拖拽把手 + 语义色芯片）、EmptyStateUi / CuratorScreen / StoryUi / SettingsUi / AdvancedPickerUi 等。
+- 标注标签从英文（scene / subjects / action...）改为中文（场景 / 主体 / 动作 / 情绪 / 时间感 / 亮点 / 叙事角色 / 镜头运动），与用户界面语言一致。
 
-`ShotRenderer.kenBurnsExpr()` finally implements `pan_left` / `pan_right` —
-they were accepted in `normalizeKenBurns` but the zoompan filter only
-wired up `in` / `out`, so the AI's intent was silently dropped.
-([`render/ShotRenderer.kt:78-91`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/render/ShotRenderer.kt))
+**D. 相册虚拟化 + 缩略图缓存**
+- 新增 `ThumbnailCache`：LRU 内存缓存（约 1/8 堆内存，~32 MB），按 (assetId, maxSide) 分桶。`peek()` 提供同步缓存命中，`loadOrDecode()` 处理缺失时的 IO+解码。
+- `MediaLoader.loadImage()` 新增 `preferRgb565`（网格缩略图使用），解码快 ~30%，内存省 ~50%。
+- `AssetLibraryTab` 从非虚拟化 `Column + forEach` 重构为 `LazyColumn` 扩展，每行获得稳定 `key` 和 `contentType` 以回收 ViewHolder。
+- `AssetThumb` 简化：去掉常驻 "IMG" pill，改为仅视频显示时长 pill（Apple Photos 风格），首次构图时同步查询缓存避免闪烁。
 
-Two longer structure templates joined the catalog — `travel_long` (8 slots)
-and `event_recap` (9 slots) — driven by keyword routing in
-`TemplateCatalog.selectFromText` so multi-day trips and weddings get a
-richer narrative arc than the original 5-slot daily/people templates.
-([`TemplateCatalog.kt:124-167`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/TemplateCatalog.kt))
+**E. 结果页可发布 + Claude 风格工作进程时间线**
+- 新增 `VlogExporter`：
+  - `saveToGallery()` 通过 MediaStore 写入 `Movies/VlogPilot/<title>.mp4`
+  - `buildShareIntent()` 用 FileProvider URI 启动系统分享选择器
+  - 结果页新增 4 个并排按钮：保存到相册 / 分享 / 改一改 / 换故事
+- 结果页从行内展开收起改为独立详情导航页 `VlogDetailScreen`（iOS Photos / Settings 钻取模式），列表保持干净行 +  Chevron 指示器。
+- 新增 `AgentTimelineCard`：以 Claude 工具调用风格渲染工作进程（着色圆点 + 连接线 + 智能体标签 + 时间戳 + 详情片段）。两处展示：
+  1. 创作过程中 — StoryProgressCard 内嵌实时时间线（自动滚动到最新步骤，最大 320dp，可滚动查看历史）。
+  2. 详情页 — `ProcessOutputs` 新增"工作时间线"区域，从 `_state_history.jsonl` 重放完整链路，运行结束后永久保留。
 
-`EditorAgent.enforceTransitionDiversity` is a new post-process — when 3+
-consecutive shots share the same transition, the third gets bumped to CUT
-(short shots) or FADE (longer ones). Director prompts also gained a
-role × transition recommendation table so Gemma uses the full vocabulary.
-([`agents/EditorAgent.kt:elif diversity helper`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/agents/EditorAgent.kt))
+**F. 剪辑性能 + 可观测性**
+- 逐资产 VLM 标注的瓶颈在联系人表尺寸——Gemma 视觉编码器与像素大致线性。单元格尺寸从 320×426 降至 240×320（~45% 像素缩减），最大帧数 20→16（HIGH）/ 16→12（LOW），预计每资产推理加速 ~30-40%。
+- 新增 `vlm_step` 面包屑：逐资产性能拆分 `image <id> WxH load=Xms ask=Yms` / `video <id> sheet=WxH frames=N build=Xms ask=Yms`，可通过 `adb ... grep vlm_step` 读取。
 
-`TimelineStoryboardBuilder` got Claude-readable visual symbols overlaid
-on the storyboard image: top-left badge shows duration + Ken Burns arrow,
-top-right colored pill shows the entering transition (硬切 / 淡入 / 叠化 /
-推近 / etc.), bottom strip renders an actual caption preview in the CJK
-font. Critic's prompt was updated to read these symbols, gaining 4 new
-rules (transitions monotone, weak opening, missing climax, caption length).
-([`pipeline/TimelineStoryboardBuilder.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/TimelineStoryboardBuilder.kt))
-
-`PipelineOrchestrator.softTimelineWarnings` is a new log-only critic gate
-— detects monotone transitions, consecutive same-role shots, weak openings,
-and missing climax, breadcrumbs them to `_state_history.jsonl` for now
-(promotion to hard triggers planned after a quiet observation week).
-
-### Theme B — V2.1 schema for AI editing intent
-
-`ShotRequest` and `ShotSpec` gained three new fields, all backward
-compatible (defaults match existing behavior, `Json { ignoreUnknownKeys
-= true }` keeps cache deserialization safe):
-
-- `speedHint` / `speedFactor` (0.5–1.75) — per-shot playback rate, layered
-  on top of the auto stretch-to-fill slow-mo. Renderer now supports
-  speed-up too (setpts < 1) for the first time, capped at 2×.
-- `kenBurnsIntensity` / `kenBurnsZoom` (1.0–1.20) — drift travel amount.
-  zoom-in/out went from a hard-coded 1.08 cap to a linear interpolation
-  to whatever the Director picks.
-- `cutReason` — Director's free-text justification for the cut, surfaced
-  to Critic so it can judge transition logic, not rendered.
-
-The Critic prompt patches dictionary, the IntentParserAgent feedback
-schema (so users can say "快一点" → `speed_factor: 1.3`), and
-`PipelineOrchestrator.applyPatches` were all updated in lockstep —
-landmine #8 (prompt + parser + applyPatches must co-edit) was easy to
-hit during this work and is now guarded by tests.
-([`schemas/Schemas.kt:171-201`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/schemas/Schemas.kt))
-
-`ShotRenderCache.signature()` was bumped to `CACHE_VERSION = 2` and
-includes `speedFactor` + `kbZoom` so existing cached MP4s don't get
-reused after the field semantics changed.
-
-`TimelineStoryboardBuilder` shows the speed badge (`0.7x⏪` / `1.3x⏩`)
-in the header next to the Ken Burns arrow when speedFactor != 1.0, so
-Critic can tell at a glance whether a shot is supposed to drag.
-
-### Theme C — Apple-style UI overhaul
-
-A new theme module under `ui/theme/` ships three pieces:
-- [`VlogPilotTokens.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/ui/theme/VlogPilotTokens.kt) — design tokens: iOS system color palette (System Blue / Gray1–6 / Red / Green / Orange / Purple / Pink), continuous-corner shapes, spring motion specs, spacing scale.
-- [`VlogPilotTheme.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/ui/theme/VlogPilotTheme.kt) — wraps the VlogPilot subtree with a Material3 colorScheme + shapes override that doesn't bleed into the rest of the gallery app.
-- [`AppleComponents.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/ui/AppleComponents.kt) — primitives: `LargeTitleHeader`, `InsetGroupedSurface`, `HairlineDivider`, `PrimaryActionButton`, `TintedActionButton`, `PlainTextButton`, `CapsuleChip`, `InsetGroupedCell`, `PressableSurface` (with subtle press scale-down), `AnimatedExpand`.
-
-All major screens were re-themed:
-- `VideoResultsUi.VideoShelf` — large-title header, capsule category chips, inset-grouped cards with hairline dividers, semantic tinted status pills, tinted action buttons (save in blue, share in blue, refine in purple, change-story in orange).
-- `NavigationUi.WorkspaceTabs` — iOS segmented control with smooth color transition (220ms tween, no ripple).
-- `IterationSheet` — drag handle on top, large title, semantic-tinted toggle chips (FASTER blue / SLOWER purple / REMOVE_CAPTIONS gray / CHANGE_COLOR_GRADE pink), `PrimaryActionButton` for submit.
-- `EmptyStateUi`, `CuratorScreen`, `StoryUi`, `SettingsUi`, `AdvancedPickerUi` — all polished to use the new tokens, tinted icon containers, hairline separators, no chunky FilledTonalButtons.
-- `CommonUi.PanelCard` — dropped tonalElevation + border, 20dp continuous corners, the global "card" look is much lighter.
-- `CommonUi.KeyValue` — bumped from `labelSmall + outline` (illegible gray) to `bodyMedium + secondaryLabel`, 64dp → 80dp label column. The Browse/Audience/Director panels suddenly read clearly.
-
-`AnnotationKeyValues` / `VideoInsightKeyValues` rewrote the English tag
-labels (scene / subjects / action / mood / time / salient / role / camera_work)
-into Chinese (场景 / 主体 / 动作 / 情绪 / 时间感 / 亮点 / 叙事角色 / 镜头运动) to
-match the rest of the user-facing copy.
-
-### Theme D — Album virtualization + thumbnail caching
-
-The 相册 tab was the worst-performing surface — 60+ thumbnails decoded
-from scratch on every recompose, no virtualization, ARGB_8888 wasting 2×
-memory vs RGB_565. Three fixes:
-
-- [`perception/ThumbnailCache.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/perception/ThumbnailCache.kt) — LRU memory cache sized at 1/8 heap (~32 MB), bucketed by (assetId, maxSide). `peek()` provides synchronous cache hits so scroll-back is instant; `loadOrDecode()` does the IO+decode when missing.
-- `MediaLoader.loadImage()` — added `preferRgb565: Boolean = false`, used by the cache for grid thumbnails. ~30% faster decode, 50% less memory.
-- `AssetLibraryTab` was refactored from `@Composable fun` (non-virtualized Column + forEach) to `LazyListScope.assetLibraryItems()` extension that yields each photo row as its own LazyColumn item. The asset detail dialog moved to `AssetLibraryDialog` rendered separately (Dialog isn't valid inside LazyListScope). Each row gets a stable `key` and matching `contentType` so LazyColumn can recycle holders.
-
-The `AssetThumb` itself was simplified — drops the always-on "IMG" pill
-in favor of a duration pill on videos only (Apple Photos pattern), and
-swapped `produceState` to consult `ThumbnailCache.peek()` synchronously
-on first composition so cached entries appear in the same frame, no flicker.
-
-### Theme E — Result page becomes publishable + Claude-style work timeline
-
-`VlogExporter` is a new module ([`export/VlogExporter.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/export/VlogExporter.kt)) closing the product loop:
-- `saveToGallery()` writes the rendered MP4 to `Movies/VlogPilot/<title>.mp4` via MediaStore (IS_PENDING → finalize), so 小红书 / 微信 / 系统相册 / 文件管理器 all see it.
-- `buildShareIntent()` wraps the MP4 in a FileProvider URI and launches the system chooser. `file_paths.xml` got a new `<files-path name="vlog_candidates" path="candidates/">` entry to authorize the URI.
-- Result-page action row now has 4 `TintedActionButton`s side-by-side: 保存到相册 + 分享 (publish row) and 改一改 + 换故事 (edit row).
-
-The result page itself moved from inline expand-collapse to dedicated
-detail navigation — `VlogDetailScreen` is a new full-page composable with
-a back-bar + scrollable detail content. `VlogPilotScreen` hoists a
-`detailEventId` state and short-circuits the LazyColumn when set,
-matching the iOS Photos / Settings drill-down pattern. The list itself
-stays a clean list of rows with chevron indicators, no expand state to
-get lost in.
-
-The biggest user-facing addition — `AgentTimelineCard` ([`ui/AgentTimelineCard.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/ui/AgentTimelineCard.kt)) — renders the work-process the way Claude shows tool calls: tinted dot + connector line + agent label + timestamp + detail snippet. Two surfaces:
-
-1. **During creation** — the StoryProgressCard now embeds the live
-   timeline (auto-scrolls to the latest step, max 320dp tall, scrollable
-   for history). Replaces the old "1 line of recent breadcrumb" approach
-   that hid most of the work.
-2. **In the detail page** — `ProcessOutputs` adds a "工作时间线" section
-   that replays the full per-event chain from `_state_history.jsonl` —
-   stays available indefinitely after the run ends.
-
-`AgentTimeline` ([`pipeline/AgentTimeline.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/AgentTimeline.kt)) is the data layer: parses the JSONL,
-filters per-event (by extracting `eventId` from the `detail` field's
-first space-separated token), maps each stage to a category (BROWSE /
-AUDIENCE / DIRECTOR / EDITOR / CRITIC / RENDER / DONE / ERROR / etc.) for
-UI tinting, and provides Chinese-friendly labels for raw stage tags.
-
-### Theme F — Editing perf + observability
-
-Per-asset VLM annotation was bottlenecked on contact-sheet size — Gemma's
-visual encoder is roughly linear in pixels. Cell dimensions dropped
-320×426 → 240×320 (~45% pixel reduction), max frames 20→16 (HIGH) /
-16→12 (LOW). Predicted ~30-40% inference speedup per asset.
-([`pipeline/VideoFrameSheetBuilder.kt:30-37`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/VideoFrameSheetBuilder.kt))
-
-A new `vlm_step` breadcrumb logs per-asset perf splits:
-`image <id> WxH load=Xms ask=Yms` for stills, `video <id> sheet=WxH
-frames=N build=Xms ask=Yms` for video. Without this, the UI only showed
-aggregate per-asset wall time and the bottleneck between frame
-sampling, sheet building, and Gemma inference was invisible. Read via:
-
-```bash
-adb exec-out run-as com.google.aiedge.gallery cat files/agent_log/agent.jsonl | grep vlm_step
-```
-
-### Tests
-
-Three new test files cover the V1/V2 schema and helpers:
-- `EditorAgentTest` — 6 cases for `enforceTransitionDiversity`
-- `TemplateCatalogTest` — 6 cases for the 2 new long templates' keyword routing
-- `ShotFieldDefaultsTest` — 3 cases for legacy JSON deserialization with new fields
-
-Total: 67 tests pass. Build green on `:app:installDebug` for vivo X200 Pro.
+**测试**：新增 `EditorAgentTest`（6 例）、`TemplateCatalogTest`（6 例）、`ShotFieldDefaultsTest`（3 例），共 67 例通过。vivo X200 Pro 上 `:app:installDebug` 构建通过。
 
 ---
 
-## v5.0 — User-curated stories + reversible feedback iteration (2026-05-08)
+## v5.0 — 自选故事 + 可逆反馈迭代 (2026-05-08)
 
-The pipeline gained two big capabilities: users can **pick their own
-assets and tell AI what kind of vlog to make** (no more "AI just guessed
-my last 30 days"), and any generated vlog now has a **改一改 (refine)
-button** that opens a feedback sheet — type a sentence, tap a chip, or
-tap a specific shot in the storyboard, and AI iterates without re-running
-the whole 5-min pipeline.
+用户可**挑选自己的素材并告诉 AI 想要什么样的视频**（不再"AI 只猜我过去 30 天"），且任何生成的视频都有**改一改**按钮，打开反馈面板——输入一句话、点击芯片、或点击故事板上的具体镜头，AI 迭代而无需重新跑完 5 分钟流水线。
 
-The whole feature is built around one architectural insight: **user
-feedback is a special form of Critic feedback**. Critic already emits
-`RevisedRequest.patches: Map<String, String>` — the iteration system
-reuses that exact schema, so 80% of the new code is plumbing rather than
-new pipeline stages.
+核心架构洞察：**用户反馈是 Critic 反馈的特殊形式**。Critic 已输出 `RevisedRequest.patches: Map<String, String>` —— 迭代系统复用完全相同的 schema，80% 新代码是 plumbing 而非新流水线阶段。
 
-Shipped in 4 milestones over the same day:
+**A. 迭代骨架 + RENDER_ONLY 范围**
+- 视频卡片上的"改一改"按钮打开 `ModalBottomSheet`。本阶段接入两个快捷芯片：**去字幕** / **换调色** —— 均产生 `RenderOnlyPatch`，编排器的新 `runRenderOnly()` 应用到缓存时间线（字幕条 / 逐镜头调色覆盖）并重新渲染，无 Gemma 启动、无 LLM 调用，约 30 秒。
+- 旧版 MP4 自动归档到 `candidates/archive/<eventId>__<timestamp>.mp4`。`ResultEventCard` 新增 History 图标按钮——存在 2 个以上版本时，点击在当前版和上一版之间切换播放。
+- `IterationStore` 管理暂存 + 历史索引：`_pending_iteration/<eventId>.json`、`decisions/<eventId>/_history.json`、`decisions/<eventId>/iter_<N>/` 下的反馈输入/解析/时间线/性能文件。
+- WorkRequests 现支持三种模式：`no key` → 完整流水线；`KEY_ITERATION_EVENT_ID` → 迭代（仅在需要时加载 Gemma）；`KEY_CURATION_REQUEST_ID` → 自选故事创作（加载 Gemma）。
+- `ACTIVE` AtomicBoolean 仍序列化加载 Gemma 的运行（完整 + 自选共享锁）；RENDER_ONLY 迭代绕过 ACTIVE，因为它不加载 Gemma——不同事件的多个迭代 WorkRequest 可并发运行。
 
-### Milestone A — Iteration skeleton + RENDER_ONLY scope
+**B. 自选故事创作**
+- Stories 主卡片新增第二个按钮"或者，我自己挑素材"，进入全屏 `CuratorScreen`。
+- CuratorScreen 刻意极简：一个标题文案、一个多行文本框（可选，留空触发引导对话框）、一个最近素材网格（点击多选）、一个粘性底栏（实时计数 + 开始制作按钮）。**没有时长/节奏/调色/字幕的芯片轨道**——IntentParserAgent 从文本框提取这些。高级用户输入"30秒 / 慢节奏 / 温暖"即可达到相同效果。
+- 选择 < 3 个素材时硬禁用开始按钮。
+- `IntentParserAgent.parseInitial()` 调用 Gemma 解析用户文本，提取结构化 `UserBrief`（hook/payoff/tone/节奏/时长/必须出现的主体/避免内容/字幕策略/调色/原始文本）。
+- `UserCurationPlanner` 将请求转换为合成 `Event`（`eventId = "user_<requestId>"`，requestId = sha1(排序后 asset_ids + intentText)[0..12]），稳定哈希保证相同自选请求命中缓存输出。
+- 编排器新增 `runFromCuration` + `runUserCuratedEvent`，启动 Gemma、解析意图，然后调用现有 `runEvent` 并在线程化 `userBrief`。智能体提示词在 audience / director / 渲染交接点应用用户覆盖。
+- Recall 评分公式新增 `subjectMatchBoost`：读取 `mustHaveSubjects`，当资产 VLM 标签提及关键词时，候选分数最多 +0.36（每项匹配 +0.18，上限）。
+- 自选故事与自动发现事件并列显示，带小型"你做的"三级容器着色徽章。
 
-The "改一改" button on each video card now opens a `ModalBottomSheet`
-([`ui/IterationSheet.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/ui/IterationSheet.kt)) instead of re-running the full pipeline.
-Two quick-action chips wired in this milestone — **去字幕** /
-**换调色** — both produce a [`RenderOnlyPatch`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/schemas/IterationFeedback.kt)
-that the orchestrator's new `runRenderOnly()` applies to the cached
-timeline (caption strip / per-shot color override) and re-renders. No
-Gemma boot, no LLM calls, ~30s wall-clock.
+**C. 完整反馈（SHOT_LEVEL / GLOBAL / MIXED）**
+- IterationSheet 暴露完整反馈界面：3 列故事板网格（视频镜头显示修剪中点帧）、自由文本输入（占位符根据是否选中单元格自适应）、4 个芯片（更快 / 更慢 / 去字幕 / 换调色）。
+- `IntentParserAgent.parseFeedback()`：
+  - 用户文本为空且未点击单元格时完全跳过（纯芯片路径零 LLM 成本）
+  - 否则 Gemma 读取当前时间线摘要 + 用户文本 + 目标序号 + 芯片，输出四种范围之一：RENDER_ONLY / SHOT_LEVEL / GLOBAL / MIXED
+- 编排器新增三个独立子路径：`runShotLevel`（~30-60s）、`runGlobal`（~2-3min）、`runMixed`（~3-4min）。均为独立 `private suspend fun`，共享 `loadIterationContext` + `renderAndRecord` 辅助函数（遵守地雷 #1——每个方法字节码低于 64K）。迭代期间不运行 Critic——用户反馈即权威评审。
 
-The previous MP4 is auto-archived by `VersionArchive.archivePrevious`
-into `candidates/archive/<eventId>__<timestamp>.mp4`. The
-`ResultEventCard` gains a small History icon button — when 2+ versions
-exist, tapping it swaps the player between current and previous. This is
-the user-facing "undo last change" surface.
+**D. 加固**
+- `AgentRuntime.setContextTag(tag)` 让迭代路径在每条 `agent.jsonl` 标签前添加 `iter_v<N>/` 前缀，便于归因。
+- 崩溃安全迭代恢复：VM 初始化时 `resumePendingIterations()` 扫描 `_pending_iteration/` 并重新入队孤立反馈文件（KEEP 策略）。`resumedIterations` 集合防止失败循环——结构损坏的迭代每冷启动仅一次恢复尝试。
+- 每次迭代的 `perf.json` 记录 parse / editor / render 壁钟时间，`iterate()` 在所有 3 个 try/catch 分支（成功、取消、致命）中完成计时。
+- CuratorScreen 内联错误横幅：未导入 LLM 时提交不再静默返回 Stories，而是保持页面并显示红色 `errorContainer` 横幅说明下一步操作，保留用户选择和意图文本。
 
-[`worker/IterationStore.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/IterationStore.kt) is the staging + history index:
-- `_pending_iteration/<eventId>.json` — staged feedback for the worker
-- `decisions/<eventId>/_history.json` — append-only IterationSummary list
-- `decisions/<eventId>/iter_<N>/feedback_input.txt` + `feedback_parsed.json` + `timeline.json` + `perf.json`
+**测试**：单元测试从 13 → 46 例。新增 `IterationPlannerTest`（21 例，覆盖芯片→补丁映射、applyRenderOnly 突变、applyGlobalToDirector 时长缩放+限制+色调/调色覆盖、applyGlobalToTimeline 字幕条+逐镜头调色、describeChanges 三范围摘要、更快/更慢芯片节奏过渡等）、`UserCurationPlannerTest`（10 例，覆盖 Event 构造、缺失资产绕过、<3 可用资产返回 null、requestId 哈希确定性+排序稳定性+输入敏感性、eventIdFor 前缀）。
 
-WorkRequests now have THREE modes via inputData keys:
-- no key → full pipeline (auto event discovery, Gemma loaded)
-- `KEY_ITERATION_EVENT_ID` → iterate (Gemma only if needed)
-- `KEY_CURATION_REQUEST_ID` → curated story creation (Gemma loaded)
-
-The `ACTIVE` AtomicBoolean still serializes Gemma-loading runs (full +
-curate share the lock); RENDER_ONLY iteration bypasses ACTIVE because
-it doesn't load Gemma — multiple iteration WorkRequests on different
-events can run concurrently.
-
-**Files:** new `schemas/IterationFeedback.kt`, `worker/IterationStore.kt`,
-`pipeline/IterationPlanner.kt`, `ui/IterationSheet.kt`,
-`ui/IterationProgressBar.kt`. Modified `worker/PipelineOrchestrator.kt`
-(added `iterate()` + `runRenderOnly()`), `worker/VlogPipelineWorker.kt`
-(new inputData modes), `worker/PipelineProgress.kt` (Iteration*
-events), `worker/StateBreadcrumb.kt`, `worker/DecisionStore.kt` (loadEvent
-helper + previousMp4Path), `ui/VideoResultsUi.kt` (改一改 + 上一版),
-`VlogPilotViewModel.kt` (submitFeedback + activeIteration flow).
-
-### Milestone B — User-curated story creation
-
-The Stories hero gains a second `TextButton` "或者，我自己挑素材". Tap
-takes you to a full-screen `CuratorScreen` (replaces the tabbed body via
-top-of-function early return).
-
-CuratorScreen is deliberately Jobs-minimal:
-- One headline copy: "你想做一条什么样的视频？"
-- One multi-line `OutlinedTextField` (placeholder example, **optional**)
-- One `LazyVerticalGrid` of recent assets, tap-to-toggle multi-select
-- One sticky bottom bar: live count + 开始制作 button
-- **Zero chip rails for duration / pace / color / captions.** The
-  IntentParserAgent extracts those from the textfield. Power users who
-  want fine control type "30秒 / 慢节奏 / 温暖" — same effect.
-
-Empty-text submit triggers `EmptyIntentDialog` — soft guidance with 3
-example chips that fill the textfield + a "直接生成" escape hatch.
-Selection < 3 hard-disables the start button.
-
-The new
-[`agents/IntentParserAgent.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/agents/IntentParserAgent.kt)
-calls Gemma once on the user's text and extracts a structured
-[`UserBrief`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/schemas/UserCuration.kt):
-- `parsedHook` / `parsedPayoff` / `parsedTone` (string fields)
-- `parsedPace` (Pace enum or null)
-- `parsedDurationSec` (clamped to [5, 120], or null)
-- `mustHaveSubjects` ("宝宝", "狗" — Recall boost)
-- `parsedAvoid` (merged into AudienceBrief.avoidList)
-- `captionPolicy` (DEFAULT / NONE / ZH_ONLY / BILINGUAL)
-- `parsedColorGrade` (override Director's grade)
-- `rawText` (original — fed back to Director's prompt as authoritative-but-fuzzy
-  "用户原话需求" so the LLM has direct context)
-
-[`pipeline/UserCurationPlanner.kt`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/UserCurationPlanner.kt)
-turns the request into a synthetic `Event` with `eventId = "user_<requestId>"`
-where requestId = sha1(sorted_asset_ids + intentText)[0..12]. Stable hash
-means re-submitting identical curations hits the cached output.
-
-The orchestrator gains [`runFromCuration`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/PipelineOrchestrator.kt)
-+ `runUserCuratedEvent` which boot Gemma, parse the intent, then call the
-existing `runEvent` with `userBrief: UserBrief?` threaded through. The
-agent prompts inside runEvent get user overrides applied at the audience
-+ director + render handoff points — `applyUserBriefToAudience`,
-`applyUserBriefToDirector`, `applyUserBriefToTimeline`. Director's
-`available_signals` prompt segment now appends the user's `rawText` so
-the LLM sees authoritative user intent alongside the asset summary.
-
-The Recall scoring formula gained a new term: `subjectMatchBoost` reads
-`mustHaveSubjects` from UserBrief and adds up to +0.36 (0.18 per match,
-capped) to candidate scores when the asset's VLM tags mention the
-keywords. Threaded through `EditorAgent.pickShot` →
-`Recall.topK(mustHaveSubjects: List<String> = emptyList())`.
-
-User-curated stories show up alongside auto-discovered events with a
-small "你做的" tertiaryContainer-tinted badge in `StoryListItem`.
-
-**Files:** new `schemas/UserCuration.kt`, `agents/IntentParserAgent.kt`,
-`pipeline/UserCurationPlanner.kt`, `worker/CurationRequestStore.kt`,
-`ui/CuratorScreen.kt`, `ui/CuratedAssetGrid.kt`, `ui/EmptyIntentDialog.kt`.
-Modified `schemas/Schemas.kt` (Event.userCuration + userBrief —
-nullable, landmine #7-friendly), `agents/PromptStrings.kt`
-(INTENT_PARSER_INITIAL_SYSTEM), `agents/EditorAgent.kt`,
-`pipeline/Recall.kt`, `worker/PipelineOrchestrator.kt` (new
-runFromCuration + helpers), `worker/VlogPipelineWorker.kt` (curation
-mode), `ui/StoryUi.kt` (hero CTA + UserCuratedBadge),
-`VlogPilotViewModel.kt` (submitCuratedRequest + curatorAssets state).
-
-### Milestone C — Full feedback (SHOT_LEVEL / GLOBAL / MIXED)
-
-The IterationSheet now exposes the full feedback surface:
-- **Storyboard grid** (3-column `LazyVerticalGrid`) of the current
-  timeline's shots, each cell a clickable thumbnail. For video shots, the
-  cell shows the trim midpoint frame (matches what's in the rendered
-  MP4). Tapping a cell highlights it with a 2dp primary ring — that's
-  the `targetedShotOrders` signal that IntentParserAgent consumes.
-- **Free-text input** with placeholder that adapts to whether a cell is
-  selected ("太静态了，换张" vs "整体太慢，做成欢快的").
-- **4 chips, 2×2** layout: 更快 / 更慢 / 去字幕 / 换调色. FASTER/SLOWER
-  now produce a [`GlobalRevision`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/schemas/IterationFeedback.kt)
-  with the next/previous Pace (SNAPPY ↔ BALANCED ↔ LINGERING) and the
-  band's midpoint duration.
-
-`IntentParserAgent.parseFeedback()` is the new LLM call:
-- Skipped entirely when userText is blank AND no cell is tapped (chip-
-  only path runs without Gemma — zero LLM cost for "tap 去字幕 → submit")
-- Otherwise: Gemma reads the current timeline summary + user text +
-  targeted orders + chips, and emits one of four scopes:
-  - **RENDER_ONLY** — caption / color / BGM only
-  - **SHOT_LEVEL** — `parsedRevisions: List<RevisedRequest>` (reuses the
-    Critic schema)
-  - **GLOBAL** — `parsedGlobal: GlobalRevision` (pace + duration + tone
-    + colorGrade + captionPolicy)
-  - **MIXED** — both global and shot-level
-
-Client-side `RenderOnlyPatch` from chips is preserved by ORing with the
-LLM's output — chips and text co-exist as MIXED.
-
-Three new orchestrator sub-paths handle each scope:
-- `runShotLevel` — calls existing `applyRevisions` with the parsed
-  revisions; re-renders. ~30-60s.
-- `runGlobal` — applies `IterationPlanner.applyGlobalToDirector` to the
-  cached DirectorBrief (rescales blueprint durations proportionally, clamps
-  to pace band, overrides tone/colorGrade), reruns Editor's `buildTimeline`,
-  applies `applyGlobalToTimeline` for caption/grade overrides. ~2-3min.
-- `runMixed` — global flow first, then shot-level revisions on top. ~3-4min.
-
-All three are independent `private suspend fun`s sharing the same
-`loadIterationContext` + `renderAndRecord` helpers (landmine #1
-compliance — keep each method's bytecode under 64K). Critic does NOT run
-during iteration — user feedback is the authoritative critique.
-
-The dispatch logic in `iterate()` checks `needsLlmParse` =
-(userText.isNotBlank() || targetedShotOrders.isNotEmpty()) and routes
-through `runIterationWithAgent` (boots Gemma once, parses, dispatches)
-or directly to `runRenderOnly` (no Gemma) accordingly.
-
-**Files:** modified `agents/PromptStrings.kt`
-(INTENT_PARSER_FEEDBACK_SYSTEM with 4 worked examples covering the four
-scopes), `agents/IntentParserAgent.kt` (parseFeedback + scope inference
-+ patch parser), `pipeline/IterationPlanner.kt` (applyGlobalToDirector,
-applyGlobalToTimeline, describeChanges, fasterChip→GlobalRevision),
-`worker/PipelineOrchestrator.kt` (runShotLevel + runGlobal + runMixed +
-loadIterationContext + renderAndRecord), `ui/IterationSheet.kt` (storyboard
-+ textfield + 4 chips).
-
-### Milestone D — Hardening
-
-- **agent_log iteration tags.** `AgentRuntime.setContextTag(tag)` lets
-  the orchestrator's iterate path prefix every `agent.jsonl` label with
-  `iter_v<N>/`, so `adb run-as cat agent_log/agent.jsonl` can attribute
-  LLM calls to specific iterations.
-
-- **Crash-safe iteration recovery.** On VM init, `resumePendingIterations()`
-  scans `_pending_iteration/` and re-enqueues any orphaned feedback files
-  (KEEP policy). A per-VM-lifetime `resumedIterations` set prevents
-  failure loops — if an iteration is structurally broken, it gets ONE
-  recovery attempt per cold start.
-
-- **Per-iteration perf JSON.**
-  [`IterationPerfTimer`](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/PerfTimer.kt)
-  measures parse / editor / render wall-clock and writes
-  `decisions/<eventId>/iter_<N>/perf.json` on every iterate() exit
-  (success or failure). `iterate()` finalize the timer in all 3 try/catch
-  branches (success, cancellation, fatal).
-
-- **CuratorScreen error inline banner.** When the user submits with no
-  imported LLM, instead of silently returning to Stories the screen now
-  stays open with a red `errorContainer` banner explaining what to do
-  next. The user's selection + intent text is preserved across the error.
-
-### Coverage
-
-Unit tests went from 13 → 46. New cases:
-- `IterationPlannerTest`: 21 cases covering chip → patch mappings,
-  applyRenderOnly mutations, applyGlobalToDirector duration rescale +
-  clamp + tone/colorGrade override, applyGlobalToTimeline caption strip
-  + per-shot grade, describeChanges three-scope summaries, FASTER/SLOWER
-  chip pace transitions, FASTER+SLOWER cancellation.
-- `UserCurationPlannerTest`: 10 cases covering Event construction,
-  missing-asset bypass, < 3 usable assets returning null, requestId hash
-  determinism + sort-stability + input sensitivity, eventIdFor prefix.
-
-LLM-dependent paths (parseInitial, parseFeedback) are covered by E2E
-runs, not unit tests.
-
-### Verification
-
-`./gradlew :app:compileDebugKotlin` — green (no `Method exceeds compiler
-instruction limit` warnings).
-`./gradlew :app:assembleDebug` — green.
-`./gradlew :app:testDebugUnitTest` — 46/46 green.
-
-E2E on vivo X200 Pro (Dimensity 9400 + GPU + MTP): all 8 plan scenarios
-verified — auto generation, curated generation, empty-intent guidance,
-chip-only RENDER_ONLY iteration, shot-level iteration with tap-to-target,
-GLOBAL iteration with text only, version rollback via 上一版 arrow,
-crash-recovery via app force-stop mid-iteration.
+**验证**：`compileDebugKotlin` / `assembleDebug` / `testDebugUnitTest`（46/46 通过）均绿色。vivo X200 Pro E2E 验证 8 个场景：自动生成、自选生成、空意图引导、纯芯片 RENDER_ONLY 迭代、点击目标镜头的 SHOT_LEVEL 迭代、纯文本 GLOBAL 迭代、上一版箭头版本回滚、强制停止中断迭代后的崩溃恢复。
 
 ---
 
-## v4.4 — 5-agent prompt audit (3-loop pass) + EventScout 2-pass selection (2026-05-08)
+## v4.4 — 5 智能体 Prompt 审计（3 轮通过）+ EventScout 两遍选择 (2026-05-08)
 
-Pushed as commit [`f22ba50`](https://github.com/frankqwang/llm-app/commit/f22ba50).
+推送提交 `f22ba50`。
 
-The selected events were "都很垃圾" (all junk) on real albums even after
-the EventSelector content scoring landed — coarse signals (asset count,
-GPS spread, faces) are the right shape but can't tell apart "kid's
-birthday party" from "kitchen breakfast" without semantic context. And
-the 5 agent prompts had drifted: each one had grown free-form over
-multiple iterations, with worked examples that contradicted the schema,
-fields the parser ignored, and missing constraints (Director picking
-durations outside the audience's pace band; Editor never explaining
-why_not_others; Critic emitting full ShotRequest rewrites that Gemma 4
-E2B got wrong about half the time).
+真实相册上选中的事件"都很垃圾"——粗排信号（资产数量、GPS 分布、人脸）形状正确但无法区分"孩子生日派对"和"厨房早餐"。且 5 个智能体提示词在多轮迭代中漂移：每个都积累了自由格式内容，示例与 schema 矛盾，解析器忽略的字段，以及缺失约束（Director 选择超出 audience 节奏区间的时长；Editor 从不解释 why_not_others；Critic 输出完整 ShotRequest 重写，Gemma 4 E2B 约一半时间出错）。
 
-Two threads landed in one commit:
+**EventScout — 两遍事件选择**
+- **以前**：EventSelector 用廉价信号对所有候选事件排序，取 top `maxEvents`。两个粗排统计相同的事件——一个是"晨练公园"（好 vlog 素材），一个是"外卖等餐"（静止室内自拍）——分数相同。
+- **现在**：两遍流程。
+  1. 粗预排：相同 EventSelector，无 VLM 信号。Top 4-6 事件进入 Scout。
+  2. Scout 通道：每个 top-K 事件从其非垃圾资产生成 3×3 联系人表；Gemma 4 读取并返回价值/信号对（故事弧强度、人物出现、节奏潜力）。
+  3. 终排：EventSelector 注入 `scoutMap` 重新排序，取 `maxEvents`。
+- **成本**：每个预排候选 1 次 Gemma 调用（天玑 9400 GPU 上约 3-5 秒），通过 `filesDir/event_scout_cache/<eventId>.json` JSON 缓存摊销。
 
-### EventScout — 2-pass event selection with VLM signal
+**Prompt 审计 — 3 轮通过**
+全部 7 个提示词（VLM 图片、VLM 视频、Browser、Audience、Director、Editor、Critic）从零重写：
+- 每个提示词一个具体工作示例（Gemma 4 E2B 对完整填充的 JSON 示例的上下文遵循度远高于 `<占位符>` 的 schema 描述）。示例使用具体事件（烧烤聚会）以防模型安全复制。
+- 更紧的 schema 约束：每个字符串字段的字符限制、每个闭集字段的枚举列表、可选字段的回退到空规则。
+- 跨阶段信号流：
+  - Audience 输出 `pace` 枚举（紧凑/均衡/悠长）。
+  - Director 的 `target_duration_sec` 限制在对应节奏区间（15-18 / 18-22 / 22-28 秒）。
+  - Director 消费 `available_signals`（编排器构建的资产实际存在的场景/长视频/显著性摘要），`visual_requirements`  grounded 于真实素材而非幻觉。
+  - Director 直接输出 `color_grade` 枚举；Editor/渲染器原样使用，仅当 NEUTRAL 时回退到 `ColorGradeFromTone.pick(tone)`。
+  - Editor 输出 `chosen_index` + `runner_up_index` + `why_not_others`。
+  - Critic 输出 `verdict`（接受/修改/中止）+ `patches`（小字段→值映射）而非完整 `new_request` 重写。Patch 模式 Token 占用更小，Gemma 处理可靠性约 3 倍。
 
-- **Before:** EventSelector ranks all candidate events using cheap
-  signals (asset/video count, GPS spread, faces, scene diversity) and
-  picks the top `maxEvents`. Two events with identical coarse stats —
-  one being "晨练公园" (good vlog material) and one being "外卖等餐"
-  (stationary indoor selfies) — score the same.
-- **After:** Two-pass.
-  1. Coarse pre-rank: same EventSelector with no VLM signal. Top 4-6
-     events go to scout.
-  2. Scout pass: each top-K event gets a 3×3 contact sheet from its
-     non-junk assets; Gemma 4 reads it and returns a `value`/`signal`
-     pair (story arc strength, person presence, pacing potential).
-  3. Final rank: EventSelector reruns with `scoutMap` injected,
-     re-ranks, and picks `maxEvents`.
-- **Cost:** 1 Gemma call per pre-ranked candidate (~3-5s on D9400 GPU),
-  amortized via JSON cache in `filesDir/event_scout_cache/<eventId>.json`.
-- **Files:** new
-  [agents/EventScoutAgent.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/agents/EventScoutAgent.kt),
-  [pipeline/EventScoutSheetBuilder.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/EventScoutSheetBuilder.kt),
-  [schemas/EventScout.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/schemas/EventScout.kt),
-  [worker/EventScoutRunner.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/EventScoutRunner.kt) +
-  modified
-  [worker/EventSelectionPlanner.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/EventSelectionPlanner.kt),
-  [pipeline/EventSelector.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/EventSelector.kt).
+**Schema 新增**：`Pace` 枚举、`CriticVerdict` 枚举、`RevisedRequest.patches`、`DirectorBrief.colorGrade`、`VideoInsight.bestMomentWindowStart/End`（Editor.expandWindows 用此种子候选修剪窗口）。所有新字段均有默认值——现有 perception_cache JSON 干净反序列化，无需清除缓存。
 
-### Prompt audit — 3-loop pass
+**编排器变更**：`runEvent` 的 Critic 循环现按裁决分支：`ACCEPT` 中断，`ABORT` 写入 `critic_abort` 面包屑并中断（不在已知死胡同上浪费更多模型调用），`REVISE` 应用补丁。新增 `applyPatches(base, patches)`：空白值对叙事字段（mood/visual_requirements）跳过，但对装饰字段（caption/transition/ken_burns）生效（空即"移除"的有效意图）。新增 `buildAvailableSignals` 生成输入 Director 提示的信号摘要。删除 192 行死的 `MutableMap` 重载副本。
 
-All 7 prompts (VLM image, VLM video, Browser, Audience, Director,
-Editor, Critic) were rewritten ground-up with:
+**防御性解析加固**：`AudienceAgent` 空白字段从回退修补；`EditorAgent` `chosen_index` 限制在 `[0, candidates.size-1]`；`CriticAgent` 空补丁且 null newRequest 的修订请求通过 `mapNotNull` 过滤。
 
-- **One concrete worked example per prompt.** Gemma 4 E2B's in-context
-  conformance to a fully-filled JSON example is much higher than to
-  schema descriptions of `<placeholder>`. The example uses a concrete
-  event (烧烤聚会) so the model can't safely copy it.
-- **Tighter schema constraints.** Char limits for every string field,
-  enum lists for every closed-set field, fallback-to-empty rules for
-  optional fields.
-- **Cross-stage signal flow:**
-  - Audience emits `pace` enum (`snappy`/`balanced`/`lingering`).
-  - Director's `target_duration_sec` is clamped to the corresponding
-    pace band (15-18 / 18-22 / 22-28 sec) — Gemma can no longer pick
-    20s for a "snappy" brief.
-  - Director consumes `available_signals` (orchestrator-built summary
-    of what assets actually exist by VLM scene/long-video/salient) so
-    `visual_requirements` stays grounded in real footage instead of
-    hallucinated.
-  - Director emits `color_grade` enum directly; Editor/renderer use it
-    as-is, falling back to `ColorGradeFromTone.pick(tone)` only when
-    NEUTRAL.
-  - Editor emits `chosen_index` + `runner_up_index` + `why_not_others`;
-    rationale combines all three for richer breadcrumbs.
-  - Critic emits `verdict` (`accept`/`revise`/`abort`) + `patches` (a
-    small `field → value` map) instead of full `new_request` rewrites.
-    Patch mode is much smaller per-token and Gemma handles it ~3× more
-    reliably.
-
-### Schema additions
-
-- `Pace` enum, `CriticVerdict` enum, `RevisedRequest.patches:
-  Map<String, String>`, `DirectorBrief.colorGrade: ColorGrade`,
-  `VideoInsight.bestMomentWindowStart/End` (Editor.expandWindows uses
-  this to seed candidate trim windows spanning the model-identified
-  peak action, not just a single frame).
-- All new fields have defaults — existing perception_cache JSONs
-  deserialize cleanly, no cache wipe needed.
-
-### Orchestrator changes
-
-- `runEvent`'s critic loop now branches on verdict: `ACCEPT` breaks,
-  `ABORT` writes a `critic_abort` breadcrumb and breaks (don't burn
-  more model calls on a known dead end), `REVISE` applies patches.
-- New `applyPatches(base, patches)` applies field-level updates: blank
-  values are skipped for narrative fields (mood/visual_requirements)
-  but honored for cosmetic fields (caption/transition/ken_burns) since
-  empty IS a valid "remove this" intent.
-- New `buildAvailableSignals(eventAssets, perceptions)` produces the
-  scene-grouped + long-video + salient summary fed into the Director
-  prompt.
-- Removed 192 lines of dead duplicate (MutableMap-typed) overloads of
-  `runAnnotationPass` / `annotateAsset` / `runEvent`. The HashMap
-  variants were the live ones; the MutableMap copies were
-  build-tolerated dead code.
-
-### Defensive parsing hardening
-
-- `AudienceAgent`: partial JSON ({"hook_strategy":"X",
-  "emotional_payoff":""}) gets blank fields patched from the fallback
-  rather than propagating empty strings into the Director prompt.
-- `EditorAgent`: `chosen_index` is clamped to `[0, candidates.size-1]`
-  before use — Gemma occasionally emits 0 (which would underflow to
-  -1) or out-of-range numbers when it hallucinates entries.
-- `CriticAgent`: revised requests with empty patches AND null
-  newRequest are filtered out via `mapNotNull`.
-
-### Verified
-
-- Build green (`compileDebugKotlin` 4s).
-- Tests green (13/13: 10 JsonExtractor + 3 EventSelector).
-- Schema-cache compatible (no required fields added without defaults).
+**验证**：构建绿色（`compileDebugKotlin` 4s），测试绿色（13/13），Schema-cache 兼容。
 
 ---
 
-## v4.3 — Event selection: intent + power profile + pinned/excluded events + manifest (2026-05-08)
+## v4.3 — 事件选择：意图 + 功耗配置 + 固定/排除事件 + 清单 (2026-05-08)
 
-Pushed as commit [`d20e190`](https://github.com/frankqwang/llm-app/commit/d20e190).
+推送提交 `d20e190`。
 
-The user wanted to bias event selection ("only travel events" / "skip
-the kitchen ones I didn't like") and to throttle for thermal headroom
-on long runs. Added:
+用户希望对事件选择施加偏置（"只要旅行事件" / "跳过我不喜欢的厨房照片"）并在长运行时根据热裕量节流。
 
-- **`VlogPilotRunConfig`** — runtime knobs: `intent` (NORMAL / TRAVEL /
-  KIDS / FOOD / etc.), `powerProfile` (BALANCED / EFFICIENT / TURBO),
-  `pinnedEventIds` (always include), `excludedEventIds` (never
-  include). Persisted to filesDir between runs so the UI can remember.
-- **`PowerPacer`** — Inserts paced sleeps after perception batches and
-  VLM calls. EFFICIENT adds ~200ms after each VLM call (smoother
-  thermal); TURBO removes pacing; BALANCED is the middle.
-- **Intent-aware EventSelector** — `intent.eventBias()` adjusts
-  `valueScore` per event based on heuristics (TRAVEL boosts GPS
-  spread + outdoor scene tags, KIDS boosts face count, FOOD boosts
-  stationary-indoor + close-range scene tags).
-- **EventSelectionManifest** — Persisted JSON manifest of every
-  selection decision: which events were considered, their valueScore
-  breakdown, why each was selected/excluded, plus the run config.
-  Lives at `filesDir/decisions/_event_selection.json`. Lets the UI
-  show "why these events" without re-running selection.
-- **DecisionStore.writeEventSelection** — atomic write to the manifest
-  path; surfaces "Selecting events..." progress to the UI.
-- **Files:** new
-  [runtime/VlogPilotRunConfig.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/runtime/VlogPilotRunConfig.kt),
-  [runtime/PowerPacer.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/runtime/PowerPacer.kt),
-  [worker/EventSelectionPlanner.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/EventSelectionPlanner.kt),
-  [worker/EventSelectionManifest.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/EventSelectionManifest.kt) +
-  modified [pipeline/EventSelector.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/EventSelector.kt).
+- **`VlogPilotRunConfig`** — 运行时旋钮：`intent`（普通/旅行/儿童/美食等）、`powerProfile`（均衡/节能/极速）、`pinnedEventIds`（始终包含）、`excludedEventIds`（始终排除）。持久化到 filesDir，UI 可记住设置。
+- **`PowerPacer`** — 在感知批次和 VLM 调用后插入 paced 睡眠。节能模式在每个 VLM 调用后增加 ~200ms（更平滑的热曲线）；极速模式移除 pacing；均衡为中间态。
+- **意图感知 EventSelector** — `intent.eventBias()` 基于启发式调整每事件的 `valueScore`（旅行提升 GPS 分布+户外场景标签，儿童提升人脸计数，美食提升静止室内+近距离场景标签）。
+- **EventSelectionManifest** — 持久化 JSON 清单，记录每次选择的决策：考虑了哪些事件、它们的 valueScore 分解、每个被选/排除的原因，以及运行配置。位于 `filesDir/decisions/_event_selection.json`。UI 可展示"为什么选这些事件"而无需重新运行选择。
 
 ---
 
-## v4.2 — Content-scored event selection + thermal pacing (2026-05-08)
+## v4.2 — 内容评分事件选择 + 热控 pacing (2026-05-08)
 
-Pushed as commit [`2f05f66`](https://github.com/frankqwang/llm-app/commit/2f05f66).
+推送提交 `2f05f66`。
 
-Replaced recency-only `events.take(maxEvents)` with content-scored
-`EventSelector.rank()`. valueScore weights:
+将仅按recency的 `events.take(maxEvents)` 替换为内容评分的 `EventSelector.rank()`。valueScore 权重：资产数量（对数缩放）、视频存在（数量+总时长秒数）、时间跨度、GPS 分布、故事信号（人脸计数、场景切换多样性）、recency 仅作为小 tiebreaker。
 
-- Asset count (log-scaled — a 30-photo trip > a 100-burst-shot session)
-- Video presence (count + total duration in seconds)
-- Time span (8h trip > 30min coffee)
-- GPS spread (real travel vs at-home)
-- Story signals (face count, scene-cut diversity)
-- Recency only as small tiebreaker
-
-Plus thermal pacing — Dimensity 9400 GPU heat-throttles past ~7 min
-sustained inference. Inserts ~150-200ms paced sleeps in the perception
-loop and after each VLM call to keep junction temp below 80°C.
-
-- **Files:** new
-  [pipeline/EventSelector.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/EventSelector.kt) +
-  test
-  [pipeline/EventSelectorTest.kt](android/app/src/test/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/EventSelectorTest.kt) +
-  modified
-  [worker/PipelineOrchestrator.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/PipelineOrchestrator.kt).
+热控 pacing — 天玑 9400 GPU 在 ~7 分钟持续推理后热节流。在感知循环和每次 VLM 调用后插入 ~150-200ms paced 睡眠，使结温保持在 80°C 以下。
 
 ---
 
-## v4.0 / v4.1 — VLM-only perception architecture + 64K bytecode fix (2026-05-08)
+## v4.0 / v4.1 — VLM-only 感知架构 + 64K 字节码修复 (2026-05-08)
 
-Pushed as commits
-[`35a1ed9`](https://github.com/frankqwang/llm-app/commit/35a1ed9),
-[`4ab249e`](https://github.com/frankqwang/llm-app/commit/4ab249e),
-[`1ccb38f`](https://github.com/frankqwang/llm-app/commit/1ccb38f).
+推送提交 `35a1ed9`、`4ab249e`、`1ccb38f`。
 
-### v4.0 — VLM annotation replaces CLIP/YOLO/FaceNet TFLite stack
+**v4.0 — VLM 标注取代 CLIP/YOLO/FaceNet TFLite 栈**
 
-The TFLite small-model stack (CLIP, YOLO, MobileFaceNet) was always a
-known gap from v3.0 — the public sub-50MB int8 sources we wanted to
-ship never materialized. Switched to one Gemma VLM call per asset.
+TFLite 小模型栈（CLIP、YOLO、MobileFaceNet）从 v3.0 起就是已知缺口——计划中的公开 sub-50MB int8 来源从未出现。切换为逐资产一次 Gemma VLM 调用。
 
-- **VlmAnnotator** runs once per asset, produces `VlmTags` (scene,
-  subjects, action, mood, time_feel, salient, narrative_role_hint).
-  Per-video also produces `VideoInsight` (frame timestamps, summary,
-  action_arc, best_moment_index, bad_moment_indices).
-- **Recall.kt** scores via `semanticOverlap()` on tags rather than
-  cosine over CLIP embeddings. Comparable signal, much richer
-  context (model can reason about the tags during curate).
-- **Cost:** ~3-5s/asset on D9400 GPU + MTP. Per-asset Perception is
-  JSON-cached in `filesDir/perception_cache/<assetId>.json` — repeat
-  runs over the same album are essentially free.
-- **VideoFrameSheetBuilder** builds N-frame contact sheets per video
-  (uniform sampling + scene-cut anchors), Gemma annotates the sheet
-  in one call.
-- **`Workspace` tabs** — `Process` / `Decisions` / `Results` UI for
-  watching the run and inspecting per-event outputs. Polls
-  `decisions/<eventId>/` every 3s on Dispatchers.IO.
-- **Deleted:** `ClipEmbedder`, `ClipTokenizer`, `YoloDetector`,
-  `YoloObj`, `FaceEmbedder`, `FaceClusterer`, `TfliteLoader`,
-  `SharpestWindowPicker`. Don't re-add them. The semantic signal
-  CLIP was supposed to provide now comes from VlmAnnotator.
+- **VlmAnnotator** 每资产运行一次，产出 `VlmTags`（场景、主体、动作、氛围、时间感、显著性、叙事角色提示）。视频额外产出 `VideoInsight`（帧时间戳、摘要、动作弧、最佳时刻索引、糟糕时刻索引）。
+- **Recall.kt** 通过标签上的 `semanticOverlap()` 评分，取代 CLIP 嵌入的余弦相似度。信号可比，上下文丰富得多（模型可在精选时推理标签）。
+- **成本**：天玑 9400 GPU + MTP 上约 3-5 秒/资产。逐资产 Perception JSON 缓存在 `filesDir/perception_cache/<assetId>.json`——同一相册重复运行基本免费。
+- **VideoFrameSheetBuilder** 为每视频构建 N 帧联系人表（均匀采样 + 场景切换锚点），Gemma 一次调用标注整表。
+- **Workspace 标签页** — Process / Decisions / Results UI，用于观看运行和检查逐事件输出。每 3 秒在 Dispatchers.IO 上轮询 `decisions/<eventId>/`。
+- **删除**：`ClipEmbedder`、`ClipTokenizer`、`YoloDetector`、`YoloObj`、`FaceEmbedder`、`FaceClusterer`、`TfliteLoader`、`SharpestWindowPicker`。CLIP 本应提供的语义信号现由 VlmAnnotator 提供。不要重新添加它们。
 
-### v4.1 — Pipeline restart loop fix (the real "v4 ships" milestone)
+**v4.1 — 流水线重启循环修复（真正的"v4 发布"里程碑）**
 
-- **Symptom:** A single `doWork()` invocation ran download → ingest →
-  perceive → init → download → ... in a tight 2-second loop on the
-  same worker. JobScheduler showed ONE WorkSpec, run_attempt_count=1.
-  Three wrong theories burned an hour: "Gemma 5min cold start" (false,
-  it's ~15s), "vivo logcat ACL" (false, just HWUI overflow), "vivo BTM
-  kills FGS" (false, not even a kill).
-- **Root cause:** `PipelineOrchestrator.run()`'s coroutine state
-  machine exceeded ART's 64K bytecode limit. The line was in logcat
-  the whole time: `Method exceeds compiler instruction limit: 64126`.
-  Past 64K, ART falls back to interpreter mode and the
-  resume-from-saved-label dispatch silently breaks — every
-  `progress(...)` suspension resumes at label 0 = the start of
-  `run()`.
-- **Fix:** Extract per-event body into `runEvent()` and per-asset
-  annotation into `runAnnotationPass()` — each suspend point now
-  lives in its own state machine, none individually exceeds 64K.
-  **This rule is permanent: keep `run()` thin.** The compile warning
-  (`Method exceeds compiler instruction limit: NNNNN`) is just a
-  warning, not an error, so the build still passes — watch for it.
-- **Files:** [worker/PipelineOrchestrator.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/PipelineOrchestrator.kt).
+- **症状**：单次 `doWork()` 调用在下载→导入→感知→初始化→下载…之间以 2 秒 tight loop 运行。JobScheduler 显示一个 WorkSpec，run_attempt_count=1。三个错误理论浪费了一小时："Gemma 5 分钟冷启动"（假，约 15 秒）、"vivo logcat ACL"（假，只是 HWUI 溢出）、"vivo BTM 杀死 FGS"（假，甚至不是 kill）。
+- **根因**：`PipelineOrchestrator.run()` 的协程状态机超出 ART 的 64K 字节码限制。Logcat 里一直存在这行：`Method exceeds compiler instruction limit: 64126`。超过 64K 后 ART 回退到解释器模式，且从保存标签恢复的调度静默中断——每次 `progress(...)` 挂起都在标签 0 = `run()` 的开头恢复。
+- **修复**：将逐事件主体提取到 `runEvent()`，逐资产标注提取到 `runAnnotationPass()`——每个挂起点现在位于自己的状态机中，没有一个单独超过 64K。**此规则是永久性的：保持 `run()` 精简。** 编译警告（`Method exceeds compiler instruction limit: NNNNN`）只是警告而非错误，因此构建仍会通过——请注意观察。
 
-### Observability — disk-backed breadcrumbs
+**可观测性 — 磁盘面包屑**
 
-vivo OriginOS HWUI / SurfaceComposerClient floods the 4MB logcat ring
-buffer fast enough to overwrite our `Log.d` entries within ~7 minutes.
-To survive that, every state transition writes to disk:
-
-- `_state.txt` — single-line current pipeline state
-- `_state_history.jsonl` — append-only trail of every PipelineProgress
-- `_state_fatal.txt` — stack trace if `run()` throws above the
-  per-event catch
-- `agent_log/agent.jsonl` — per-LLM-call timing + outcome
-- `decisions/<eventId>/*.json` — every agent's structured output
-- `perception_cache/<assetId>.json` — per-asset Perception
-- `candidates/<eventId>.mp4` — final rendered vlogs
-
-Read via `adb shell run-as com.google.aiedge.gallery cat files/<path>`.
-Survives logcat overflow AND process death.
+vivo OriginOS 的 HWUI / SurfaceComposerClient 淹没 4MB logcat 环形缓冲区的速度快到约 7 分钟内覆盖我们的 `Log.d` 条目。为此，每次状态转换都写入磁盘：`_state.txt`、`_state_history.jsonl`、`_state_fatal.txt`、`agent_log/agent.jsonl`、`decisions/<eventId>/*.json`、`perception_cache/<assetId>.json`、`candidates/<eventId>.mp4`。通过 `adb shell run-as com.google.aiedge.gallery cat files/<path>` 读取。 survive logcat 溢出 AND 进程死亡。
 
 ---
 
-## v3.2 — Recall time-window, Critic 2-iter, ColorGrade, Sharpest-window picker (2026-05-08)
+## v3.2 — Recall 时间窗、Critic 2 轮迭代、ColorGrade、最清晰窗口选择器 (2026-05-08)
 
-Pushed as commit [`0f797d0`](https://github.com/frankqwang/llm-app/commit/0f797d0).
+推送提交 `0f797d0`。
 
-Targeted audit pass on the 5-agent chain after v3.1 went end-to-end.
+v3.1 端到端后的 5 智能体链定向审计。
 
-- **Recall time-window** — Per-shot recall is constrained to
-  ±1.5 hours from the slot's predicted timestamp (instead of "any
-  asset in the event"). Stops the Editor from picking the same
-  morning shot for every slot in an evening event.
-- **Critic 2-iter cap** — Was 3, now 2. The third iteration almost
-  never improved the cut on Gemma 4 E2B; it just shuffled assets.
-  `MAX_CRITIC_ITER = 2` in PipelineOrchestrator.
-- **ColorGrade** — Director picks one of {warm, cool, vibrant, muted,
-  cinematic, vintage, neutral}, applied via ffmpeg `colorchannelmixer`
-  / `eq` chains in ColorGradeFilter. (v4.4 made this explicit-emit
-  rather than keyword-inferred.)
-- **Sharpest-window picker** — Video shot trims pick the sharpest
-  N-second window inside the asset's duration, not "first N seconds".
-  (v4.0 superseded this with VideoWindowPicker that consumes VLM
-  best_moment_index + window hints.)
+- **Recall 时间窗** — 逐镜头召回限制在槽位预测时间戳的 ±1.5 小时内（而非"事件中的任意资产"）。阻止 Editor 为晚间事件的每个槽位都挑选同一张早晨照片。
+- **Critic 2 轮上限** — 原为 3，现为 2。第 3 轮迭代在 Gemma 4 E2B 上几乎从不改善剪辑，只是重新洗牌资产。`MAX_CRITIC_ITER = 2`。
+- **ColorGrade** — Director 从 {warm, cool, vibrant, muted, cinematic, vintage, neutral} 中挑选，通过 ffmpeg `colorchannelmixer` / `eq` 链应用。（v4.4 改为显式输出而非关键词推断。）
+- **最清晰窗口选择器** — 视频镜头修剪在资产时长内选择最清晰的 N 秒窗口，而非"前 N 秒"。（v4.0 被 VideoWindowPicker 取代，后者消费 VLM best_moment_index + 窗口提示。）
 
 ---
 
-## v3.1 — c-end UX + reliability + perf pass (2026-05-07)
+## v3.1 — C 端 UX + 可靠性 + 性能优化 (2026-05-07)
 
-Pushed as commit [`ef3ecb3`](https://github.com/frankqwang/llm-app/commit/ef3ecb3).
+推送提交 `ef3ecb3`。
 
-This is the "make it actually work end-to-end on a phone" pass. v3.0 wired
-the pipeline up but ran into a wall of "almost works" issues: every shot
-failed render, every event went through full pipeline, the UI stalled
-during long runs, and crashes from missing native models bricked the
-worker. After v3.1 the app opens straight onto VlogPilot, produces real
-MP4s, and shows the AI's per-stage output as it happens.
+"让它在手机上真正端到端工作"的优化 pass。v3.0 接通了流水线，但撞上了一堵"几乎能工作"的墙：每个镜头渲染失败、每个事件都跑完整流水线、UI 在长运行时卡住、缺失原生模型的崩溃导致 Worker 变砖。v3.1 后应用直接打开到 VlogPilot，产出真实 MP4，并实时展示 AI 的逐阶段输出。
 
-Verified on vivo X200 Pro (Dimensity 9400, 8 GB RAM, ~150 photos / 30 days).
+已在 vivo X200 Pro（天玑 9400，8 GB RAM，~150 张照片 / 30 天）上验证。
 
 ### UX
 
-#### App opens directly on VlogPilot
+- **应用直接打开到 VlogPilot**：`startDestination = ROUTE_VLOGPILOT`。应用打开直接进入 VlogPilot 屏幕，一个生成按钮。右上角 Apps 图标前往 gallery 首页获取高级功能。
+- **一个按钮代替两个**："扫描相册" + "生成 vlog 候选" 合并为单个生成按钮，运行期间兼作取消按钮。
+- **逐事件决策链查看器**：从单行状态"evt_005: director"升级为每个事件一张可展开卡片。内部：Browser 故事摘要、Audience 情感简报、Director 标题+色调+叙事弧、Editor 逐镜头列表（字幕+时长+理由）、Critic 问题、渲染输出。每 3 秒通过轮询 `filesDir/decisions/<eventId>/` 自动刷新。
+- **内嵌 MP4 播放器**：决策卡片的渲染区域嵌入 `VideoView`（9:16，标准 MediaController），点击内联播放。无需额外依赖。
 
-- **Before:** Open app → gallery home → find VlogPilot card → tap → pick
-  a model → enter task screen. Three taps before any work.
-- **Why:** c-end users don't care about gallery's AI Chat / Agent Skills /
-  Models management. They want a vlog from photos, full stop.
-- **After:** `startDestination = ROUTE_VLOGPILOT`. App opens straight onto
-  the VlogPilot screen with one Generate button. Top-right Apps icon goes
-  to the gallery home for advanced features.
-- **Files:** [GalleryNavGraph.kt](android/app/src/main/java/com/google/ai/edge/gallery/ui/navigation/GalleryNavGraph.kt) +
-  new [VlogPilotRootScreen.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/VlogPilotRootScreen.kt).
+### 可靠性 — 8 个真实缺陷
 
-#### One button instead of two
+| 缺陷 | 症状 | 根因 | 修复 |
+|---|---|---|---|
+| Android 14+ FGS 类型缺失 | 点击生成 → 立即 `InvalidForegroundServiceTypeException` 崩溃 | Android 14+ 要求 `foregroundServiceType` 在运行时 `ForegroundInfo` 中声明，仅 manifest 不够；使用了默认 type=NONE 的 2 参数构造器 | 3 参数 `ForegroundInfo(..., FOREGROUND_SERVICE_TYPE_DATA_SYNC)` |
+| face_landmarker.task 缺失时原生 SEGV | 流水线启动后立即崩溃于 `strlen(null)` | MediaPipe `createFromOptions` 在模型文件缺失时不抛 Java 异常，而是在 native 代码 SEGV，Kotlin try/catch 无法拦截 | 调用 MediaPipe 前探测文件（filesDir/models 然后 bundled assets）；缺失时 `landmarker = null`，`detect()` 返回空列表，流水线优雅降级 |
+| 智能体 JSON 解析可杀死事件 | 随机事件失败于 `JsonDecodingException` | Gemma 4 E2B 偶尔对较长 schema（Critic 最严重）输出畸形 JSON；未处理的异常传播出去，整个事件标记为失败 | 5 个智能体均将 `parseToJsonElement` 包裹在 try/catch 中，解析失败时回退到合理默认值 |
+| CaptionFilter 无字体时杀死 ffmpeg | 每个镜头渲染失败于 `ffmpeg failed: 1 null` | ffmpeg `drawtext` 过滤器**需要** `fontfile=`；fontPath 为 null 时仍无条件输出 `drawtext=text='...'`，导致整个滤镜图中止 | fontPath 为 null 时 CaptionFilter 返回空字符串；ShotRenderer 跳过逗号前缀，ffmpeg 无字幕渲染而非失败。同时捆绑 Source Han Sans CN Bold（8.5 MB）覆盖 CJK 字幕 happy path |
+| ffmpeg-kit-16kb min 中无 libx264 | 每个镜头渲染失败于 `Unknown encoder 'libx264'` | `ffmpeg-kit-16kb` 精简版不捆绑 libx264（GPL 许可证）；硬编码了 `-c:v libx264 -preset veryfast -crf 22` | 运行时探测 ffmpeg 的 `-encoders` 列表，选择最佳可用编码器：`h264_mediacodec`（硬件 H.264，~10 倍更快，低耗电）→ `libx264` → `mpeg4`（LGPL 回退，始终存在）。进程生命周期内缓存 |
+| Worker 静态变量在进程死亡时丢失 | OOM kill / 强制停止 / 厂商省电杀死前台服务后，WorkManager 重试 Worker，`VlogPilotModelRegistry.resolvedModel` → null → 失败 | `@Volatile var` 是进程局部的。进程死亡，变量随之死亡 | 同时将模型名称持久化到 SharedPreferences。重启后 Worker 读取持久化名称并给出精确错误："流水线中断（进程被杀死）。再次点击生成——模型 'gemma-4-E2B-it' 仍已导入。" 用户可见行为现为"多点击一次恢复"而非静默失败 |
+| ClipTokenizer 读取了错误目录 | 文本嵌入始终全零（静默），CLIP 召回降级为仅清晰度排序 | ModelDownloader 将 vocab/merges 写入 `<filesDir>/models/`，但 ClipTokenizer.tryLoad 只查找 `assets/models/`。文件在磁盘上但对 tokenizer 不可见 | 双层解析——filesDir 优先，然后 bundled assets |
+| MediaLoader 无法解码视频 URI | 每个视频资产记录 `loadImage failed: content://media/external/video/...`，视频从感知中静默丢弃 | `BitmapFactory.decodeStream` 无法解码 MP4 容器。所有资产类型都通过它发送 | 按 `asset.mediaType` 分支——IMAGE/LIVE_PHOTO 对静态图使用 BitmapFactory，VIDEO 对片段中部使用 `MediaMetadataRetriever.getFrameAtTime` |
 
-- **Before:** "Scan album" + "Generate vlog candidates" — user had to scan
-  before they could generate.
-- **Why:** The orchestrator does its own ingest+segment internally. The
-  preview scan was redundant work.
-- **After:** Single Generate button. Doubles as Cancel during a run.
-- **Files:** [VlogPilotScreen.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/VlogPilotScreen.kt).
+### 性能 — 7 项提升
 
-#### Decision-chain viewer per event
+| 优化 | 以前 | 以后 | 影响 |
+|---|---|---|---|
+| ABI 拆分 | APK 520 MB，原生库为 4 个 ABI 各发一份 | `ndk { abiFilters += listOf("arm64-v8a") }` | APK 243 MB |
+| maxEvents=2 上限 | 7 个事件 × ~15 分钟 = ~90 分钟壁钟时间 | 新事件限制为 2 个最近（~20 分钟总计）。恢复事件绕过上限 | 显著缩短首次运行时间 |
+| 恢复模式 | 取消运行丢失每事件 10-15 分钟 VLM 工作 | `timeline_final.json` 已缓存但无 MP4 的事件跳过全部 5 个智能体阶段直接进入 ffmpeg | 恢复事件免费 |
+| 逐资产 Perception 缓存 | 每次生成对所有照片重新运行 YOLO+人脸+CLIP+NSFW+清晰度 | `filesDir/perception_cache/<assetId>.json` JSON 缓存 | 同一相册重新运行：感知阶段 ~30 秒而非 ~3 分钟 |
+| DecisionStore.loadAll 移至 Dispatchers.IO | UI 滚动/展开卡片时明显卡顿，`Choreographer: Skipped 144 帧`（~2.4 秒冻结） | `withContext(Dispatchers.IO) { DecisionStore.loadAll(...) }`，轮询间隔从 2s 放宽到 3s | UI 不再卡顿 |
+| Bitmap recycle | 逐资产 Perception 创建 ~6 个 Bitmap，原生像素缓冲区保持到 GC。100 资产 = ~1.3 GB 峰值堆 → 低内存杀手风险 | 三个显式回收点：PerceptionEngine.analyze 封面+人脸裁剪、BitmapPrep 缩放中间产物、MontageBuilder.renderCell 单元格合成后 | 峰值堆大致减半（~700 MB） |
+| MontageAgent 发送所有联系人表页 | >121 张照片的事件（一页容量）丢失第一页后的上下文——智能体只看到 `sheets.first()` | 每页一次 VLM 调用，然后合并结果（拼接 storyline_summary，去重 key_moments，合并 characters_observed） | 大事件不再丢失上下文 |
 
-- **Before:** Single status line "evt_005: director" was the only visibility.
-- **After:** One expandable card per event. Inside: Browser story summary,
-  Audience emotional brief, Director title + tone + narrative arc, Editor
-  per-shot list with caption + duration + rationale, Critic issues, Render
-  output. Auto-refreshes every 3 s by polling
-  `filesDir/decisions/<eventId>/`.
-- **Files:** `EventDecisionCard` in
-  [VlogPilotScreen.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/VlogPilotScreen.kt) +
-  new [DecisionStore.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/DecisionStore.kt).
+### 其他
 
-#### Embedded MP4 player
+- **PhotoIngest.Filter**：新增过滤参数，`cameraOnly = true`（MediaStore RELATIVE_PATH 白名单 `DCIM/`，排除 Pictures/Screenshots/微信/百度网盘/Telegram/Download 等，典型手机上资产数量减少 ~50%）；`maxVideoSizeBytes = 100 MB`；`maxImageSizeBytes = 50 MB`；`minImageSizeBytes = 50 KB`。
+- **Prompt 防示例泄漏**：MONTAGE / AUDIENCE / DIRECTOR 系统提示词中的具体示例值（如 `"characters_observed": ["主角A：穿蓝衣女孩", ...]`）被替换为 `<...>` 占位符语法 + 显式"不要复制 schema 占位符"指令。Gemma 4 E2B（2B 参数）此前将这些视为 ground truth 并逐字复制到输出中。
+- **PerfTimer + perf.json**：包裹每个智能体调用 + 渲染的 `System.nanoTime` 测量，持久化到 `filesDir/decisions/<eventId>/perf.json`。UI 展示逐事件单行摘要。
+- **测试**：新增 `JsonExtractorTest`（10 例），覆盖干净对象、嵌套大括号、代码围栏包装、`<think>` 标签、散文前缀/后缀、转义引号、未闭合大括号、垃圾、数组提取。`./gradlew :app:testDebugUnitTest` 运行，10/10 通过，25 秒。
+- **资源**：捆绑 `assets/fonts/SourceHanSansSC-Bold.otf`（8.5 MB）用于 CJK 字幕；`assets/bgm/{warm,cool,...}.mp3`（47 MB，7 条免版税音轨）。
 
-- **Before:** Rendered MP4 only viewable via `adb pull`.
-- **After:** Decision card's Render section embeds a `VideoView` (9:16,
-  standard MediaController). Tap-to-play inline. No extra dependency.
-- **Files:** `MiniVideoPlayer` in [VlogPilotScreen.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/VlogPilotScreen.kt).
+### 已知缺口（推迟到 v3.2+）
 
-### Reliability — 8 real bugs
-
-#### FGS type required on Android 14+
-
-- **Symptom:** Tap Generate → instant `InvalidForegroundServiceTypeException`
-  → app crash.
-- **Root cause:** Android 14+ requires `foregroundServiceType` to be
-  declared at runtime in the `ForegroundInfo`, not just in the manifest.
-  We were using the 2-arg constructor which defaults to type=NONE.
-- **Fix:** 3-arg `ForegroundInfo(notifId, notif, FOREGROUND_SERVICE_TYPE_DATA_SYNC)`.
-- **Files:** [VlogPipelineWorker.kt:85-93](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/VlogPipelineWorker.kt).
-
-#### Native SEGV when face_landmarker.task missing
-
-- **Symptom:** Pipeline starts, immediately crashes in
-  `Java_com_google_mediapipe_framework_Graph_nativeStartRunningGraph` →
-  `strlen(null)`.
-- **Root cause:** MediaPipe's `createFromOptions` does NOT throw a Java
-  exception when the model file is missing. It SEGVs in native code, which
-  Kotlin try/catch cannot intercept.
-- **Fix:** Probe for the file (filesDir/models then bundled assets) BEFORE
-  calling MediaPipe. If absent, set `landmarker = null` and
-  `detect()` returns empty list. Pipeline gracefully degrades (no person
-  IDs) instead of crashing.
-- **Files:** [FaceDetector.kt:32-71](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/perception/FaceDetector.kt).
-
-#### Agent JSON parse can kill an event
-
-- **Symptom:** Random events fail with
-  `JsonDecodingException: Unexpected JSON token at offset 349`.
-- **Root cause:** Gemma 4 E2B occasionally emits malformed JSON for the
-  longer schemas (Critic was the worst offender). The unhandled throw
-  propagated out and the whole event was marked failed.
-- **Fix:** Each of the 5 agents wraps `parseToJsonElement` in try/catch
-  and falls back to its sane default on parse failure. Pipeline continues.
-- **Files:** [CriticAgent.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/agents/CriticAgent.kt),
-  [AudienceAgent.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/agents/AudienceAgent.kt),
-  [DirectorAgent.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/agents/DirectorAgent.kt),
-  [EditorAgent.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/agents/EditorAgent.kt),
-  [MontageAgent.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/agents/MontageAgent.kt).
-
-#### CaptionFilter without font kills ffmpeg
-
-- **Symptom:** Every shot render fails with `ffmpeg failed: 1 null`.
-- **Root cause:** ffmpeg's `drawtext` filter REQUIRES `fontfile=` — without
-  it, the entire filter graph aborts. We were emitting `drawtext=text='...'`
-  unconditionally even when fontPath was null.
-- **Fix:** CaptionFilter returns empty string when fontPath is null.
-  ShotRenderer then skips the comma-prefix, ffmpeg renders without
-  captions instead of failing. Also bundled Source Han Sans CN Bold
-  (8.5 MB) so the happy path covers CJK captions.
-- **Files:** [CaptionFilter.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/render/CaptionFilter.kt) +
-  [assets/fonts/SourceHanSansSC-Bold.otf](android/app/src/main/assets/fonts/).
-
-#### libx264 not available in ffmpeg-kit-16kb min
-
-- **Symptom:** Every shot render fails with
-  `Unknown encoder 'libx264'`.
-- **Root cause:** The `ffmpeg-kit-16kb` min variant doesn't bundle libx264
-  (GPL license). We hardcoded `-c:v libx264 -preset veryfast -crf 22`.
-- **Fix:** Runtime-probe ffmpeg's `-encoders` list, pick the best
-  available: `h264_mediacodec` (hardware H.264, ~10x faster, low battery)
-  → `libx264` → `mpeg4` (LGPL fallback, always present). Cached for the
-  process lifetime.
-- **Files:** new [EncoderProbe.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/render/EncoderProbe.kt) +
-  [ShotRenderer.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/render/ShotRenderer.kt) +
-  [CompositeRenderer.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/render/CompositeRenderer.kt).
-
-#### Worker static-var lost on process death
-
-- **Symptom:** OOM kill / force-stop / vendor power-saver kills the
-  foreground service. WorkManager retries the worker. The worker reads
-  `VlogPilotModelRegistry.resolvedModel` → null → fails with a generic
-  "no model" message.
-- **Root cause:** A `@Volatile var` is process-local. Process dies, var
-  dies with it.
-- **Fix (partial):** Also persist the model name to SharedPreferences. The
-  in-process fast path still uses the static var. On restart, the worker
-  reads the persisted name and surfaces a precise error: "Pipeline
-  interrupted (process killed). Tap Generate again — model 'gemma-4-E2B-it'
-  is still imported."
-- **Pragmatic compromise:** A complete fix requires HiltWorker plumbing +
-  fully reconstructing the gallery's `Model` from disk. Deferred — the
-  user-visible behaviour now is "one extra tap to recover" instead of
-  silent failure.
-- **Files:** [VlogPilotModelRegistry.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/runtime/VlogPilotModelRegistry.kt) +
-  [VlogPipelineWorker.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/VlogPipelineWorker.kt).
-
-#### ClipTokenizer was reading the wrong directory
-
-- **Symptom:** Text embeddings always all-zeros (silent), CLIP-based
-  recall degraded to sharpness-only ranking.
-- **Root cause:** ModelDownloader writes vocab/merges to
-  `<filesDir>/models/`. ClipTokenizer.tryLoad only looked at
-  `assets/models/`. Files were on disk but invisible to the tokenizer.
-- **Fix:** Two-tier resolution — filesDir first, then bundled assets.
-- **Files:** [ClipTokenizer.kt:62-83](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/perception/ClipTokenizer.kt).
-
-#### MediaLoader couldn't decode video URIs
-
-- **Symptom:** Every video asset logged `loadImage failed:
-  content://media/external/video/...` — videos silently dropped from
-  perception.
-- **Root cause:** `BitmapFactory.decodeStream` cannot decode an MP4
-  container. We were sending all asset types through it.
-- **Fix:** Branch on `asset.mediaType` — IMAGE/LIVE_PHOTO use
-  BitmapFactory on the still, VIDEO uses `MediaMetadataRetriever.getFrameAtTime`
-  on the middle of the clip.
-- **Files:** [MediaLoader.kt:23-50](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/perception/MediaLoader.kt).
-
-### Performance — 7 wins
-
-#### ABI splits
-
-- **Before:** APK 520 MB. Native libs (ffmpeg-kit, MediaPipe, TFLite,
-  ONNX Runtime, LiteRT-LM) shipped for arm64-v8a + armeabi-v7a + x86 +
-  x86_64 = 4× the size for zero benefit on modern phones.
-- **After:** `ndk { abiFilters += listOf("arm64-v8a") }`. APK 243 MB.
-  x86 emulator users would need to comment this out (we don't target it).
-- **Files:** [build.gradle.kts](android/app/build.gradle.kts).
-
-#### maxEvents=2 cap
-
-- **Before:** 7 detected events × ~15 min full pipeline = ~90 min wall
-  clock.
-- **After:** New events capped to 2 most-recent (~20 min total). Resume
-  events bypass the cap (see next).
-- **Files:** [PipelineOrchestrator.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/PipelineOrchestrator.kt).
-
-#### Resume mode
-
-- **Before:** A cancelled run loses the 10–15 min of VLM work per event
-  (cached decision JSONs are re-derived from scratch on the next Generate).
-- **After:** Events with `timeline_final.json` cached but no MP4 yet
-  (i.e. previous render failed) skip all 5 agent stages and go straight
-  to ffmpeg. Bypasses the maxEvents cap (free, why not).
-- **Files:** `resumeEvents` / `newEvents` split in
-  [PipelineOrchestrator.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/PipelineOrchestrator.kt).
-
-#### Per-asset Perception cache
-
-- **Before:** Every Generate re-runs YOLO + face + CLIP + NSFW + sharpness
-  on every photo (~1–2s each, 100 photos = ~3 min).
-- **After:** Per-asset Perception JSON-cached at
-  `filesDir/perception_cache/<assetId>.json`. Same album re-run = full
-  cache hit = perception phase ~30s instead of ~3 min.
-- **Files:** new [PerceptionCache.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/perception/PerceptionCache.kt).
-
-#### DecisionStore.loadAll moved to Dispatchers.IO
-
-- **Symptom:** UI scrolling/expanding cards mid-run was visibly laggy.
-  Logcat showed `Choreographer: Skipped 144 frames` (≈ 2.4 s freeze).
-- **Root cause:** Polling 30+ JSON files every 2 s on the Main thread.
-- **Fix:** `withContext(Dispatchers.IO) { DecisionStore.loadAll(...) }`.
-  Polling interval also relaxed from 2 s → 3 s.
-- **Files:** [VlogPilotViewModel.kt:64-72](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/VlogPilotViewModel.kt).
-
-#### Bitmap recycle
-
-- **Before:** Per-asset Perception creates ~6 Bitmaps (cover, face crops,
-  scaled intermediates, contact-sheet cells). Native pixel buffers held
-  until GC. 100 assets = ~1.3 GB peak heap → low-memory-killer risk.
-- **After:** Three explicit recycle points:
-  - PerceptionEngine.analyze: `cover.recycle()` at end + face crops
-  - BitmapPrep.letterbox/toX: scaled intermediates
-  - MontageBuilder.renderCell: cell after compositing
-- **Result:** Peak heap roughly halved (~700 MB).
-- **Files:** [PerceptionEngine.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/perception/PerceptionEngine.kt),
-  [BitmapPrep.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/perception/BitmapPrep.kt),
-  [MontageBuilder.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/pipeline/MontageBuilder.kt).
-
-#### MontageAgent sends all contact-sheet pages
-
-- **Before:** Events with >121 photos (one sheet's capacity) lost
-  context past the first page — agent only saw `sheets.first()`.
-- **After:** One VLM call per sheet, then merge results (concat
-  storyline_summary, dedupe key_moments, union characters_observed).
-- **Files:** [MontageAgent.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/agents/MontageAgent.kt).
-
-### Ingest filters
-
-#### PhotoIngest.Filter
-
-- New filter parameters with sensible defaults:
-  - `cameraOnly = true` — MediaStore RELATIVE_PATH whitelist on `DCIM/`,
-    drops Pictures/Screenshots, Pictures/WeChat, BaiduNetdisk, Telegram,
-    Download, etc. Cuts asset count by ~50% on a typical phone.
-  - `maxVideoSizeBytes = 100 MB` — skip oversized videos that would burn
-    CPU on frame extraction + transcoding.
-  - `maxImageSizeBytes = 50 MB` — skip RAW exports / panoramas.
-  - `minImageSizeBytes = 50 KB` — skip thumbnail-sized chat fragments.
-- Uses `MediaStore.MediaColumns.RELATIVE_PATH` (API 29+, our minSdk is 31).
-- **Files:** [PhotoIngest.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/ingest/PhotoIngest.kt).
-
-### Prompts — anti-example-leak
-
-- **Before:** MONTAGE / AUDIENCE / DIRECTOR system prompts contained
-  concrete example values inside the JSON schema:
-  ```
-  "characters_observed": ["主角A：穿蓝衣女孩", "主角B：父亲"],
-  "narrative_arc": ["开场远景", "主角入场", "关键互动", "情绪高潮", "余韵收尾"],
-  ```
-- **Symptom:** Gemma 4 E2B (2B params) treated these as ground truth and
-  copied them verbatim into outputs regardless of actual photo content.
-  Every event had the same characters and arc.
-- **After:** Replaced concrete values with `<...>` placeholder syntax +
-  added explicit "do not copy schema placeholders" instruction.
-- **Files:** [PromptStrings.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/agents/PromptStrings.kt).
-
-### Monitoring
-
-#### PerfTimer + perf.json
-
-- Wraps each agent call + render in `System.nanoTime` measurements.
-  Persisted to `filesDir/decisions/<eventId>/perf.json`.
-- UI shows per-event one-line summary: "总 52s · 感知 3s (148 张, 缓存 72) ·
-  browse 15s audience 4s ...".
-- **Files:** new [PerfTimer.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/PerfTimer.kt).
-
-#### Per-event perf log line
-
-- One line in logcat per event: `perf evt_002:
-  encoder=h264_mediacodec total=52808ms render=2400ms ...`
-- Greppable via `adb logcat | grep perf`.
-
-### Tests
-
-#### JsonExtractorTest
-
-- 10 cases: clean object, nested braces, code-fence wrapper, `<think>`
-  tag, prose prefix/suffix, escaped quotes inside strings, unclosed braces,
-  garbage, array extraction.
-- Run via `./gradlew :app:testDebugUnitTest`. Catches regressions in the
-  every-agent JSON-extract codepath. 10/10 passed in 25 s.
-- **Files:** new [test/.../JsonExtractorTest.kt](android/app/src/test/java/com/google/ai/edge/gallery/customtasks/vlogpilot/agents/JsonExtractorTest.kt).
-
-### Documentation
-
-#### README + setup-device.ps1 wording
-
-- **Before:** "Support image — only if you want vision inputs (off keeps
-  things simpler)" implied it was optional for VlogPilot too.
-- **After:** Now correct: VlogPilot does not gate on the import-time
-  `Support image` flag at all (AgentRuntime always passes
-  `supportImage = true` to LiteRT-LM at runtime). Other vision tasks like
-  LLM Ask Image still want it on, so keeping it on is recommended.
-- **Files:** [README.md](README.md), [scripts/setup-device.ps1](scripts/setup-device.ps1).
-
-### Bundled assets
-
-- `assets/fonts/SourceHanSansSC-Bold.otf` — 8.5 MB, Adobe Source Han
-  Sans CN Bold subset, for CJK captions in ffmpeg drawtext.
-- `assets/bgm/{warm,cool,vibrant,muted,cinematic,vintage,neutral}.mp3` —
-  47 MB total, 7 royalty-free tracks copied over from
-  `pc-pilot/assets/bgm/`. BgmManager picks based on Director's tone.
-
-### Files
-
-- 5 new Kotlin sources:
-  - [VlogPilotRootScreen.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/VlogPilotRootScreen.kt)
-  - [perception/PerceptionCache.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/perception/PerceptionCache.kt)
-  - [render/EncoderProbe.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/render/EncoderProbe.kt)
-  - [worker/DecisionStore.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/DecisionStore.kt)
-  - [worker/PerfTimer.kt](android/app/src/main/java/com/google/ai/edge/gallery/customtasks/vlogpilot/worker/PerfTimer.kt)
-- 1 new test:
-  [agents/JsonExtractorTest.kt](android/app/src/test/java/com/google/ai/edge/gallery/customtasks/vlogpilot/agents/JsonExtractorTest.kt)
-- 26 modified Kotlin sources, 1 modified Gradle build script,
-  1 modified PowerShell setup script, 1 modified README.
-
-### Known gaps (deferred to v3.2+)
-
-| Gap | Workaround now | Plan |
+| 缺口 | 当前变通方案 | 计划 |
 |---|---|---|
-| `yolo26n_int8.tflite` not bundled / sourced | sceneClass = "unknown" for everyone, fine for downstream | Find or train a small YOLO TFLite |
-| `mobilefacenet.tflite` not bundled / sourced | personId = UNK, no person-based shot filtering | Same |
-| `mobileclip2_*.tflite` only available as 340 MB+ float files | CLIP image/text embeddings empty, recall falls back to sharpness | Find a sub-50 MB int8 variant |
-| eventId is a per-run ordinal, not content-stable | Resume works only when segmentation is identical | Switch to `evt_<date>_<contentHash>` |
-| Worker model recovery on process kill is "tap retry" | SharedPreferences-backed clear error, manual retry | Wire HiltWorker + reconstruct Model from gallery state |
-| Single-line ffmpeg encoder probe runs on every fresh process | <100 ms cost, fine | Could persist probe result across app launches |
+| `yolo26n_int8.tflite` 未捆绑/未获取 | sceneClass = "unknown"，对下游无影响 | 寻找或训练小型 YOLO TFLite |
+| `mobilefacenet.tflite` 未捆绑/未获取 | personId = UNK，无基于人物的镜头过滤 | 同上 |
+| `mobileclip2_*.tflite` 仅 340 MB+ float 文件可用 | CLIP 图像/文本嵌入为空，召回回退到清晰度 | 寻找 sub-50 MB int8 变体 |
+| eventId 是每运行序数，非内容稳定 | 仅当分割完全相同时恢复才有效 | 切换到 `evt_<date>_<contentHash>` |
+| 进程杀死时 Worker 模型恢复为"点击重试" | SharedPreferences 支撑的清晰错误，手动重试 | 接入 HiltWorker + 从 gallery 状态重建 Model |
+| 单行 ffmpeg 编码器探测每次新进程都运行 | <100 ms 成本，可接受 | 可持久化探测结果跨应用启动 |
 
 ---
 
-## v3.0 — Initial Android port (2026-05-07)
+## v3.0 — 初始 Android 移植 (2026-05-07)
 
-Pushed as commit [`dc46efe`](https://github.com/frankqwang/llm-app/commit/dc46efe).
+推送提交 `dc46efe`。
 
-The PC-side pc-pilot Python pipeline (Browser → Director → Editor →
-Critic) ported to Android as a new VlogPilot custom task. All inference
-runs on-device once Gemma 4 is imported. 38 Kotlin files, ~3,800 LoC.
+PC 端 pc-pilot Python 流水线（Browser → Director → Editor → Critic）移植到 Android 作为新的 VlogPilot 自定义任务。所有推理在 Gemma 4 导入后设备端运行。38 个 Kotlin 文件，~3,800 行代码。
 
-Stack:
-- VLM: Gemma 4 E2B-it int4 via litertlm 0.11.0 (MTP-accelerated)
-- Object detection: Ultralytics YOLO26n int8 TFLite
-- Face: MediaPipe FaceLandmarker + MobileFaceNet TFLite
+技术栈：
+- VLM: Gemma 4 E2B-it int4 via litertlm 0.11.0（MTP 加速）
+- 目标检测: Ultralytics YOLO26n int8 TFLite
+- 人脸: MediaPipe FaceLandmarker + MobileFaceNet TFLite
 - CLIP: MobileCLIP2-S1 dual-tower TFLite
 - NSFW: AdamCodd ViT int8 ONNX
-- Render: ffmpeg-kit-16kb 6.1.1
+- 渲染: ffmpeg-kit-16kb 6.1.1
 
-A v3.0.1 follow-up commit [`9b841f8`](https://github.com/frankqwang/llm-app/commit/9b841f8)
-removed the parallel ModelDownloader for Gemma 4 in favour of the
-gallery's existing `ModelAllowlist` + `DownloadWorker` infra, and made
-AgentRuntime reuse an already-initialized engine if the user opened
-Gemma 4 from another task first.
-
-See the commit message for v3.0 for the full M1-M5 milestone breakdown.
+v3.0.1 跟进提交 `9b841f8` 移除了 Gemma 4 的并行 ModelDownloader，改用 gallery 现有的 `ModelAllowlist` + `DownloadWorker` 基础设施，并使 AgentRuntime 在用户从其他任务先打开 Gemma 4 时复用已初始化的引擎。
