@@ -86,13 +86,14 @@ import kotlinx.coroutines.withContext
 @Composable
 internal fun IterationSheet(
   decisions: EventDecisions,
+  initialTargetShotOrder: Int? = null,
   onDismiss: () -> Unit,
   onSubmit: (com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.IterationFeedback) -> Unit,
 ) {
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
   var selectedActions by remember { mutableStateOf<Set<QuickAction>>(emptySet()) }
   var feedbackText by remember { mutableStateOf("") }
-  var targetedShotOrder by remember { mutableStateOf<Int?>(null) }
+  var targetedShotOrder by remember(initialTargetShotOrder) { mutableStateOf(initialTargetShotOrder) }
 
   val baseVersion = decisions.versionCount.coerceAtLeast(1)
   val timeline = decisions.timelineFinal ?: decisions.timelineV1

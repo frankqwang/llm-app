@@ -44,7 +44,10 @@ class VideoRenderer(private val context: Context) {
         Log.w(TAG, "asset missing for shot ${spec.order}")
         continue
       }
-      val r = ShotRenderer.render(context, asset, spec, fontPath, workDir)
+      val cacheEntry = ShotRenderCache.entry(context, asset, spec, fontPath != null)
+      val r = ShotRenderCache.load(cacheEntry)
+        ?: ShotRenderer.render(context, asset, spec, fontPath, workDir)
+          ?.let { ShotRenderCache.store(cacheEntry, it) }
       if (r == null) {
         Log.w(TAG, "shot ${spec.order} render failed")
         continue

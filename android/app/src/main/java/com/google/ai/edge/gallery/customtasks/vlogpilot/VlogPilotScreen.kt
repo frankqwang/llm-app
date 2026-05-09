@@ -123,20 +123,30 @@ fun VlogPilotScreen(
 ) {
   val state by viewModel.state.collectAsState()
   val decisions by viewModel.decisions.collectAsState()
+  val projects by viewModel.projects.collectAsState()
   val progress by viewModel.progress.collectAsState()
   val runConfig by viewModel.runConfig.collectAsState()
   val eventSelection by viewModel.eventSelection.collectAsState()
   val activeIteration by viewModel.activeIteration.collectAsState()
   val curatorAssets by viewModel.curatorAssets.collectAsState()
   val curatorLoading by viewModel.curatorLoading.collectAsState()
+  val albumAssets by viewModel.albumAssets.collectAsState()
+  val albumVisibleCount by viewModel.albumVisibleCount.collectAsState()
+  val albumLoading by viewModel.albumLoading.collectAsState()
+  val albumError by viewModel.albumError.collectAsState()
+  val assetUsage by viewModel.assetUsage.collectAsState()
+  val operation by viewModel.operation.collectAsState()
   val context = LocalContext.current
-  var selectedTab by remember { mutableStateOf(VlogPilotTab.Stories) }
-  var selectedAdvancedTab by remember { mutableStateOf(VlogPilotAdvancedTab.Process) }
+  var selectedTab by remember { mutableStateOf(VlogPilotTab.Create) }
   var selectedStoryCategory by remember { mutableStateOf(StoryBrowseCategory.Recommended) }
   var selectedStorySort by remember { mutableStateOf(StorySortMode.Recommended) }
+  var selectedVideoCategory by remember { mutableStateOf(VideoBrowseCategory.All) }
+  var selectedVideoSort by remember { mutableStateOf(VideoSortMode.Recent) }
   var selectedStoryId by remember { mutableStateOf<String?>(null) }
+  var focusedVideoEventId by remember { mutableStateOf<String?>(null) }
   // When non-null, the bottom-sheet feedback editor is open targeting this event.
   var iterationSheetEventId by remember { mutableStateOf<String?>(null) }
+  var iterationSheetTargetOrder by remember { mutableStateOf<Int?>(null) }
   // Full-screen curator overlay — when true, replaces the main tabbed view.
   var curatorOpen by remember { mutableStateOf(false) }
   // Inline error banner shown inside CuratorScreen when submit fails (e.g. no model imported).
@@ -205,7 +215,7 @@ fun VlogPilotScreen(
     }
   }
 
-  val running = state is PipelineState.Running || state is PipelineState.Scanning
+  val primaryPipelineRunning = operation.blocksPrimaryPipeline
 
   // Full-screen curator overlay — replaces the tabbed body when active. Dialogs
   // (StoryDetail / IterationSheet) below this composable still render normally.
@@ -228,7 +238,7 @@ fun VlogPilotScreen(
           curatorError = null
           viewModel.submitCuratedRequest(selectedIds, intentText, model)
           curatorOpen = false
-          selectedTab = VlogPilotTab.Videos
+          selectedTab = VlogPilotTab.Works
         } else {
           // Keep curator open so the user doesn't lose their selection + intent text.
           // Banner explains what they need to do next.
@@ -251,12 +261,11 @@ fun VlogPilotScreen(
       WorkspaceTabs(selected = selectedTab, onSelect = { selectedTab = it })
     }
 
-    val ready = state as? PipelineState.Ready
     when (selectedTab) {
-      VlogPilotTab.Stories -> {
+      VlogPilotTab.Create -> {
         val manifest = eventSelection
         when {
-          manifest == null && running -> item {
+          manifest == null && primaryPipelineRunning -> item {
             StoryProgressCard(
               state = state,
               progress = progress,
@@ -273,7 +282,7 @@ fun VlogPilotScreen(
                   selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
                 }
               },
-              onVideosClick = { selectedTab = VlogPilotTab.Videos },
+              onVideosClick = { selectedTab = VlogPilotTab.Works },
               onCurateClick = {
                 requireAlbumPermission {
                   viewModel.loadCuratorAssets()
@@ -288,7 +297,7 @@ fun VlogPilotScreen(
               StoryShelf(
                 manifest = manifest,
                 runConfig = runConfig,
-                running = running,
+                running = primaryPipelineRunning,
                 progress = progress,
                 decisions = decisions,
                 selectedCategory = selectedStoryCategory,
@@ -311,33 +320,70 @@ fun VlogPilotScreen(
         }
       }
 
-      VlogPilotTab.Videos -> {
-        if (decisions.isEmpty()) {
+      VlogPilotTab.Works -> {
+        if (decisions.isEmpty() && projects.isEmpty()) {
           item {
             EmptyActionCard(
               state = state,
-              title = "还没有视频",
-              message = "先去挑一组故事，我会帮你剪成一条回忆视频。",
-              actionLabel = "去挑故事",
-              onAction = { selectedTab = VlogPilotTab.Stories },
+              title = "还没有作品",
+              message = "先在创作页选推荐故事，或手动挑素材生成第一版。",
+              actionLabel = "去创作",
+              onAction = { selectedTab = VlogPilotTab.Create },
             )
           }
         } else {
-          if (activeIteration != null) {
-            item {
-              IterationProgressStrip(
-                snapshot = activeIteration,
-                onDismiss = viewModel::dismissIterationStatus,
-              )
-            }
-          }
-          items(decisions, key = { "video-${it.eventId}" }) { decision ->
-            ResultEventCard(
-              d = decision,
-              onOpenIterationSheet = { iterationSheetEventId = it },
-              onChangeStory = { selectedTab = VlogPilotTab.Stories },
+          item {
+            VideoShelf(
+              projects = projects,
+              decisions = decisions,
+              activeIteration = activeIteration,
+              selectedCategory = selectedVideoCategory,
+              selectedSort = selectedVideoSort,
+              onCategorySelect = { selectedVideoCategory = it },
+              onSortSelect = { selectedVideoSort = it },
+              onOpenIterationSheet = { eventId, shotOrder ->
+                iterationSheetEventId = eventId
+                iterationSheetTargetOrder = shotOrder
+              },
+              onChangeStory = { selectedTab = VlogPilotTab.Create },
+              onDismissIteration = viewModel::dismissIterationStatus,
+              focusedEventId = focusedVideoEventId,
+              onFocusConsumed = { focusedVideoEventId = null },
             )
           }
+        }
+      }
+
+      VlogPilotTab.Assets -> {
+        item {
+          AssetLibraryTab(
+            assets = albumAssets,
+            visibleCount = albumVisibleCount,
+            loading = albumLoading,
+            errorMessage = albumError,
+            usageByAssetId = assetUsage,
+            decisions = decisions,
+            manifest = eventSelection,
+            onLoad = {
+              requireAlbumPermission {
+                viewModel.loadAlbumAssets()
+              }
+            },
+            onRefresh = {
+              requireAlbumPermission {
+                viewModel.loadAlbumAssets(force = true)
+              }
+            },
+            onLoadMore = viewModel::loadMoreAlbumAssets,
+            onOpenStory = { eventId ->
+              selectedStoryId = eventId
+              selectedTab = VlogPilotTab.Create
+            },
+            onOpenVideo = { eventId ->
+              focusedVideoEventId = eventId
+              selectedTab = VlogPilotTab.Works
+            },
+          )
         }
       }
 
@@ -345,43 +391,12 @@ fun VlogPilotScreen(
         item {
           SettingsCard(
             runConfig = runConfig,
-            running = running,
+            running = primaryPipelineRunning,
             onIntentSelect = viewModel::setIntent,
             onPowerSelect = viewModel::setPowerProfile,
           )
         }
-      }
-
-      VlogPilotTab.Advanced -> {
-        item {
-          AdvancedTabPicker(selected = selectedAdvancedTab, onSelect = { selectedAdvancedTab = it })
-        }
-        when (selectedAdvancedTab) {
-          VlogPilotAdvancedTab.Process -> {
-            if (decisions.isEmpty()) {
-              item { EmptyProcessCard(state, "还没有技术过程", "开始生成后，这里会显示每一步 Agent 输出和渲染状态。") }
-            } else {
-              items(decisions, key = { "process-${it.eventId}" }) { decision ->
-                EventDecisionCard(decision)
-              }
-            }
-          }
-          VlogPilotAdvancedTab.Assets -> {
-            if (ready != null) {
-              item { AlbumPreviewCard(assets = ready.assets, events = ready.events) }
-            }
-            if (decisions.isEmpty()) {
-              item { EmptyProcessCard(state, "还没有素材详情", "故事开始处理后，这里会显示每张素材的感知分数和 VLM 标签。") }
-            } else {
-              items(decisions, key = { "assets-${it.eventId}" }) { decision ->
-                AssetManagementCard(decision)
-              }
-            }
-          }
-          VlogPilotAdvancedTab.Prompts -> {
-            item { PromptCatalog() }
-          }
-        }
+        item { PromptDebugCard() }
       }
     }
   }
@@ -412,12 +427,17 @@ fun VlogPilotScreen(
     } else {
       IterationSheet(
         decisions = target,
-        onDismiss = { iterationSheetEventId = null },
+        initialTargetShotOrder = iterationSheetTargetOrder,
+        onDismiss = {
+          iterationSheetEventId = null
+          iterationSheetTargetOrder = null
+        },
         onSubmit = { feedback ->
           viewModel.submitFeedback(eid, feedback)
           iterationSheetEventId = null
-          // Auto-switch to Videos tab so the user sees the progress strip.
-          selectedTab = VlogPilotTab.Videos
+          iterationSheetTargetOrder = null
+          // Auto-switch to Works tab so the user sees the progress strip.
+          selectedTab = VlogPilotTab.Works
         },
       )
     }

@@ -30,7 +30,7 @@ class VlogPilotTask @Inject constructor() : CustomTask {
       category = Category.EXPERIMENTAL,
       icon = Icons.Outlined.Movie,
       description =
-        "Turn the last 30 days of your photo album into AI-curated vlog candidates. " +
+        "Turn the last 90 days of your photo album into AI-curated vlog candidates. " +
           "Browser → Director → Editor → Critic agents run fully on-device with Gemma 4 E2B-IT.",
       shortDescription = "AI vlog from your album",
       models = mutableListOf(),

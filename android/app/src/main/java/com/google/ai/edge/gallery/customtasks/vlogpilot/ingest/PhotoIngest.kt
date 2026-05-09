@@ -33,15 +33,16 @@ object PhotoIngest {
   )
 
   /** Read all images + videos taken within `windowDays` of now, filtered by
-   *  [filter]. Defaults skip non-camera (screenshots / WeChat / Downloads),
-   *  oversized videos, and tiny / oversized images. */
+   *  [filter]. Pass `windowDays <= 0` to scan the full MediaStore history.
+   *  Defaults skip non-camera (screenshots / WeChat / Downloads), oversized
+   *  videos, and tiny / oversized images. */
   suspend fun loadRecent(
     context: Context,
-    windowDays: Int = 30,
+    windowDays: Int = 90,
     filter: Filter = Filter(),
   ): List<Asset> =
     withContext(Dispatchers.IO) {
-      val cutoffMs = System.currentTimeMillis() - windowDays.toLong() * 86_400_000L
+      val cutoffMs = if (windowDays <= 0) 0L else System.currentTimeMillis() - windowDays.toLong() * 86_400_000L
       val images = queryImages(context, cutoffMs, filter)
       val videos = queryVideos(context, cutoffMs, filter)
       pairLivePhotos(images, videos).sortedBy { it.takenEpochMs }
@@ -72,8 +73,8 @@ object PhotoIngest {
       MediaStore.Images.Media.ORIENTATION,
       MediaStore.Images.Media.RELATIVE_PATH,
     )
-    val sel = "${MediaStore.Images.Media.DATE_TAKEN} >= ?"
-    val args = arrayOf(cutoffMs.toString())
+    val sel = if (cutoffMs > 0L) "${MediaStore.Images.Media.DATE_TAKEN} >= ?" else null
+    val args = if (cutoffMs > 0L) arrayOf(cutoffMs.toString()) else null
     val out = mutableListOf<Asset>()
     context.contentResolver.query(
       MediaStore.Images.Media.EXTERNAL_CONTENT_URI, proj, sel, args, null,
@@ -130,8 +131,8 @@ object PhotoIngest {
       MediaStore.Video.Media.SIZE,
       MediaStore.Video.Media.RELATIVE_PATH,
     )
-    val sel = "${MediaStore.Video.Media.DATE_TAKEN} >= ?"
-    val args = arrayOf(cutoffMs.toString())
+    val sel = if (cutoffMs > 0L) "${MediaStore.Video.Media.DATE_TAKEN} >= ?" else null
+    val args = if (cutoffMs > 0L) arrayOf(cutoffMs.toString()) else null
     val out = mutableListOf<Asset>()
     context.contentResolver.query(
       MediaStore.Video.Media.EXTERNAL_CONTENT_URI, proj, sel, args, null,

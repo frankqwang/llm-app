@@ -117,15 +117,20 @@ import kotlinx.coroutines.withContext
 @Composable
 internal fun PromptCatalog() {
   PanelCard {
-    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-      SectionHeader(
-        icon = Icons.Outlined.Edit,
-        title = "当前 Prompt",
-        subtitle = "系统 prompt + 实际 user prompt 模板",
-      )
-      promptSpecs().forEach { spec ->
-        PromptCard(spec)
-      }
+    PromptCatalogInline()
+  }
+}
+
+@Composable
+internal fun PromptCatalogInline() {
+  Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    SectionHeader(
+      icon = Icons.Outlined.Edit,
+      title = "系统 Prompt",
+      subtitle = "系统 prompt + 实际 user prompt 模板",
+    )
+    promptSpecs().forEach { spec ->
+      PromptCard(spec)
     }
   }
 }

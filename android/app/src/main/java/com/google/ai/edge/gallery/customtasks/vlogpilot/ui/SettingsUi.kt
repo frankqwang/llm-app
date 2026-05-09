@@ -148,3 +148,39 @@ internal fun SettingsCard(
   }
 }
 
+@Composable
+internal fun PromptDebugCard() {
+  var expanded by remember { mutableStateOf(false) }
+  PanelCard {
+    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Icon(Icons.Outlined.Visibility, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+          Text("系统 Prompt / 调试信息", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+          Text("默认收起，需要排查生成策略时再展开。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        FilledTonalButton(
+          onClick = { expanded = !expanded },
+          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+          Icon(
+            imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+          )
+          Spacer(Modifier.width(4.dp))
+          Text(if (expanded) "收起" else "展开", maxLines = 1)
+        }
+      }
+      if (expanded) {
+        HorizontalDivider()
+        PromptCatalogInline()
+      }
+    }
+  }
+}
+

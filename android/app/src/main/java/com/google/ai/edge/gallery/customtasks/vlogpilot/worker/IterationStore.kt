@@ -130,7 +130,7 @@ object IterationStore {
   }
 
   /** Returns the path of the version immediately before currentVersion, if any.
-   *  Used by the 上一版 arrow on ResultEventCard. */
+   *  Used by the 上一版 arrow on the video shelf detail view. */
   fun previousVersionPath(context: Context, eventId: String): String? {
     val h = loadHistory(context, eventId) ?: return null
     val prev = h.iterations.filter { it.version < h.currentVersion }
@@ -154,6 +154,17 @@ object IterationStore {
       File(dir, "timeline.json").writeText(json.encodeToString(timelineUsed))
     } catch (t: Throwable) {
       Log.w(TAG, "writeIterationArtifacts failed for $eventId/$iterationId: ${t.message}")
+    }
+  }
+
+  fun loadIterationTimeline(context: Context, eventId: String, version: Int): Timeline? {
+    val file = File(iterationDir(context, eventId, "iter_%03d".format(version)), "timeline.json")
+    if (!file.isFile) return null
+    return try {
+      json.decodeFromString<Timeline>(file.readText())
+    } catch (t: Throwable) {
+      Log.w(TAG, "loadIterationTimeline failed for $eventId/v$version: ${t.message}")
+      null
     }
   }
 

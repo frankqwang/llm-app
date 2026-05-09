@@ -10,6 +10,13 @@
 package com.google.ai.edge.gallery.customtasks.vlogpilot.agents
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Rect
+import android.graphics.RectF
+import android.graphics.Typeface
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.MediaLoader
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.Recall
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
@@ -25,6 +32,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.util.Locale
 
 class EditorAgent(
   private val context: Context,
@@ -65,6 +73,9 @@ class EditorAgent(
                 else ColorGradeFromTone.pick(directorTone)
     if (candidates.isEmpty()) return null
     if (candidates.size == 1) return composeSpec(order, request, candidates[0], "only candidate", grade)
+    if (shouldTrustRecall(candidates)) {
+      return composeSpec(order, request, candidates[0], "high-confidence recall pick", grade)
+    }
 
     val visualCandidates = candidates.mapNotNull { candidate ->
       loadCandidateBitmap(candidate)?.let { candidate to it }
@@ -122,14 +133,94 @@ $tagSummary
     return composeSpec(order, request, chosen, combinedRationale, grade)
   }
 
-  private fun loadCandidateBitmap(candidate: Recall.Candidate) =
-    if (candidate.videoTrim != null && candidate.asset.mediaType != MediaType.IMAGE) {
-      val previewSec = (candidate.videoTrim.startSec + candidate.videoTrim.endSec) / 2f
-      MediaLoader.loadVideoFrame(context, candidate.asset, previewSec, maxSide = 512)
+  private fun shouldTrustRecall(candidates: List<Recall.Candidate>): Boolean {
+    val top = candidates.firstOrNull() ?: return false
+    val runnerUp = candidates.drop(1).firstOrNull { it.asset.id != top.asset.id } ?: candidates.getOrNull(1)
+    val gap = top.score - (runnerUp?.score ?: 0f)
+    return top.score >= 0.74f && gap >= 0.18f
+  }
+
+  private fun loadCandidateBitmap(candidate: Recall.Candidate): Bitmap? =
+    if (candidate.asset.mediaType != MediaType.IMAGE) {
+      loadVideoStrip(candidate)
+        ?: candidate.videoTrim?.let { trim ->
+          val previewSec = (trim.startSec + trim.endSec) / 2f
+          MediaLoader.loadVideoFrame(context, candidate.asset, previewSec, maxSide = 512)
+        }
         ?: MediaLoader.loadImage(context, candidate.asset, maxSide = 512)
     } else {
       MediaLoader.loadImage(context, candidate.asset, maxSide = 512)
     }
+
+  private fun loadVideoStrip(candidate: Recall.Candidate): Bitmap? {
+    val asset = candidate.asset
+    val durSec = asset.durationMs.takeIf { it > 0 }?.let { it / 1000f } ?: return null
+    val trim = candidate.videoTrim
+    val timestamps = if (trim != null) {
+      val start = trim.startSec.coerceIn(0f, durSec)
+      val end = trim.endSec.coerceIn(start, durSec)
+      val span = (end - start).coerceAtLeast(0.3f)
+      listOf(
+        start + span * 0.18f,
+        start + span * 0.50f,
+        start + span * 0.82f,
+      )
+    } else {
+      val best = candidate.perception.videoInsight.bestMomentSec
+        .takeIf { it > 0f }
+        ?: candidate.perception.videoInsight.bestMomentIndex
+          .takeIf { it > 0 }
+          ?.let { candidate.perception.videoInsight.frameTimestampsSec.getOrNull(it - 1) }
+        ?: (durSec / 2f)
+      listOf(best - 0.7f, best, best + 0.7f)
+    }.map { it.coerceIn(0f, durSec) }
+
+    val frames = MediaLoader.sampleVideoFramesAt(context, asset, timestamps, maxSide = VIDEO_STRIP_CELL_H)
+    if (frames.isEmpty()) return null
+    return drawVideoStrip(frames)
+  }
+
+  private fun drawVideoStrip(frames: List<Pair<Float, Bitmap>>): Bitmap {
+    val sheet = Bitmap.createBitmap(VIDEO_STRIP_CELL_W * frames.size, VIDEO_STRIP_CELL_H, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(sheet).apply { drawColor(Color.BLACK) }
+    frames.forEachIndexed { index, (timestampSec, bitmap) ->
+      drawStripFrame(canvas, bitmap, index * VIDEO_STRIP_CELL_W, 0)
+      drawStripBadge(canvas, (index * VIDEO_STRIP_CELL_W).toFloat(), 0f, timestampSec)
+      bitmap.recycle()
+    }
+    return sheet
+  }
+
+  private fun drawStripFrame(canvas: Canvas, bitmap: Bitmap, x: Int, y: Int) {
+    val srcAspect = bitmap.width.toFloat() / bitmap.height.toFloat().coerceAtLeast(1f)
+    val dstAspect = VIDEO_STRIP_CELL_W.toFloat() / VIDEO_STRIP_CELL_H.toFloat()
+    val src = if (srcAspect > dstAspect) {
+      val cropW = (bitmap.height * dstAspect).toInt().coerceAtLeast(1)
+      val left = ((bitmap.width - cropW) / 2).coerceAtLeast(0)
+      Rect(left, 0, (left + cropW).coerceAtMost(bitmap.width), bitmap.height)
+    } else {
+      val cropH = (bitmap.width / dstAspect).toInt().coerceAtLeast(1)
+      val top = ((bitmap.height - cropH) / 2).coerceAtLeast(0)
+      Rect(0, top, bitmap.width, (top + cropH).coerceAtMost(bitmap.height))
+    }
+    val dst = Rect(x, y, x + VIDEO_STRIP_CELL_W, y + VIDEO_STRIP_CELL_H)
+    canvas.drawBitmap(bitmap, src, dst, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+  }
+
+  private fun drawStripBadge(canvas: Canvas, x: Float, y: Float, timestampSec: Float) {
+    val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(225, 20, 20, 20) }
+    val rect = RectF(x + 8f, y + 8f, x + 92f, y + 40f)
+    canvas.drawRoundRect(rect, 14f, 14f, bg)
+    val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.WHITE
+      typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+      textSize = 18f
+      textAlign = Paint.Align.CENTER
+    }
+    val text = "${"%.1f".format(Locale.US, timestampSec)}s"
+    val cy = rect.centerY() - (textPaint.descent() + textPaint.ascent()) / 2f
+    canvas.drawText(text, rect.centerX(), cy, textPaint)
+  }
 
   private fun composeSpec(
     order: Int,
@@ -170,6 +261,9 @@ $tagSummary
   }
 
   companion object {
+    private const val VIDEO_STRIP_CELL_W = 220
+    private const val VIDEO_STRIP_CELL_H = 300
+
     private val TRANSITION_MAP = mapOf(
       "cut" to TransitionKind.CUT,
       "fade" to TransitionKind.FADE,

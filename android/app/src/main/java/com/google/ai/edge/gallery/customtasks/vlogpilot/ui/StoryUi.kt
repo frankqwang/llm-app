@@ -126,8 +126,8 @@ internal fun StoryHeroCard(
     Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
       SectionHeader(
         icon = Icons.Outlined.Movie,
-        title = "帮你做一条回忆视频",
-        subtitle = "我会从最近 30 天里找出适合剪成 vlog 的几组故事。",
+        title = "创作一条 AI 回忆",
+        subtitle = "我会从最近 90 天里找出适合轻剪辑的故事，也可以由你手动挑素材。",
       )
       if (state is PipelineState.Error) {
         Text(
@@ -137,13 +137,13 @@ internal fun StoryHeroCard(
         )
       } else {
         Text(
-          "点一下开始，我会先帮你看相册，再把适合剪的视频故事放到这里。",
+          "点一下开始，我会先帮你看相册，再把适合剪的故事放到这里。",
           style = MaterialTheme.typography.bodyMedium,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
       }
       Button(modifier = Modifier.fillMaxWidth(), onClick = onStartClick) {
-        Text("开始挑故事")
+        Text("扫描推荐")
       }
       // Secondary CTA — same level visually but "或者" framing makes it
       // optional. Power users who already know what they want skip the auto
@@ -167,7 +167,7 @@ internal fun StoryHeroCard(
           )
         }
         FilledTonalButton(modifier = Modifier.fillMaxWidth(), onClick = onVideosClick) {
-          Text("只看已生成的视频")
+          Text("查看作品")
         }
       }
     }
@@ -326,6 +326,7 @@ internal fun InlineProcessPanel(
   onCancel: () -> Unit,
 ) {
   val friendly = friendlyProgress(progress, making = true)
+  val refreshOnly = isStoryRefreshProgress(progress)
   val fraction = remember(friendly.current, friendly.total) {
     if (friendly.total > 0) (friendly.current.toFloat() / friendly.total.toFloat()).coerceIn(0f, 1f) else null
   }
@@ -343,7 +344,7 @@ internal fun InlineProcessPanel(
       ) {
         Icon(Icons.Outlined.Visibility, contentDescription = null, modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-          Text("制作过程", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+          Text(if (refreshOnly) "重扫过程" else "制作过程", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
           Text(
             friendly.title,
             style = MaterialTheme.typography.bodySmall,
@@ -455,43 +456,40 @@ internal fun StoryShelf(
         onMakeSelectedStories = onMakeSelectedStories,
       )
 
-      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        StoryCategoryRail(
-          categories = categories,
-          selected = selectedCategory,
-          candidates = manifest.candidates,
-          onSelect = onCategorySelect,
-          modifier = Modifier.width(84.dp),
-        )
+      StoryCategoryChips(
+        categories = categories,
+        selected = selectedCategory,
+        candidates = manifest.candidates,
+        onSelect = onCategorySelect,
+      )
 
-        Surface(
-          modifier = Modifier.weight(1f),
-          shape = RoundedCornerShape(14.dp),
-          color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
-          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f)),
-        ) {
-          Column {
-            if (filtered.isEmpty()) {
-              Box(
-                modifier = Modifier
-                  .fillMaxWidth()
-                  .padding(18.dp),
-                contentAlignment = Alignment.Center,
-              ) {
-                Text("这一类暂时没有故事", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-              }
-            } else {
-              filtered.forEachIndexed { index, candidate ->
-                StoryListItem(
-                  candidate = candidate,
-                  selected = candidate.eventId in runConfig.onlySelectedEventIds,
-                  enabled = !running,
-                  onOpen = { onOpenStory(candidate.eventId) },
-                  onToggle = { onToggleStory(candidate.eventId) },
-                )
-                if (index != filtered.lastIndex) {
-                  HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
-                }
+      Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f)),
+      ) {
+        Column {
+          if (filtered.isEmpty()) {
+            Box(
+              modifier = Modifier
+                .fillMaxWidth()
+                .padding(18.dp),
+              contentAlignment = Alignment.Center,
+            ) {
+              Text("这一类暂时没有故事", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+          } else {
+            filtered.forEachIndexed { index, candidate ->
+              StoryListItem(
+                candidate = candidate,
+                selected = candidate.eventId in runConfig.onlySelectedEventIds,
+                enabled = !running,
+                onOpen = { onOpenStory(candidate.eventId) },
+                onToggle = { onToggleStory(candidate.eventId) },
+              )
+              if (index != filtered.lastIndex) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
               }
             }
           }
@@ -517,6 +515,7 @@ internal fun StoryShelfHeader(
   onCancel: () -> Unit,
   onMakeSelectedStories: () -> Unit,
 ) {
+  val refreshOnly = running && isStoryRefreshProgress(progress)
   Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
     Row(
       modifier = Modifier.fillMaxWidth(),
@@ -525,7 +524,7 @@ internal fun StoryShelfHeader(
     ) {
       Column(modifier = Modifier.weight(1f)) {
         Text(
-          "故事货架",
+          "创作台",
           style = MaterialTheme.typography.titleMedium,
           fontWeight = FontWeight.SemiBold,
         )
@@ -570,10 +569,10 @@ internal fun StoryShelfHeader(
           }
           Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Button(onClick = onMakeSelectedStories, enabled = !running) {
-              Text(if (running) "制作中" else "开始制作")
+              Text(if (running) if (refreshOnly) "重扫中" else "制作中" else "开始制作")
             }
             Text(
-              if (running) "制作进行中" else "取消选择",
+              if (running) if (refreshOnly) "正在更新候选" else "制作进行中" else "取消选择",
               modifier = Modifier.clickable(enabled = !running) { onClearOnly() },
               style = MaterialTheme.typography.labelSmall,
               color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.78f),
@@ -614,6 +613,43 @@ internal fun StoryShelfHeader(
       Spacer(modifier = Modifier.weight(1f))
       if (runConfig.pinnedEventIds.isNotEmpty()) {
         Text("已优先 ${runConfig.pinnedEventIds.size}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+      }
+    }
+  }
+}
+
+private fun isStoryRefreshProgress(progress: ProgressSnapshot): Boolean =
+  isStoryRefreshStage(progress.stage)
+
+@Composable
+internal fun StoryCategoryChips(
+  categories: List<StoryBrowseCategory>,
+  selected: StoryBrowseCategory,
+  candidates: List<EventCandidateSnapshot>,
+  onSelect: (StoryBrowseCategory) -> Unit,
+) {
+  LazyRow(
+    modifier = Modifier.fillMaxWidth(),
+    horizontalArrangement = Arrangement.spacedBy(7.dp),
+    contentPadding = PaddingValues(horizontal = 1.dp),
+  ) {
+    items(categories) { category ->
+      val active = category == selected
+      val count = candidates.count { matchesStoryCategory(it, category) }
+      Surface(
+        modifier = Modifier.clickable { onSelect(category) },
+        shape = RoundedCornerShape(999.dp),
+        color = if (active) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.82f) else MaterialTheme.colorScheme.surface,
+        contentColor = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (active) 0f else 0.42f)),
+      ) {
+        Text(
+          "${category.label} $count",
+          modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+          style = MaterialTheme.typography.labelSmall,
+          fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+          maxLines = 1,
+        )
       }
     }
   }

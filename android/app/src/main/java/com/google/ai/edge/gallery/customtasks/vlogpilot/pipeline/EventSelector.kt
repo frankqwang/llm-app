@@ -123,7 +123,7 @@ object EventSelector {
     val intentScore = intentScore(intent, assets, perceptions)
     val scoutScore = scoutScore(intent, scout)
     val ageDays = ((nowMs - event.endEpochMs).coerceAtLeast(0L) / 86_400_000f)
-    val recencyScore = (1f - ageDays / 30f).coerceIn(0f, 1f)
+    val recencyScore = (1f - ageDays / 90f).coerceIn(0f, 1f)
     val gpsAssetCount = assets.count { it.latitude != null && it.longitude != null }
     val lowSignalPenalty = lowSignalPenalty(
       assets = assets,

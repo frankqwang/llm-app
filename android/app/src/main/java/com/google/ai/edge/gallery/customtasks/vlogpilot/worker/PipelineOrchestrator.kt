@@ -14,6 +14,10 @@ package com.google.ai.edge.gallery.customtasks.vlogpilot.worker
 
 import android.content.Context
 import android.util.Log
+import com.google.ai.edge.gallery.customtasks.vlogpilot.CharacterPlanner
+import com.google.ai.edge.gallery.customtasks.vlogpilot.ProjectStore
+import com.google.ai.edge.gallery.customtasks.vlogpilot.RhythmPlanner
+import com.google.ai.edge.gallery.customtasks.vlogpilot.TemplateCatalog
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.AgentRuntime
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.AudienceAgent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.CriticAgent
@@ -36,6 +40,7 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotRunConf
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.AudienceBrief
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.CaptionPolicy
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Critique
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.CriticVerdict
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.DirectorBrief
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
@@ -47,6 +52,7 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Pace
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Perception
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.RevisedRequest
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRequest
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotRole
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.ShotSpec
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Timeline
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.UserBrief
@@ -55,6 +61,7 @@ import com.google.ai.edge.gallery.data.Model
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlin.math.abs
 
 class PipelineOrchestrator(
   private val context: Context,
@@ -70,7 +77,7 @@ class PipelineOrchestrator(
   )
 
   suspend fun run(
-    windowDays: Int = 30,
+    windowDays: Int = 90,
     maxEvents: Int = 2,
     ingestFilter: PhotoIngest.Filter = PhotoIngest.Filter(),
     runConfig: VlogPilotRunConfig = VlogPilotRunConfig.load(context),
@@ -459,6 +466,7 @@ class PipelineOrchestrator(
       ),
     )
     IterationStore.clearPending(context, eventId)
+    syncProjectsQuietly()
     StateBreadcrumb.mark(
       context,
       "iterate_done",
@@ -720,6 +728,7 @@ class PipelineOrchestrator(
       ),
     )
     IterationStore.clearPending(context, eventId)
+    syncProjectsQuietly()
     StateBreadcrumb.mark(
       context,
       "iterate_done",
@@ -918,6 +927,59 @@ class PipelineOrchestrator(
   // body's HashMap call sites resolve to those. Earlier copies of this file had
   // both overloads coexisting; the MutableMap-typed copies were dead and have
   // been removed.)
+
+private fun cheapTimelineIssues(
+    timeline: Timeline,
+    director: DirectorBrief,
+    eventAssets: List<Asset>,
+  ): List<String> {
+    val issues = mutableListOf<String>()
+    val shots = timeline.shots.sortedBy { it.order }
+    if (shots.isEmpty()) return listOf("timeline is empty")
+
+    val expectedSlots = director.shotBlueprint.size.coerceAtLeast(1)
+    if (shots.size < minOf(4, expectedSlots)) {
+      issues += "too few filled shots (${shots.size}/$expectedSlots)"
+    }
+
+    val requiredOrders = director.shotBlueprint
+      .filter { it.role == ShotRole.OPENING || it.role == ShotRole.CLIMAX || it.role == ShotRole.CLOSING }
+      .map { it.position }
+      .toSet()
+    val filledOrders = shots.map { it.order }.toSet()
+    if (!filledOrders.containsAll(requiredOrders)) {
+      issues += "missing opening/climax/closing slot"
+    }
+
+    val total = shots.sumOf { it.durationSec.toDouble() }.toFloat()
+    val ratio = total / director.targetDurationSec.coerceAtLeast(1f)
+    if (ratio < 0.72f || ratio > 1.22f) {
+      issues += "duration off target (${"%.2f".format(ratio)}x)"
+    }
+
+    if (shots.zipWithNext().any { (a, b) -> a.assetId == b.assetId }) {
+      issues += "adjacent repeated asset"
+    }
+
+    val uniqueAssets = shots.map { it.assetId }.distinct().size
+    val minUnique = minOf(shots.size, eventAssets.size.coerceAtLeast(1), 3)
+    if (uniqueAssets < minUnique) {
+      issues += "not enough visual variety"
+    }
+
+    val captionCount = shots.count { it.caption.isNotBlank() }
+    if (shots.size >= 4 && captionCount == 0) {
+      issues += "no captions"
+    }
+
+    val durations = shots.map { it.durationSec }
+    val avg = total / shots.size
+    if (shots.size >= 5 && durations.all { abs(it - avg) < 0.15f }) {
+      issues += "monotone shot durations"
+    }
+
+    return issues
+  }
 
 private suspend fun buildTimeline(
     blueprint: List<ShotRequest>,
@@ -1335,6 +1397,7 @@ private suspend fun buildTimeline(
             DecisionStore.writeTimelineFinal(context, event.eventId, out.timeline)
             outputs[event.eventId] = out.outputPath
             IterationStore.recordInitialVersion(context, event.eventId, out.outputPath)
+            syncProjectsQuietly()
             progress(PipelineProgress.EventDone(event.eventId, out.outputPath))
           } else {
             progress(PipelineProgress.EventFailed(event.eventId, "render returned null (resume)"))
@@ -1351,6 +1414,10 @@ private suspend fun buildTimeline(
       progress(PipelineProgress.EventStage(event.eventId, "browse", "building event contact sheet and EventMemory"))
       val memory = timer.browse { montage.browse(event.eventId, eventAssets) }
       DecisionStore.writeMemory(context, event.eventId, memory)
+      val eventPerceptions = eventAssets.mapNotNull { asset ->
+        perceptions[asset.id]?.let { asset.id to it }
+      }.toMap()
+      val characterPlan = CharacterPlanner.build(memory, eventPerceptions)
 
       progress(PipelineProgress.EventStage(event.eventId, "audience", "deriving viewer hook, payoff, and pacing"))
       val rawBrief = timer.audience { audience.write(memory) }
@@ -1359,24 +1426,31 @@ private suspend fun buildTimeline(
 
       progress(PipelineProgress.EventStage(event.eventId, "director", "writing narrative arc and shot blueprint"))
       val signals = buildAvailableSignals(eventAssets, perceptions)
+      val template = TemplateCatalog.selectForMemory(memory, userBrief?.rawText.orEmpty())
       val signalsWithUser = if (userBrief != null && userBrief.rawText.isNotBlank()) {
         signals + "\n\n用户原话需求：「${userBrief.rawText}」（实际素材不足以完全满足时按你的判断处理）"
       } else {
         signals
-      }
+      } + "\n\n模板建议：${template.label}；人物一致性提示：${characterPlan.description}"
       val rawPlan = timer.director {
         director.draft(
           memory = memory,
           audience = brief,
           assetCount = eventAssets.size,
           availableSignals = signalsWithUser,
+          template = template,
         )
       }
-      val plan = applyUserBriefToDirector(rawPlan, userBrief, brief.pace)
+      val plan = RhythmPlanner.enforce(applyUserBriefToDirector(rawPlan, userBrief, brief.pace), template, brief.pace)
       DecisionStore.writeDirector(context, event.eventId, plan)
 
       progress(PipelineProgress.EventStage(event.eventId, "editor", "recalling candidates and selecting shot windows"))
-      val v1 = timer.editor { buildTimeline(plan.shotBlueprint, plan, event, eventAssets, perceptions, editor, mustHaveSubjects) }
+      val recallSubjects = (mustHaveSubjects + characterPlan.primarySubjects)
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .distinct()
+        .take(5)
+      val v1 = timer.editor { buildTimeline(plan.shotBlueprint, plan, event, eventAssets, perceptions, editor, recallSubjects) }
       DecisionStore.writeTimelineV1(context, event.eventId, v1)
 
       progress(PipelineProgress.EventStage(event.eventId, "critic", "reviewing storyboard and requesting fixes"))
@@ -1384,37 +1458,51 @@ private suspend fun buildTimeline(
       var working = v1
       var lastCritique: com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Critique? = null
       var aborted = false
-      critic_loop@ for (it in 1..MAX_CRITIC_ITER) {
-        val crit = timer.critic { critic.review(it, working, plan, memory, assetMap) }
-        critiques += crit
-        lastCritique = crit
-        when (crit.verdict) {
-          CriticVerdict.ACCEPT -> break@critic_loop
-          CriticVerdict.ABORT -> {
-            // Critic believes patches can't fix this. Ship the latest `working`
-            // (we have nothing better) but stop iterating so we don't burn
-            // additional model calls on a known dead end.
-            aborted = true
-            StateBreadcrumb.mark(
-              context,
-              "critic_abort",
-              "${event.eventId} iter=$it issues=${crit.issues.take(3).joinToString("; ")}",
-            )
-            Log.w(TAG, "critic abort on ${event.eventId} iter=$it: ${crit.issues.joinToString(" / ")}")
-            break@critic_loop
-          }
-          CriticVerdict.REVISE -> {
-            if (crit.revisedRequests.isEmpty()) {
-              // Malformed: model said REVISE but emitted no patches. Treat as
-              // accept-with-warning rather than spinning the loop forever.
+      val cheapIssues = cheapTimelineIssues(v1, plan, eventAssets)
+      if (cheapIssues.isEmpty()) {
+        val skipped = Critique(
+          iteration = 0,
+          issues = listOf("cheap timeline checks passed; visual critic skipped"),
+          verdict = CriticVerdict.ACCEPT,
+        )
+        critiques += skipped
+        lastCritique = skipped
+        StateBreadcrumb.mark(context, "critic_skip", "${event.eventId} cheap checks passed")
+        progress(PipelineProgress.EventStage(event.eventId, "critic", "cheap checks passed; skipping visual critic"))
+      } else {
+        StateBreadcrumb.mark(context, "critic_needed", "${event.eventId} ${cheapIssues.take(3).joinToString("; ")}")
+        critic_loop@ for (it in 1..MAX_CRITIC_ITER) {
+          val crit = timer.critic { critic.review(it, working, plan, memory, assetMap) }
+          critiques += crit
+          lastCritique = crit
+          when (crit.verdict) {
+            CriticVerdict.ACCEPT -> break@critic_loop
+            CriticVerdict.ABORT -> {
+              // Critic believes patches can't fix this. Ship the latest `working`
+              // (we have nothing better) but stop iterating so we don't burn
+              // additional model calls on a known dead end.
+              aborted = true
               StateBreadcrumb.mark(
                 context,
-                "critic_revise_empty",
-                "${event.eventId} iter=$it verdict=REVISE but no requests",
+                "critic_abort",
+                "${event.eventId} iter=$it issues=${crit.issues.take(3).joinToString("; ")}",
               )
+              Log.w(TAG, "critic abort on ${event.eventId} iter=$it: ${crit.issues.joinToString(" / ")}")
               break@critic_loop
             }
-            working = applyRevisions(working, crit.revisedRequests, plan, event, eventAssets, perceptions, editor, mustHaveSubjects)
+            CriticVerdict.REVISE -> {
+              if (crit.revisedRequests.isEmpty()) {
+                // Malformed: model said REVISE but emitted no patches. Treat as
+                // accept-with-warning rather than spinning the loop forever.
+                StateBreadcrumb.mark(
+                  context,
+                  "critic_revise_empty",
+                  "${event.eventId} iter=$it verdict=REVISE but no requests",
+                )
+                break@critic_loop
+              }
+              working = applyRevisions(working, crit.revisedRequests, plan, event, eventAssets, perceptions, editor, recallSubjects)
+            }
           }
         }
       }
@@ -1433,6 +1521,7 @@ private suspend fun buildTimeline(
         DecisionStore.writeTimelineFinal(context, event.eventId, out.timeline)
         outputs[event.eventId] = out.outputPath
         IterationStore.recordInitialVersion(context, event.eventId, out.outputPath)
+        syncProjectsQuietly()
         progress(PipelineProgress.EventDone(event.eventId, out.outputPath))
       } else {
         progress(PipelineProgress.EventFailed(event.eventId, "render returned null"))
@@ -1443,6 +1532,14 @@ private suspend fun buildTimeline(
       Log.e(TAG, "event ${event.eventId} failed", t)
       StateBreadcrumb.mark(context, "event_exception", "${event.eventId} ${t::class.java.simpleName}: ${t.message}")
       progress(PipelineProgress.EventFailed(event.eventId, t.message ?: t::class.java.simpleName))
+    }
+  }
+
+  private fun syncProjectsQuietly() {
+    runCatching {
+      ProjectStore.syncFromDecisions(context, DecisionStore.loadAll(context))
+    }.onFailure { t ->
+      Log.w(TAG, "project sync failed: ${t.message}")
     }
   }
 

@@ -140,10 +140,57 @@ internal fun storyTitle(candidate: EventCandidateSnapshot): String =
   storyTitle(candidate.event, candidate.scoutSummary, candidate.scoutEventType)
 
 internal fun storyTitle(d: EventDecisions): String {
-  d.director?.title?.takeIf { it.isNotBlank() }?.let { return it }
+  cleanStoryTitle(d.director?.title)?.let { return it }
+  cleanStoryTitle(d.event?.userCuration?.intentText)?.let { return it }
+  cleanStoryTitle(d.event?.userBrief?.rawText)?.let { return it }
   return d.event?.let { event ->
-    storyTitle(event, d.memory?.storylineSummary.orEmpty(), "")
-  } ?: "一段回忆视频"
+    val semanticText = listOfNotNull(
+      d.memory?.storylineSummary?.takeIf { it.isNotBlank() },
+      d.audience?.emotionalPayoff?.takeIf { it.isNotBlank() },
+      d.director?.tone?.takeIf { it.isNotBlank() },
+    ).joinToString(" ")
+    storyTitle(event, semanticText, d.director?.tone.orEmpty())
+  } ?: fallbackVideoTitle(d)
+}
+
+private fun cleanStoryTitle(raw: String?): String? {
+  val title = raw
+    ?.trim()
+    ?.trim('「', '」', '“', '”', '"', '\'', '《', '》')
+    ?.replace(Regex("\\s+"), " ")
+    .orEmpty()
+  return title.takeIf { it.isNotBlank() && !isGenericStoryTitle(it) }
+}
+
+private fun isGenericStoryTitle(title: String): Boolean {
+  val normalized = title.lowercase(Locale.ROOT)
+  return normalized in setOf(
+    "片段",
+    "生活片段",
+    "日常片段",
+    "日常记录",
+    "一段片段",
+    "视频片段",
+    "短片",
+    "视频",
+    "小视频",
+    "vlog",
+    "一段 vlog",
+    "一段回忆视频",
+    "回忆视频",
+  )
+}
+
+private fun fallbackVideoTitle(d: EventDecisions): String {
+  val asset = d.inputAssets.minByOrNull { asset ->
+    if (asset.takenEpochMs > 0L) asset.takenEpochMs else Long.MAX_VALUE
+  }
+  val day = asset?.takenEpochMs?.takeIf { it > 0L }?.let(::storyDay)
+  val name = asset?.displayName
+    ?.substringBeforeLast('.', missingDelimiterValue = asset.displayName)
+    ?.replace('_', ' ')
+    ?.takeIf { it.isNotBlank() }
+  return listOfNotNull(day, name).joinToString(" · ").ifBlank { "未命名视频" }
 }
 
 internal fun storyTitle(event: Event, summary: String, eventType: String): String {
@@ -200,7 +247,7 @@ internal fun storyTheme(eventType: String, summary: String): String {
     listOf("travel", "trip", "street", "hotel", "beach", "outdoor", "旅行", "出游").any { it in text } -> "出游回忆"
     listOf("zoo", "animal", "pet", "dog", "cat", "动物").any { it in text } -> "动物故事"
     listOf("child", "kid", "people", "family", "friend", "person", "人物", "孩子", "家人").any { it in text } -> "家庭时光"
-    else -> "生活片段"
+    else -> "日常记录"
   }
 }
 
@@ -243,13 +290,19 @@ internal fun friendlyProgress(progress: ProgressSnapshot, making: Boolean = fals
     return when {
       progress.stage == "queued" || progress.stage == "work_running" -> FriendlyProgress(
         title = "正在准备制作",
-        detail = progress.detail.ifBlank { "我会按你选中的故事来剪，完成后会出现在“视频”里。" },
+        detail = progress.detail.ifBlank { "我会按你选中的故事来剪，完成后会出现在“作品”里。" },
         current = progress.current,
         total = progress.total,
       )
-      progress.stage == "ingest" || progress.stage == "event_scout" || progress.stage == "candidate_refresh" -> FriendlyProgress(
-        title = "正在制作视频",
-        detail = "正在确认这组故事的素材和画面顺序，不会改变你的选择。",
+      isStoryRefreshStage(progress.stage) -> FriendlyProgress(
+        title = "正在重扫故事",
+        detail = "正在重新浏览候选事件，不会开始导出视频。",
+        current = progress.current,
+        total = progress.total,
+      )
+      progress.stage == "ingest" -> FriendlyProgress(
+        title = "正在扫描相册",
+        detail = "正在读取最近 90 天的素材。",
         current = progress.current,
         total = progress.total,
       )
@@ -261,13 +314,13 @@ internal fun friendlyProgress(progress: ProgressSnapshot, making: Boolean = fals
       )
       progress.stage.startsWith("render") -> FriendlyProgress(
         title = "正在导出视频",
-        detail = "马上就能在“视频”里看到成片。",
+        detail = "马上就能在“作品”里看到成片。",
         current = progress.current,
         total = progress.total,
       )
       else -> FriendlyProgress(
         title = progress.headline.ifBlank { "正在制作视频" },
-        detail = progress.detail.ifBlank { "制作中，完成后会出现在“视频”里。" },
+        detail = progress.detail.ifBlank { "制作中，完成后会出现在“作品”里。" },
         current = progress.current,
         total = progress.total,
       )
@@ -275,7 +328,7 @@ internal fun friendlyProgress(progress: ProgressSnapshot, making: Boolean = fals
   }
   val defaultDetail = "我在找画面清楚、故事连贯、适合剪成视频的片段。"
   return when {
-    progress.stage == "event_scout" || progress.stage == "candidate_refresh" -> FriendlyProgress(
+    isStoryRefreshStage(progress.stage) -> FriendlyProgress(
       title = "正在帮你看相册",
       detail = defaultDetail,
       current = progress.current,

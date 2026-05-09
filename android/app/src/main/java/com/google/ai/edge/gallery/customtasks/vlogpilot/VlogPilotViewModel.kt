@@ -10,12 +10,14 @@ package com.google.ai.edge.gallery.customtasks.vlogpilot
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.AgentRuntime
 import com.google.ai.edge.gallery.customtasks.vlogpilot.ingest.PhotoIngest
+import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.PerceptionCache
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventSegmenter
 import com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.EventScoutSheetBuilder
 import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.GenerationIntent
@@ -25,6 +27,7 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.runtime.VlogPilotModelRe
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Event
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.IterationFeedback
+import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Perception
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.UserCurationRequest
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.CurationRequestStore
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.DecisionStore
@@ -37,6 +40,7 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.IterationStore
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineEventBus
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineProgress
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.StateBreadcrumb
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.VlogIndexWorker
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.VlogPipelineWorker
 import com.google.ai.edge.gallery.data.Model
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -48,8 +52,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -104,6 +111,9 @@ class VlogPilotViewModel @Inject constructor(
   private val _decisions = MutableStateFlow<List<EventDecisions>>(emptyList())
   val decisions: StateFlow<List<EventDecisions>> = _decisions.asStateFlow()
 
+  private val _projects = MutableStateFlow<List<VlogProject>>(emptyList())
+  internal val projects: StateFlow<List<VlogProject>> = _projects.asStateFlow()
+
   private val _progress = MutableStateFlow(ProgressSnapshot())
   val progress: StateFlow<ProgressSnapshot> = _progress.asStateFlow()
 
@@ -126,27 +136,77 @@ class VlogPilotViewModel @Inject constructor(
   private val _curatorLoading = MutableStateFlow(false)
   val curatorLoading: StateFlow<Boolean> = _curatorLoading.asStateFlow()
 
+  private val _albumAssets = MutableStateFlow<List<Asset>>(emptyList())
+  val albumAssets: StateFlow<List<Asset>> = _albumAssets.asStateFlow()
+  private val _albumVisibleCount = MutableStateFlow(ALBUM_PAGE_SIZE)
+  val albumVisibleCount: StateFlow<Int> = _albumVisibleCount.asStateFlow()
+  private val _albumLoading = MutableStateFlow(false)
+  val albumLoading: StateFlow<Boolean> = _albumLoading.asStateFlow()
+  private val _albumError = MutableStateFlow<String?>(null)
+  val albumError: StateFlow<String?> = _albumError.asStateFlow()
+  private val _albumPerceptions = MutableStateFlow<Map<String, Perception>>(emptyMap())
+
+  private val _assetUsage = MutableStateFlow<Map<String, AssetUsage>>(emptyMap())
+  internal val assetUsage: StateFlow<Map<String, AssetUsage>> = _assetUsage.asStateFlow()
+
+  internal val operation: StateFlow<VlogPilotOperation> =
+    combine(_state, _progress, _activeIteration, _albumLoading) { state, progress, activeIteration, albumLoading ->
+      classifyVlogPilotOperation(
+        state = state,
+        progress = progress,
+        activeIteration = activeIteration,
+        albumLoading = albumLoading,
+      )
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, VlogPilotOperation.Idle)
+
   private val collectedOutputs = mutableMapOf<String, String>()
   private var decisionRefreshJob: Job? = null
-  /** EventIds we've already tried to auto-resume in this VM's lifetime. Avoids
-   *  resume loops if the iteration is structurally broken (the same pending
-   *  file would otherwise re-enqueue forever after every cold start). */
-  private val resumedIterations = mutableSetOf<String>()
   private val workManager by lazy { WorkManager.getInstance(appContext) }
+
+  private fun refreshAssetUsageIndex(
+    decisions: List<EventDecisions> = _decisions.value,
+    selection: EventSelectionManifest? = _eventSelection.value,
+  ) {
+    _assetUsage.value = buildAssetUsageIndex(
+      decisions = decisions,
+      manifest = selection,
+      cachedPerceptions = _albumPerceptions.value,
+    )
+  }
 
   init {
     viewModelScope.launch {
       PipelineEventBus.flow.collect { progress -> handleProgress(progress) }
     }
     viewModelScope.launch {
-      _decisions.value = withContext(Dispatchers.IO) { DecisionStore.loadAll(appContext) }
-      _eventSelection.value = withContext(Dispatchers.IO) { DecisionStore.loadEventSelection(appContext) }
+      val initial = withContext(Dispatchers.IO) {
+        val decisions = DecisionStore.loadAll(appContext)
+        Triple(
+          decisions,
+          DecisionStore.loadEventSelection(appContext),
+          ProjectStore.syncFromDecisions(appContext, decisions),
+        )
+      }
+      _decisions.value = initial.first
+      _eventSelection.value = initial.second
+      _projects.value = initial.third
+      refreshAssetUsageIndex(initial.first, initial.second)
       while (true) {
         delay(3_000)
         val s = _state.value
         if (s is PipelineState.Running || s is PipelineState.Scanning || s is PipelineState.Done) {
-          _decisions.value = withContext(Dispatchers.IO) { DecisionStore.loadAll(appContext) }
-          _eventSelection.value = withContext(Dispatchers.IO) { DecisionStore.loadEventSelection(appContext) }
+          val refreshed = withContext(Dispatchers.IO) {
+            val decisions = DecisionStore.loadAll(appContext)
+            Triple(
+              decisions,
+              DecisionStore.loadEventSelection(appContext),
+              ProjectStore.syncFromDecisions(appContext, decisions),
+            )
+          }
+          _decisions.value = refreshed.first
+          _eventSelection.value = refreshed.second
+          _projects.value = refreshed.third
+          refreshAssetUsageIndex(refreshed.first, refreshed.second)
         }
       }
     }
@@ -156,43 +216,10 @@ class VlogPilotViewModel @Inject constructor(
         delay(1_500)
       }
     }
-    viewModelScope.launch {
-      resumePendingIterations()
-    }
+    scheduleBackgroundIndex()
   }
 
-  /**
-   * On cold start, re-enqueue any iteration WorkRequest whose pending feedback
-   * file still exists. This handles the case where the Worker was killed mid-
-   * iteration (vivo BTM, OOM, app force-stop) — without resume the user would
-   * see "iteration silently disappeared" with the staged feedback file orphaned.
-   *
-   * Each eventId is attempted exactly ONCE per VM lifetime — see resumedIterations.
-   * A repeatedly-failing iteration won't loop forever; the user can manually
-   * delete the pending file via "再改一次" to retry.
-   */
-  private suspend fun resumePendingIterations() {
-    val pending = withContext(Dispatchers.IO) { IterationStore.listPending(appContext) }
-    if (pending.isEmpty()) return
-    StateBreadcrumb.mark(appContext, "ui_iter_resume_scan", "found=${pending.size}")
-    for (eventId in pending) {
-      if (eventId in resumedIterations) continue
-      resumedIterations += eventId
-      VlogPipelineWorker.ensureChannel(appContext)
-      val req = OneTimeWorkRequestBuilder<VlogPipelineWorker>()
-        .setInputData(VlogPipelineWorker.iterationInputData(eventId))
-        .build()
-      // KEEP: if the Worker is somehow still alive (rare), don't double-up.
-      workManager.enqueueUniqueWork(
-        VlogPipelineWorker.iterationWorkName(eventId),
-        ExistingWorkPolicy.KEEP,
-        req,
-      )
-      StateBreadcrumb.mark(appContext, "ui_iter_resume", "event=$eventId")
-    }
-  }
-
-  fun scanAlbum(windowDays: Int = 30) {
+  fun scanAlbum(windowDays: Int = 90) {
     viewModelScope.launch {
       _state.value = PipelineState.Scanning("正在读取相册")
       _progress.value = progressWithRecent(ProgressSnapshot("正在读取相册", "扫描 MediaStore 中的图片、视频和 Live Photo", "scan"))
@@ -211,7 +238,7 @@ class VlogPilotViewModel @Inject constructor(
     }
   }
 
-  fun refreshCandidates(model: Model, windowDays: Int = 30) {
+  fun refreshCandidates(model: Model, windowDays: Int = 90) {
     viewModelScope.launch {
       refreshCandidatesInternal(windowDays, model)
     }
@@ -322,6 +349,7 @@ class VlogPilotViewModel @Inject constructor(
       val syncedManifest = _eventSelection.value?.syncWithRunConfig(next)
       if (syncedManifest != null) {
         _eventSelection.value = syncedManifest
+        refreshAssetUsageIndex(selection = syncedManifest)
         withContext(Dispatchers.IO) { DecisionStore.writeEventSelection(appContext, syncedManifest) }
       }
     }
@@ -354,7 +382,7 @@ class VlogPilotViewModel @Inject constructor(
     )
   }
 
-  private suspend fun refreshCandidatesInternal(windowDays: Int = 30, model: Model? = null): EventSelectionManifest? {
+  private suspend fun refreshCandidatesInternal(windowDays: Int = 90, model: Model? = null): EventSelectionManifest? {
     _state.value = PipelineState.Scanning("正在刷新候选事件")
     _progress.value = progressWithRecent(
       ProgressSnapshot(
@@ -410,6 +438,7 @@ class VlogPilotViewModel @Inject constructor(
         CandidateRefreshResult(assets, events, plan.manifest)
       }
       _eventSelection.value = result.manifest
+      refreshAssetUsageIndex(selection = result.manifest)
       _state.value = PipelineState.Ready(result.assets, result.events)
       _progress.value = progressWithRecent(
         ProgressSnapshot(
@@ -495,6 +524,76 @@ class VlogPilotViewModel @Inject constructor(
     }
   }
 
+  fun loadAlbumAssets(force: Boolean = false) {
+    if (_albumLoading.value) return
+    if (!force && _albumAssets.value.isNotEmpty()) return
+    viewModelScope.launch {
+      _albumLoading.value = true
+      _albumError.value = null
+      val result = withContext(Dispatchers.IO) {
+        runCatching {
+          val loaded = PhotoIngest.loadRecent(
+            context = appContext,
+            windowDays = 0,
+            filter = PhotoIngest.Filter(
+              cameraOnly = false,
+              maxVideoSizeBytes = Long.MAX_VALUE,
+              maxImageSizeBytes = Long.MAX_VALUE,
+              minImageSizeBytes = 1L,
+            ),
+          ).sortedByDescending { it.takenEpochMs }
+          val cachedPerceptions = loaded.mapNotNull { asset ->
+            PerceptionCache.get(appContext, asset)?.let { perception -> asset.id to perception }
+          }.toMap()
+          loaded to cachedPerceptions
+        }
+      }
+      result.onSuccess { (loaded, cachedPerceptions) ->
+        _albumAssets.value = loaded
+        _albumPerceptions.value = cachedPerceptions
+        _albumVisibleCount.value = minOf(ALBUM_PAGE_SIZE, loaded.size)
+        refreshAssetUsageIndex()
+      }.onFailure { t ->
+        _albumError.value = t.message ?: t::class.java.simpleName
+      }
+      _albumLoading.value = false
+    }
+  }
+
+  fun loadMoreAlbumAssets() {
+    val assets = _albumAssets.value
+    if (assets.isEmpty()) return
+    _albumVisibleCount.value = minOf(_albumVisibleCount.value + ALBUM_PAGE_SIZE, assets.size)
+  }
+
+  fun indexAssets(assetIds: List<String> = emptyList()) {
+    VlogPipelineWorker.ensureChannel(appContext)
+    val req = OneTimeWorkRequestBuilder<VlogIndexWorker>()
+      .setInputData(VlogIndexWorker.inputData(assetIds = assetIds, windowDays = 0))
+      .build()
+    workManager.enqueueUniqueWork(
+      VlogIndexWorker.WORK_NAME,
+      ExistingWorkPolicy.KEEP,
+      req,
+    )
+  }
+
+  private fun scheduleBackgroundIndex() {
+    val constraints = Constraints.Builder()
+      .setRequiresCharging(true)
+      .setRequiresBatteryNotLow(true)
+      .build()
+    val req = OneTimeWorkRequestBuilder<VlogIndexWorker>()
+      .setConstraints(constraints)
+      .setInputData(VlogIndexWorker.inputData(windowDays = 0))
+      .build()
+    workManager.enqueueUniqueWork(
+      VlogIndexWorker.BACKGROUND_WORK_NAME,
+      ExistingWorkPolicy.KEEP,
+      req,
+    )
+  }
+
   /**
    * Submit a user-curated story request. Stages the request to disk so the
    * Worker can pick it up by requestId, then enqueues a curation WorkRequest.
@@ -520,7 +619,23 @@ class VlogPilotViewModel @Inject constructor(
     )
     StateBreadcrumb.mark(appContext, "ui_curate_submit", "request=$requestId assets=${selectedAssetIds.size} intent=${intentText.take(40)}")
     viewModelScope.launch {
-      withContext(Dispatchers.IO) { CurationRequestStore.stage(appContext, request) }
+      val projectId = "user_$requestId"
+      val draftProject = VlogProject(
+        projectId = projectId,
+        title = intentText.ifBlank { "手动创作" }.take(24),
+        sourceType = ProjectSourceType.CURATED,
+        sourceEventId = projectId,
+        selectedAssetIds = selectedAssetIds,
+        templateId = TemplateCatalog.selectFromText(intentText).id,
+        status = ProjectStatus.MAKING,
+        currentVersion = 0,
+      )
+      val updatedProjects = withContext(Dispatchers.IO) {
+        CurationRequestStore.stage(appContext, request)
+        ProjectStore.upsertProject(appContext, draftProject)
+        ProjectStore.loadProjects(appContext)
+      }
+      _projects.value = updatedProjects
       VlogPilotModelRegistry.stash(appContext, model)
       VlogPipelineWorker.ensureChannel(appContext)
       val req = OneTimeWorkRequestBuilder<VlogPipelineWorker>()
@@ -535,7 +650,7 @@ class VlogPilotViewModel @Inject constructor(
       _progress.value = progressWithRecent(
         ProgressSnapshot(
           headline = "已开始制作你挑的故事",
-          detail = "完成后会出现在视频里。${selectedAssetIds.size} 个素材，意图：${intentText.ifBlank { "AI 自由发挥" }.take(40)}",
+          detail = "完成后会出现在作品里。${selectedAssetIds.size} 个素材，意图：${intentText.ifBlank { "AI 自由发挥" }.take(40)}",
           stage = "curate_queued",
         ),
       )
@@ -568,18 +683,20 @@ class VlogPilotViewModel @Inject constructor(
     val cachedManifest = withContext(Dispatchers.IO) { DecisionStore.loadEventSelection(appContext) }
     val currentConfig = _runConfig.value
     val manifest = if (cachedManifest == null || cachedManifest.needsGenerationRefresh(currentConfig)) {
-      refreshCandidatesInternal(30, model)
+      refreshCandidatesInternal(90, model)
     } else {
       cachedManifest.syncWithRunConfig(currentConfig)
     }
     if (manifest == null) return
+    _eventSelection.value = manifest
+    refreshAssetUsageIndex(selection = manifest)
     if (manifest.selectedEventIds.isEmpty()) {
       val existing = listExistingCandidates().map { (id, path) -> EventResult(id, path) }
       _state.value = PipelineState.Done(existing)
       _progress.value = progressWithRecent(
         ProgressSnapshot(
           "没有待制作的故事",
-          "先在故事页选一组故事，再点“开始制作”。",
+          "先在创作页选一组故事，再点“开始制作”。",
           "no_selected_event",
         ),
       )
@@ -838,11 +955,20 @@ class VlogPilotViewModel @Inject constructor(
     if (decisionRefreshJob?.isActive == true) return
     decisionRefreshJob = viewModelScope.launch {
       delay(750)
-      val (decisions, selection) = withContext(Dispatchers.IO) {
-        DecisionStore.loadAll(appContext) to DecisionStore.loadEventSelection(appContext)
+      val refreshed = withContext(Dispatchers.IO) {
+        val decisions = DecisionStore.loadAll(appContext)
+        Triple(
+          decisions,
+          DecisionStore.loadEventSelection(appContext),
+          ProjectStore.syncFromDecisions(appContext, decisions),
+        )
       }
+      val decisions = refreshed.first
+      val selection = refreshed.second
       _decisions.value = decisions
       _eventSelection.value = selection
+      _projects.value = refreshed.third
+      refreshAssetUsageIndex(decisions, selection)
     }
   }
 
@@ -893,5 +1019,6 @@ class VlogPilotViewModel @Inject constructor(
 
   companion object {
     private const val STALE_WORK_HEARTBEAT_MS = 10 * 60 * 1000L
+    private const val ALBUM_PAGE_SIZE = 60
   }
 }

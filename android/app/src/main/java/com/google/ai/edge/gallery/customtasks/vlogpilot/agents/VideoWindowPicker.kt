@@ -95,6 +95,11 @@ object VideoWindowPicker {
       starts += (tSec - wantDurSec / 2f).coerceIn(0f, maxStart)
     }
     frames.forEach { addCentered(it.tSec) }
+    bestMomentWindowSec(perception)?.let { (startSec, endSec) ->
+      starts += startSec.coerceIn(0f, maxStart)
+      starts += (endSec - wantDurSec).coerceIn(0f, maxStart)
+      starts += (((startSec + endSec) / 2f) - wantDurSec / 2f).coerceIn(0f, maxStart)
+    }
     bestMomentSec?.let(::addCentered)
     starts += (maxStart * roleTarget(role)).coerceIn(0f, maxStart)
     starts += 0f
@@ -164,6 +169,15 @@ object VideoWindowPicker {
 
   private fun Perception.badMomentSeconds(): List<Float> =
     videoInsight.badMomentIndices.mapNotNull { videoInsight.frameTimestampsSec.getOrNull(it - 1) }
+
+  private fun bestMomentWindowSec(perception: Perception?): Pair<Float, Float>? {
+    val insight = perception?.videoInsight ?: return null
+    val startIdx = insight.bestMomentWindowStart.takeIf { it > 0 } ?: return null
+    val endIdx = insight.bestMomentWindowEnd.takeIf { it > 0 } ?: startIdx
+    val a = insight.frameTimestampsSec.getOrNull(minOf(startIdx, endIdx) - 1) ?: return null
+    val b = insight.frameTimestampsSec.getOrNull(maxOf(startIdx, endIdx) - 1) ?: a
+    return minOf(a, b) to maxOf(a, b)
+  }
 
   private fun nearestFrame(frames: List<FrameScore>, targetSec: Float): FrameScore =
     frames.minByOrNull { abs(it.tSec - targetSec) } ?: FrameScore(targetSec, 0f)

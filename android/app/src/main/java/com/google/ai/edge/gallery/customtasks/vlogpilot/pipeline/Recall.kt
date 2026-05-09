@@ -229,6 +229,11 @@ object Recall {
       starts += (tSec - want / 2f).coerceIn(0f, maxStart) to reason
     }
     val insight = perception.videoInsight
+    bestMomentWindowSec(perception)?.let { (startSec, endSec) ->
+      starts += startSec.coerceIn(0f, maxStart) to "vlm best window start"
+      starts += (endSec - want).coerceIn(0f, maxStart) to "vlm best window end"
+      starts += (((startSec + endSec) / 2f) - want / 2f).coerceIn(0f, maxStart) to "vlm best window"
+    }
     if (insight.bestMomentSec > 0f) addCentered(insight.bestMomentSec, "vlm best moment")
     else if (insight.bestMomentIndex > 0) insight.frameTimestampsSec.getOrNull(insight.bestMomentIndex - 1)?.let {
       addCentered(it, "vlm best frame")
@@ -273,6 +278,15 @@ object Recall {
     if (perception.videoInsight.bestMomentSec > 0f) return perception.videoInsight.bestMomentSec
     val idx = perception.videoInsight.bestMomentIndex.takeIf { it > 0 } ?: return null
     return perception.videoInsight.frameTimestampsSec.getOrNull(idx - 1)
+  }
+
+  private fun bestMomentWindowSec(perception: Perception): Pair<Float, Float>? {
+    val insight = perception.videoInsight
+    val startIdx = insight.bestMomentWindowStart.takeIf { it > 0 } ?: return null
+    val endIdx = insight.bestMomentWindowEnd.takeIf { it > 0 } ?: startIdx
+    val a = insight.frameTimestampsSec.getOrNull(minOf(startIdx, endIdx) - 1) ?: return null
+    val b = insight.frameTimestampsSec.getOrNull(maxOf(startIdx, endIdx) - 1) ?: a
+    return minOf(a, b) to maxOf(a, b)
   }
 
   private fun roleTarget(role: ShotRole): Float = when (role) {

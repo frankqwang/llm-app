@@ -30,13 +30,13 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Timeline
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.UserBrief
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.UserCurationRequest
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.floatOrNull
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 
 class IntentParserAgent(private val agent: AgentRuntime) {
 
@@ -64,7 +64,7 @@ class IntentParserAgent(private val agent: AgentRuntime) {
       label = "intent_initial",
     )
     val obj = try {
-      JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement)?.jsonObject
+      JsonExtractor.firstObject(raw)?.let(json::parseToJsonElement).objectOrNull()
     } catch (_: Throwable) {
       null
     } ?: return UserBrief(rawText = text)
@@ -73,24 +73,24 @@ class IntentParserAgent(private val agent: AgentRuntime) {
   }
 
   private fun parseUserBrief(obj: JsonObject, rawText: String): UserBrief {
-    val pace = parsePace(obj["pace"]?.jsonPrimitive?.contentOrNull)
-    val colorGrade = parseColorGrade(obj["color_grade"]?.jsonPrimitive?.contentOrNull)
-    val captionPolicy = parseCaptionPolicy(obj["caption_policy"]?.jsonPrimitive?.contentOrNull)
-    val durationSec = obj["duration_sec"]?.jsonPrimitive?.floatOrNull
+    val pace = parsePace(obj["pace"].primitiveOrNull()?.contentOrNull)
+    val colorGrade = parseColorGrade(obj["color_grade"].primitiveOrNull()?.contentOrNull)
+    val captionPolicy = parseCaptionPolicy(obj["caption_policy"].primitiveOrNull()?.contentOrNull)
+    val durationSec = obj["duration_sec"].primitiveOrNull()?.floatOrNull
       ?.takeIf { it in 5f..120f }
     return UserBrief(
-      parsedHook = obj["hook"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-      parsedPayoff = obj["payoff"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-      parsedTone = obj["tone"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+      parsedHook = obj["hook"].primitiveOrNull()?.contentOrNull.orEmpty(),
+      parsedPayoff = obj["payoff"].primitiveOrNull()?.contentOrNull.orEmpty(),
+      parsedTone = obj["tone"].primitiveOrNull()?.contentOrNull.orEmpty(),
       parsedPace = pace,
       parsedDurationSec = durationSec,
-      mustHaveSubjects = obj["must_have_subjects"]?.jsonArray
-        ?.mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.takeIf { s -> s.isNotEmpty() } }
+      mustHaveSubjects = obj["must_have_subjects"].arrayOrNull()
+        ?.mapNotNull { it.primitiveOrNull()?.contentOrNull?.trim()?.takeIf { s -> s.isNotEmpty() } }
         ?.distinct()
         ?.take(4)
         .orEmpty(),
-      parsedAvoid = obj["avoid"]?.jsonArray
-        ?.mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.takeIf { s -> s.isNotEmpty() } }
+      parsedAvoid = obj["avoid"].arrayOrNull()
+        ?.mapNotNull { it.primitiveOrNull()?.contentOrNull?.trim()?.takeIf { s -> s.isNotEmpty() } }
         ?.take(4)
         .orEmpty(),
       captionPolicy = captionPolicy,
@@ -187,16 +187,16 @@ targeted_shot_orders: $targetedDesc
       label = "intent_feedback",
     )
     val obj = try {
-      JsonExtractor.firstObject(rawResponse)?.let(json::parseToJsonElement)?.jsonObject
+      JsonExtractor.firstObject(rawResponse)?.let(json::parseToJsonElement).objectOrNull()
     } catch (_: Throwable) {
       null
     } ?: return raw  // fall back to client-built feedback
 
-    val llmScope = parseFeedbackScope(obj["scope"]?.jsonPrimitive?.contentOrNull)
-    val llmGlobal = obj["global"]?.jsonObject?.takeIf { it.isNotEmpty() }?.let(::parseGlobalRevision)
-    val llmRenderPatch = obj["render_patch"]?.jsonObject?.takeIf { it.isNotEmpty() }?.let(::parseRenderOnlyPatch)
-    val llmRevisions = obj["revisions"]?.jsonArray
-      ?.mapNotNull { el -> parseRevision(el.jsonObject) }
+    val llmScope = parseFeedbackScope(obj["scope"].primitiveOrNull()?.contentOrNull)
+    val llmGlobal = obj["global"].objectOrNull()?.takeIf { it.isNotEmpty() }?.let(::parseGlobalRevision)
+    val llmRenderPatch = obj["render_patch"].objectOrNull()?.takeIf { it.isNotEmpty() }?.let(::parseRenderOnlyPatch)
+    val llmRevisions = obj["revisions"].arrayOrNull()
+      ?.mapNotNull { el -> el.objectOrNull()?.let(::parseRevision) }
       ?.take(5)
       .orEmpty()
 
@@ -247,12 +247,12 @@ targeted_shot_orders: $targetedDesc
   }
 
   private fun parseGlobalRevision(obj: JsonObject): GlobalRevision? {
-    val durationRaw = obj["new_target_duration_sec"]?.jsonPrimitive?.floatOrNull
+    val durationRaw = obj["new_target_duration_sec"].primitiveOrNull()?.floatOrNull
     val newDuration = durationRaw?.takeIf { it in 5f..120f }
-    val newPace = parsePace(obj["new_pace"]?.jsonPrimitive?.contentOrNull)
-    val newTone = obj["new_tone"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-    val newGrade = parseColorGrade(obj["new_color_grade"]?.jsonPrimitive?.contentOrNull)
-    val captionPolicy = parseCaptionPolicyOrNull(obj["caption_policy"]?.jsonPrimitive?.contentOrNull)
+    val newPace = parsePace(obj["new_pace"].primitiveOrNull()?.contentOrNull)
+    val newTone = obj["new_tone"].primitiveOrNull()?.contentOrNull?.takeIf { it.isNotBlank() }
+    val newGrade = parseColorGrade(obj["new_color_grade"].primitiveOrNull()?.contentOrNull)
+    val captionPolicy = parseCaptionPolicyOrNull(obj["caption_policy"].primitiveOrNull()?.contentOrNull)
     val anyChange = newDuration != null || newPace != null || newTone != null || newGrade != null || captionPolicy != null
     if (!anyChange) return null
     return GlobalRevision(
@@ -265,9 +265,9 @@ targeted_shot_orders: $targetedDesc
   }
 
   private fun parseRenderOnlyPatch(obj: JsonObject): RenderOnlyPatch? {
-    val newGrade = parseColorGrade(obj["new_color_grade"]?.jsonPrimitive?.contentOrNull)
-    val captionPolicy = parseCaptionPolicyOrNull(obj["caption_policy"]?.jsonPrimitive?.contentOrNull)
-    val newBgmTone = obj["new_bgm_tone"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+    val newGrade = parseColorGrade(obj["new_color_grade"].primitiveOrNull()?.contentOrNull)
+    val captionPolicy = parseCaptionPolicyOrNull(obj["caption_policy"].primitiveOrNull()?.contentOrNull)
+    val newBgmTone = obj["new_bgm_tone"].primitiveOrNull()?.contentOrNull?.takeIf { it.isNotBlank() }
     if (newGrade == null && captionPolicy == null && newBgmTone == null) return null
     return RenderOnlyPatch(
       newColorGrade = newGrade,
@@ -277,11 +277,11 @@ targeted_shot_orders: $targetedDesc
   }
 
   private fun parseRevision(obj: JsonObject): RevisedRequest? {
-    val order = obj["shot_order"]?.jsonPrimitive?.intOrNull ?: return null
-    val patchesObj = obj["patches"]?.jsonObject ?: return null
+    val order = obj["shot_order"].primitiveOrNull()?.intOrNull ?: return null
+    val patchesObj = obj["patches"].objectOrNull() ?: return null
     val patches = patchesObj.entries
       .mapNotNull { (k, v) ->
-        val s = v.jsonPrimitive.contentOrNull?.trim() ?: return@mapNotNull null
+        val s = v.primitiveOrNull()?.contentOrNull?.trim() ?: return@mapNotNull null
         if (s.isEmpty()) null else k to s
       }
       .toMap()
@@ -298,4 +298,10 @@ targeted_shot_orders: $targetedDesc
       newBgmTone = llm.newBgmTone ?: client.newBgmTone,
     )
   }
+
+  private fun JsonElement?.objectOrNull(): JsonObject? = this as? JsonObject
+
+  private fun JsonElement?.arrayOrNull(): JsonArray? = this as? JsonArray
+
+  private fun JsonElement?.primitiveOrNull(): JsonPrimitive? = this as? JsonPrimitive
 }

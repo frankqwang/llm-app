@@ -98,7 +98,11 @@ class VlogPipelineWorker(
           PipelineEventBus.publish(PipelineProgress.IterationFailed(iterationEventId, msg))
           return androidx.work.ListenableWorker.Result.failure()
         }
-        orch.iterate(iterationEventId, feedback, onProgress)
+        val result = orch.iterate(iterationEventId, feedback, onProgress)
+        if (result.outputPath == null) {
+          IterationStore.clearPending(applicationContext, iterationEventId)
+          return androidx.work.ListenableWorker.Result.failure()
+        }
       } else if (curationRequestId != null) {
         // User-curated story mode: read staged request, build event, parse intent,
         // run full Browser→Audience→Director→Editor→Critic→Render with overrides.
@@ -111,7 +115,7 @@ class VlogPipelineWorker(
         }
         orch.runFromCuration(request = request, runConfig = runConfig, onProgress = onProgress)
       } else {
-        orch.run(windowDays = 30, runConfig = runConfig, onProgress = onProgress)
+        orch.run(windowDays = 90, runConfig = runConfig, onProgress = onProgress)
       }
       StateBreadcrumb.mark(applicationContext, "worker_success", "run=$runId mode=${if (iterationEventId != null) "iterate" else "full"}")
       androidx.work.ListenableWorker.Result.success()
@@ -122,6 +126,7 @@ class VlogPipelineWorker(
       StateBreadcrumb.mark(applicationContext, "worker_failed", "${t::class.java.simpleName}: ${t.message}")
       val failureMsg = t.message ?: t::class.java.simpleName
       val failureProgress: PipelineProgress = if (iterationEventId != null) {
+        IterationStore.clearPending(applicationContext, iterationEventId)
         PipelineProgress.IterationFailed(iterationEventId, failureMsg)
       } else {
         PipelineProgress.Failed(failureMsg)

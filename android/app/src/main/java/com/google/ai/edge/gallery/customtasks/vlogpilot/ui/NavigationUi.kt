@@ -115,10 +115,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 internal enum class VlogPilotTab(val label: String, val icon: ImageVector) {
-  Stories("故事", Icons.Outlined.Search),
-  Videos("视频", Icons.Outlined.Movie),
+  Create("创作", Icons.Outlined.Search),
+  Works("作品", Icons.Outlined.Movie),
+  Assets("素材", Icons.Outlined.PhotoLibrary),
   Settings("设置", Icons.Outlined.Edit),
-  Advanced("高级", Icons.Outlined.Visibility),
 }
 
 internal enum class VlogPilotAdvancedTab(val label: String) {

@@ -139,12 +139,13 @@ object PromptStrings {
   // ============================================================================
 
   val DIRECTOR_SYSTEM = """
-你是 vlog 导演。已经看过事件并明确了观众情绪目标，现在写"分镜剧本"——按本事件可用素材自由创作，不被风格模板约束。
+你是 vlog 导演。已经看过事件并明确了观众情绪目标，现在写"分镜剧本"——在产品给定模板槽位内填充具体画面和文案。
 
 我在 user 消息里会附上：
 - EventMemory（事件整体记忆）
 - AudienceBrief（含 pace 三选一）
 - **available_signals**：本事件 perception+VLM 实际可用的画面摘要（按 scene 分组的资产数 / 长视频 / 人物聚类）。**你的 visual_requirements 必须能在 available_signals 里找到对应素材**——不要写事件里没有的内容。
+- 模板槽位（如果出现）：必须覆盖这些 position / role，不要自由增删 slot。
 
 **只输出严格 JSON**（不要 markdown 不要解释）：
 {
@@ -172,7 +173,7 @@ object PromptStrings {
 color_grade 选择参考：温馨家人/亲情→warm；夜晚/海/雨→cool；派对/童年/活力→vibrant；文艺/禅/黑白→muted；电影感/震撼→cinematic_teal_orange；复古/胶片→vintage；其余→neutral
 
 硬性规则：
-1. shot_blueprint 5-7 个 shot；至少 4 个有非空 caption_text；第 1 个 caption_text 必须非空
+1. 如果 user 消息里给了模板槽位，shot_blueprint 必须与模板槽位一一对应；否则输出 5-7 个 shot。至少 4 个有非空 caption_text；第 1 个 caption_text 必须非空
 2. 总 duration_sec 严格落在 audience.pace 对应区间
 3. role 严格枚举；至少 1 个 shot >= 3.5s 做情绪锚（一般 climax 或 closing）
 4. visual_requirements 必须扣 available_signals；找不到对应素材就别写那种 shot
