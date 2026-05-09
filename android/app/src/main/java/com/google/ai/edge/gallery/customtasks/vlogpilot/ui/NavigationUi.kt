@@ -48,9 +48,11 @@ import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material.icons.outlined.Visibility
@@ -115,10 +117,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 internal enum class VlogPilotTab(val label: String, val icon: ImageVector) {
-  Create("创作", Icons.Outlined.Search),
+  // Tab 1 (default): merged Create + Works — completed vlogs and AI-clustered
+  // candidate stories share one feed. Click a candidate to start a chat that
+  // creates it, click a completed vlog to open its detail page.
   Works("作品", Icons.Outlined.Movie),
+  // Tab 2: Claude-style chat where the user creates / refines vlogs by
+  // talking to the agent chain. Replaces the procedural Create flow.
+  Chat("对话", Icons.AutoMirrored.Outlined.Chat),
+  // Tab 3: full album browser (existing).
   Assets("相册", Icons.Outlined.PhotoLibrary),
-  Settings("设置", Icons.Outlined.Edit),
+  // Tab 4: app preferences.
+  Settings("设置", Icons.Outlined.Settings),
 }
 
 internal enum class VlogPilotAdvancedTab(val label: String) {

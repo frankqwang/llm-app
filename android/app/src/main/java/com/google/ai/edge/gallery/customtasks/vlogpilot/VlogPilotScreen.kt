@@ -115,7 +115,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 @Composable
-fun VlogPilotScreen(
+internal fun VlogPilotScreen(
+  selectedTab: VlogPilotTab,
+  onTabChange: (VlogPilotTab) -> Unit,
   bottomPadding: Dp,
   modelManagerViewModel: ModelManagerViewModel,
   modifier: Modifier = Modifier,
@@ -137,7 +139,6 @@ fun VlogPilotScreen(
   val assetUsage by viewModel.assetUsage.collectAsState()
   val operation by viewModel.operation.collectAsState()
   val context = LocalContext.current
-  var selectedTab by remember { mutableStateOf(VlogPilotTab.Create) }
   var selectedStoryCategory by remember { mutableStateOf(StoryBrowseCategory.Recommended) }
   var selectedStorySort by remember { mutableStateOf(StorySortMode.Recommended) }
   var selectedVideoCategory by remember { mutableStateOf(VideoBrowseCategory.All) }
@@ -241,7 +242,7 @@ fun VlogPilotScreen(
           curatorError = null
           viewModel.submitCuratedRequest(selectedIds, intentText, model)
           curatorOpen = false
-          selectedTab = VlogPilotTab.Works
+          onTabChange(VlogPilotTab.Works)
         } else {
           // Keep curator open so the user doesn't lose their selection + intent text.
           // Banner explains what they need to do next.
@@ -270,7 +271,7 @@ fun VlogPilotScreen(
       },
       onChangeStory = {
         detailEventId = null
-        selectedTab = VlogPilotTab.Create
+        onTabChange(VlogPilotTab.Chat)
       },
     )
     iterationSheetEventId?.let { eventId ->
@@ -300,19 +301,42 @@ fun VlogPilotScreen(
     contentPadding = PaddingValues(top = 12.dp, bottom = 20.dp),
     verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
-    item {
-      WorkspaceTabs(selected = selectedTab, onSelect = { selectedTab = it })
-    }
-
     when (selectedTab) {
-      VlogPilotTab.Create -> {
+      VlogPilotTab.Chat -> {
+        item {
+          com.google.ai.edge.gallery.customtasks.vlogpilot.ui.ChatScreen(
+            decisions = decisions,
+            eventSelection = eventSelection,
+            onRescan = {
+              requireAlbumPermission {
+                selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
+              }
+            },
+            onOpenCurator = {
+              requireAlbumPermission {
+                viewModel.loadCuratorAssets()
+                curatorOpen = true
+              }
+            },
+            onOpenCandidate = { eventId ->
+              // Phase 1: open the candidate's existing detail flow. Phase 3
+              // will replace this with a real chat conversation kicking off
+              // generation.
+              eventSelection?.candidates?.firstOrNull { it.eventId == eventId }?.let {
+                selectedStoryId = eventId
+              }
+            },
+          )
+        }
+      }
+      VlogPilotTab.Works -> {
+        // Phase 1: Works tab stacks (a) live progress when generating, (b)
+        // completed VideoShelf when there are works, (c) AI-clustered
+        // candidates StoryShelf for not-yet-generated stories. Phase 2 will
+        // merge candidates + completed into a single category-chip feed.
         val manifest = eventSelection
-        when {
-          manifest == null && primaryPipelineRunning -> item {
-            // Pick the most recent in-flight event (no mp4 yet) so its
-            // partial agent outputs feed the live work panel. Falls back to
-            // the most recent decision overall if nothing is in flight yet
-            // (early seconds of perception / annotation).
+        if (primaryPipelineRunning) {
+          item {
             val liveDecision = decisions.firstOrNull { it.mp4Path == null } ?: decisions.firstOrNull()
             StoryProgressCard(
               state = state,
@@ -321,66 +345,8 @@ fun VlogPilotScreen(
               onCancel = viewModel::cancelPipeline,
             )
           }
-
-          manifest == null -> item {
-            StoryHeroCard(
-              state = state,
-              recentDecisions = decisions.take(2),
-              onStartClick = {
-                requireAlbumPermission {
-                  selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
-                }
-              },
-              onVideosClick = { selectedTab = VlogPilotTab.Works },
-              onCurateClick = {
-                requireAlbumPermission {
-                  viewModel.loadCuratorAssets()
-                  curatorOpen = true
-                }
-              },
-            )
-          }
-
-          else -> {
-            item {
-              StoryShelf(
-                manifest = manifest,
-                runConfig = runConfig,
-                running = primaryPipelineRunning,
-                progress = progress,
-                decisions = decisions,
-                selectedCategory = selectedStoryCategory,
-                selectedSort = selectedStorySort,
-                onCategorySelect = { selectedStoryCategory = it },
-                onSortSelect = { selectedStorySort = it },
-                onOpenStory = { selectedStoryId = it },
-                onStartClick = {
-                  requireAlbumPermission {
-                    selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
-                  }
-                },
-                onClearOnly = viewModel::clearOnlySelected,
-                onCancel = viewModel::cancelPipeline,
-                onToggleStory = viewModel::toggleSelectedEvent,
-                onMakeSelectedStories = ::makeSelectedStories,
-              )
-            }
-          }
         }
-      }
-
-      VlogPilotTab.Works -> {
-        if (decisions.isEmpty() && projects.isEmpty()) {
-          item {
-            EmptyActionCard(
-              state = state,
-              title = "还没有作品",
-              message = "先在创作页选推荐故事，或手动挑素材生成第一版。",
-              actionLabel = "去创作",
-              onAction = { selectedTab = VlogPilotTab.Create },
-            )
-          }
-        } else {
+        if (decisions.isNotEmpty() || projects.isNotEmpty()) {
           item {
             VideoShelf(
               projects = projects,
@@ -392,6 +358,41 @@ fun VlogPilotScreen(
               onSortSelect = { selectedVideoSort = it },
               onOpenDetail = { eventId -> detailEventId = eventId },
               onDismissIteration = viewModel::dismissIterationStatus,
+            )
+          }
+        }
+        if (manifest != null) {
+          item {
+            StoryShelf(
+              manifest = manifest,
+              runConfig = runConfig,
+              running = primaryPipelineRunning,
+              progress = progress,
+              decisions = decisions,
+              selectedCategory = selectedStoryCategory,
+              selectedSort = selectedStorySort,
+              onCategorySelect = { selectedStoryCategory = it },
+              onSortSelect = { selectedStorySort = it },
+              onOpenStory = { selectedStoryId = it },
+              onStartClick = {
+                requireAlbumPermission {
+                  selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
+                }
+              },
+              onClearOnly = viewModel::clearOnlySelected,
+              onCancel = viewModel::cancelPipeline,
+              onToggleStory = viewModel::toggleSelectedEvent,
+              onMakeSelectedStories = ::makeSelectedStories,
+            )
+          }
+        } else if (decisions.isEmpty() && projects.isEmpty() && !primaryPipelineRunning) {
+          item {
+            EmptyActionCard(
+              state = state,
+              title = "还没有作品",
+              message = "去对话页让 AI 帮你创作第一条 vlog。",
+              actionLabel = "开始对话",
+              onAction = { onTabChange(VlogPilotTab.Chat) },
             )
           }
         }
@@ -441,11 +442,11 @@ fun VlogPilotScreen(
     manifest = eventSelection,
     onOpenStory = { eventId ->
       selectedStoryId = eventId
-      selectedTab = VlogPilotTab.Create
+      onTabChange(VlogPilotTab.Works)
     },
     onOpenVideo = { eventId ->
       detailEventId = eventId
-      selectedTab = VlogPilotTab.Works
+      onTabChange(VlogPilotTab.Works)
     },
   )
 
@@ -485,7 +486,7 @@ fun VlogPilotScreen(
           iterationSheetEventId = null
           iterationSheetTargetOrder = null
           // Auto-switch to Works tab so the user sees the progress strip.
-          selectedTab = VlogPilotTab.Works
+          onTabChange(VlogPilotTab.Works)
         },
       )
     }
