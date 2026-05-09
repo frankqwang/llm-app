@@ -1,0 +1,1149 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VlogPilot Product Intro</title>
+  <style>
+    @font-face {
+      font-family: "SourceHanVlog";
+      src: url("../../android/app/src/main/assets/fonts/SourceHanSansSC-Bold.otf") format("opentype");
+      font-weight: 800;
+    }
+    @font-face {
+      font-family: "NunitoVlog";
+      src: url("../../android/app/src/main/res/font/nunito_regular.ttf") format("truetype");
+      font-weight: 400;
+    }
+
+    :root {
+      --bg: #F2F2F7;
+      --surface: #FFFFFF;
+      --dark: #1C1C1E;
+      --dark-raised: #2C2C2E;
+      --text: #0B0B0F;
+      --secondary: #6B6B72;
+      --hairline: #C6C6C8;
+      --blue: #007AFF;
+      --blue-tint: #E5F1FF;
+      --green: #34C759;
+      --orange: #FF9500;
+      --purple: #AF52DE;
+      --pink: #FF2D55;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      font-family: "NunitoVlog", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+    }
+
+    [data-composition-id="vlogpilot-product-intro"] {
+      position: relative;
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .ambient {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      overflow: hidden;
+    }
+
+    .ambient-word {
+      position: absolute;
+      font-family: "SourceHanVlog", sans-serif;
+      font-size: 150px;
+      line-height: 1;
+      color: rgba(0, 122, 255, 0.055);
+      white-space: nowrap;
+    }
+
+    .ambient-word.one {
+      left: 70px;
+      top: 44px;
+    }
+
+    .ambient-word.two {
+      right: -50px;
+      bottom: 58px;
+      color: rgba(175, 82, 222, 0.06);
+    }
+
+    .ambient-line {
+      position: absolute;
+      left: 92px;
+      right: 92px;
+      top: 172px;
+      height: 1px;
+      background: rgba(0, 122, 255, 0.16);
+    }
+
+    .scene {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      visibility: hidden;
+    }
+
+    #beat-1 {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    .scene-content {
+      width: 100%;
+      height: 100%;
+      padding: 88px 118px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 28px;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 44px;
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+      align-items: center;
+      gap: 70px;
+      height: 100%;
+    }
+
+    .kicker {
+      display: inline-flex;
+      width: max-content;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 18px;
+      border-radius: 999px;
+      background: var(--blue-tint);
+      color: var(--blue);
+      font-size: 24px;
+      font-weight: 800;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: currentColor;
+    }
+
+    h1,
+    h2 {
+      margin: 0;
+      font-family: "SourceHanVlog", "NunitoVlog", sans-serif;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      max-width: 800px;
+      font-size: 94px;
+      line-height: 1.04;
+    }
+
+    h2 {
+      font-size: 74px;
+      line-height: 1.05;
+    }
+
+    .body-copy {
+      max-width: 760px;
+      margin: 0;
+      color: var(--secondary);
+      font-size: 34px;
+      line-height: 1.45;
+    }
+
+    .proof-row,
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 46px;
+      padding: 10px 18px;
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--secondary);
+      border: 1px solid rgba(198, 198, 200, 0.55);
+      font-size: 22px;
+      font-weight: 800;
+      box-shadow: 0 18px 40px rgba(28, 28, 30, 0.05);
+    }
+
+    .chip.blue {
+      color: var(--blue);
+      background: var(--blue-tint);
+      border-color: rgba(0, 122, 255, 0.18);
+    }
+
+    .chip.green {
+      color: var(--green);
+      background: #EAF9EF;
+      border-color: rgba(52, 199, 89, 0.18);
+    }
+
+    .chip.orange {
+      color: var(--orange);
+      background: #FFF4E3;
+      border-color: rgba(255, 149, 0, 0.18);
+    }
+
+    .chip.purple {
+      color: var(--purple);
+      background: #F7EAFB;
+      border-color: rgba(175, 82, 222, 0.18);
+    }
+
+    .app-mark {
+      width: 72px;
+      height: 72px;
+      border-radius: 19px;
+      box-shadow: 0 18px 45px rgba(0, 122, 255, 0.18);
+    }
+
+    .phone-stack {
+      position: relative;
+      min-height: 760px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .phone {
+      width: 390px;
+      height: 790px;
+      border-radius: 48px;
+      background: var(--surface);
+      border: 1px solid rgba(198, 198, 200, 0.7);
+      box-shadow: 0 34px 90px rgba(28, 28, 30, 0.14);
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      overflow: hidden;
+    }
+
+    .phone.secondary {
+      position: absolute;
+      right: 105px;
+      top: 86px;
+      width: 330px;
+      height: 668px;
+      background: #FBFBFD;
+      box-shadow: 0 28px 70px rgba(28, 28, 30, 0.10);
+    }
+
+    .phone.primary {
+      position: relative;
+      z-index: 4;
+      margin-left: -110px;
+    }
+
+    .phone-top {
+      height: 24px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .speaker {
+      width: 78px;
+      height: 8px;
+      border-radius: 999px;
+      background: #D9D9DE;
+    }
+
+    .phone-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 4px 2px 2px;
+    }
+
+    .phone-title strong {
+      font-size: 26px;
+    }
+
+    .phone-title span {
+      color: var(--blue);
+      font-weight: 900;
+      font-size: 18px;
+    }
+
+    .panel {
+      border-radius: 22px;
+      background: var(--surface);
+      border: 1px solid rgba(198, 198, 200, 0.46);
+      box-shadow: 0 15px 35px rgba(28, 28, 30, 0.055);
+      padding: 18px;
+    }
+
+    .hero-card {
+      background: #F7F7FA;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .card-title {
+      font-size: 23px;
+      font-weight: 900;
+    }
+
+    .card-subtitle {
+      font-size: 17px;
+      line-height: 1.35;
+      color: var(--secondary);
+    }
+
+    .primary-button {
+      height: 50px;
+      border-radius: 16px;
+      background: var(--blue);
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      font-weight: 900;
+    }
+
+    .plain-link {
+      color: var(--blue);
+      text-align: center;
+      font-size: 17px;
+      font-weight: 900;
+    }
+
+    .tabbar {
+      margin-top: auto;
+      border-top: 1px solid var(--hairline);
+      padding-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+
+    .tab {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 5px;
+      color: #8E8E93;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .tab.active {
+      color: var(--blue);
+    }
+
+    .tab-icon {
+      width: 22px;
+      height: 22px;
+      border-radius: 7px;
+      background: currentColor;
+      opacity: 0.85;
+    }
+
+    .media-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .tile {
+      aspect-ratio: 1;
+      border-radius: 14px;
+      background: #D8EDF8;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .tile:nth-child(2n) {
+      background: #FFE2CA;
+    }
+
+    .tile:nth-child(3n) {
+      background: #EBDCF7;
+    }
+
+    .tile:nth-child(4n) {
+      background: #DCF4E4;
+    }
+
+    .tile::after {
+      content: "";
+      position: absolute;
+      inset: 18% 14% auto;
+      height: 36%;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.55);
+    }
+
+    .analysis-board {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      align-items: stretch;
+    }
+
+    .contact-panel {
+      padding: 28px;
+      min-height: 600px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .wide-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+
+    .wide-grid .tile {
+      border-radius: 22px;
+    }
+
+    #beat-2 .scene-content {
+      padding-top: 66px;
+      padding-bottom: 64px;
+      justify-content: flex-start;
+      gap: 22px;
+    }
+
+    #beat-2 h2 {
+      font-size: 66px;
+    }
+
+    #beat-2 .contact-panel {
+      min-height: 0;
+      gap: 15px;
+    }
+
+    #beat-2 .wide-grid {
+      gap: 10px;
+    }
+
+    #beat-2 .wide-grid .tile {
+      height: 128px;
+      aspect-ratio: auto;
+    }
+
+    #beat-2 .lane {
+      min-height: 98px;
+      padding: 16px 18px;
+    }
+
+    #beat-2 .lane h3 {
+      font-size: 25px;
+      margin-bottom: 4px;
+    }
+
+    #beat-2 .lane p {
+      font-size: 18px;
+    }
+
+    #beat-2 .counter {
+      font-size: 30px;
+    }
+
+    .analysis-lanes {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 18px;
+    }
+
+    .lane {
+      display: grid;
+      grid-template-columns: 66px 1fr auto;
+      gap: 16px;
+      align-items: center;
+      min-height: 118px;
+      padding: 20px;
+      border-radius: 24px;
+      background: var(--surface);
+      border: 1px solid rgba(198, 198, 200, 0.5);
+      box-shadow: 0 18px 48px rgba(28, 28, 30, 0.055);
+    }
+
+    .lane-icon,
+    .agent-icon {
+      width: 58px;
+      height: 58px;
+      border-radius: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-size: 25px;
+      font-weight: 900;
+    }
+
+    .lane h3,
+    .agent-card h3 {
+      margin: 0 0 6px;
+      font-size: 28px;
+      line-height: 1.1;
+    }
+
+    .lane p,
+    .agent-card p {
+      margin: 0;
+      color: var(--secondary);
+      font-size: 20px;
+      line-height: 1.35;
+    }
+
+    .counter {
+      color: var(--blue);
+      font-size: 34px;
+      font-weight: 900;
+      min-width: 115px;
+      text-align: right;
+    }
+
+    .lock-badge {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 16px 20px;
+      border-radius: 18px;
+      background: #EAF9EF;
+      color: var(--green);
+      font-size: 23px;
+      font-weight: 900;
+      width: max-content;
+    }
+
+    .agent-stage {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 36px;
+    }
+
+    .agent-row {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 20px;
+    }
+
+    .agent-path {
+      position: absolute;
+      left: 92px;
+      right: 92px;
+      top: 58px;
+      height: 5px;
+      border-radius: 999px;
+      background: var(--blue-tint);
+    }
+
+    .agent-path-fill {
+      width: 100%;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--blue);
+    }
+
+    .agent-card {
+      position: relative;
+      min-height: 272px;
+      padding: 24px;
+      border-radius: 26px;
+      background: var(--surface);
+      border: 1px solid rgba(198, 198, 200, 0.55);
+      box-shadow: 0 20px 55px rgba(28, 28, 30, 0.07);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      z-index: 2;
+    }
+
+    .status-dot {
+      position: absolute;
+      right: 22px;
+      top: 22px;
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      background: var(--green);
+      box-shadow: 0 0 0 8px rgba(52, 199, 89, 0.12);
+    }
+
+    .artifact {
+      margin-top: auto;
+      min-height: 70px;
+      border-radius: 17px;
+      background: #F7F7FA;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+      color: var(--secondary);
+      font-size: 18px;
+      font-weight: 800;
+      text-align: center;
+    }
+
+    .workflow-board {
+      display: grid;
+      grid-template-columns: 0.95fr 1.05fr;
+      gap: 54px;
+      align-items: center;
+      height: 100%;
+    }
+
+    .segmented {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      padding: 7px;
+      border-radius: 999px;
+      background: var(--surface);
+      box-shadow: 0 18px 45px rgba(28, 28, 30, 0.06);
+      border: 1px solid rgba(198, 198, 200, 0.5);
+    }
+
+    .seg {
+      padding: 15px 18px;
+      border-radius: 999px;
+      text-align: center;
+      color: var(--secondary);
+      font-size: 21px;
+      font-weight: 900;
+    }
+
+    .seg.active {
+      background: var(--blue-tint);
+      color: var(--blue);
+    }
+
+    .chat-panel {
+      border-radius: 30px;
+      padding: 28px;
+      background: var(--surface);
+      border: 1px solid rgba(198, 198, 200, 0.5);
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      box-shadow: 0 24px 70px rgba(28, 28, 30, 0.08);
+    }
+
+    .bubble {
+      max-width: 86%;
+      padding: 18px 22px;
+      border-radius: 24px;
+      font-size: 24px;
+      line-height: 1.3;
+      font-weight: 800;
+    }
+
+    .bubble.agent {
+      align-self: flex-start;
+      background: #F2F2F7;
+      color: var(--text);
+    }
+
+    .bubble.user {
+      align-self: flex-end;
+      background: var(--blue);
+      color: white;
+    }
+
+    .result-frame {
+      width: 410px;
+      height: 730px;
+      border-radius: 42px;
+      background: var(--dark);
+      padding: 24px;
+      box-shadow: 0 36px 100px rgba(28, 28, 30, 0.20);
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .video-window {
+      flex: 1;
+      border-radius: 30px;
+      background: #0B0B0F;
+      overflow: hidden;
+      position: relative;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .video-gradient {
+      position: absolute;
+      inset: 0;
+      background:
+        radial-gradient(circle at 35% 22%, rgba(255, 149, 0, 0.72), transparent 24%),
+        radial-gradient(circle at 68% 46%, rgba(0, 122, 255, 0.62), transparent 27%),
+        radial-gradient(circle at 45% 78%, rgba(52, 199, 89, 0.54), transparent 25%),
+        #161619;
+    }
+
+    .version-pill {
+      position: absolute;
+      top: 18px;
+      left: 18px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.86);
+      color: var(--text);
+      font-size: 16px;
+      font-weight: 900;
+    }
+
+    .action-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .mini-action {
+      height: 48px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.10);
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      font-weight: 900;
+    }
+
+    .close-stage {
+      width: 100%;
+      height: 100%;
+      display: grid;
+      grid-template-columns: 0.95fr 1.05fr;
+      gap: 80px;
+      align-items: center;
+    }
+
+    .brand-lockup {
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+    }
+
+    .brand-title {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      font-size: 34px;
+      font-weight: 900;
+      color: var(--blue);
+    }
+
+    .final-preview {
+      display: flex;
+      justify-content: center;
+    }
+
+    .proof-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      max-width: 650px;
+    }
+  </style>
+</head>
+<body>
+  <div
+    data-composition-id="vlogpilot-product-intro"
+    data-start="0"
+    data-duration="37.6"
+    data-width="1920"
+    data-height="1080"
+  >
+    <div class="ambient" data-layout-ignore>
+      <div class="ambient-word one">VlogPilot</div>
+      <div class="ambient-word two">on device</div>
+      <div class="ambient-line"></div>
+    </div>
+
+    <section id="beat-1" class="scene" data-start="0" data-duration="6.8" data-track-index="1">
+      <div class="scene-content split">
+        <div>
+          <div class="row" style="gap:18px; margin-bottom: 30px;">
+            <img class="app-mark" src="../../android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" alt="VlogPilot">
+            <div class="kicker"><span class="dot"></span> on-device AI vlog maker</div>
+          </div>
+          <h1>
+            <span class="headline-line">相册里，</span><br>
+            <span class="headline-line">已经有一条 vlog</span>
+          </h1>
+          <p class="body-copy">VlogPilot 把最近的照片和视频变成可播放、可继续修改的 1080x1920 短片。</p>
+          <div class="chip-row">
+            <span class="chip blue">作品库</span>
+            <span class="chip green">对话生成</span>
+            <span class="chip orange">相册理解</span>
+            <span class="chip purple">继续改一改</span>
+          </div>
+        </div>
+        <div class="phone-stack">
+          <div class="phone secondary">
+            <div class="phone-top"><div class="speaker"></div></div>
+            <div class="phone-title"><strong>最近 90 天</strong><span>推荐</span></div>
+            <div class="media-grid">
+              <div class="tile"></div><div class="tile"></div><div class="tile"></div>
+              <div class="tile"></div><div class="tile"></div><div class="tile"></div>
+              <div class="tile"></div><div class="tile"></div><div class="tile"></div>
+            </div>
+            <div class="panel hero-card">
+              <div class="card-title">AI 正在挑故事</div>
+              <div class="card-subtitle">人物、地点、动作、情绪会先变成可剪辑信号。</div>
+            </div>
+          </div>
+          <div class="phone primary">
+            <div class="phone-top"><div class="speaker"></div></div>
+            <div class="phone-title"><strong>VlogPilot</strong><span>Apps</span></div>
+            <div class="panel hero-card">
+              <div class="card-title">创作一条 AI 回忆</div>
+              <div class="card-subtitle">我会从最近的相册里找出适合轻剪辑的故事，也可以由你手动挑素材。</div>
+              <div class="primary-button">扫描推荐</div>
+              <div class="plain-link">或者，我自己挑素材</div>
+            </div>
+            <div class="panel">
+              <div class="card-title">最近生成</div>
+              <div class="card-subtitle">周末散步 · 18s<br>朋友晚餐 · 21s</div>
+            </div>
+            <div class="tabbar">
+              <div class="tab active"><div class="tab-icon"></div>作品</div>
+              <div class="tab"><div class="tab-icon"></div>对话</div>
+              <div class="tab"><div class="tab-icon"></div>相册</div>
+              <div class="tab"><div class="tab-icon"></div>设置</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="beat-2" class="scene" data-start="6.8" data-duration="7.6" data-track-index="1">
+      <div class="scene-content">
+        <div class="row" style="justify-content: space-between; align-items: flex-end;">
+          <div>
+            <div class="kicker"><span class="dot"></span> no upload · no account</div>
+            <h2 style="margin-top: 24px;">全部在手机本地完成</h2>
+          </div>
+          <div class="lock-badge">本地处理</div>
+        </div>
+        <div class="analysis-board">
+          <div class="panel contact-panel">
+            <div class="card-title" style="font-size: 32px;">相册信号</div>
+            <div class="wide-grid">
+              <div class="tile"></div><div class="tile"></div><div class="tile"></div>
+              <div class="tile"></div><div class="tile"></div><div class="tile"></div>
+              <div class="tile"></div><div class="tile"></div><div class="tile"></div>
+            </div>
+            <div class="proof-row">
+              <span class="chip blue">最近 <span class="count-days">90</span> 天</span>
+              <span class="chip green"><span class="count-assets">12</span> 个素材</span>
+              <span class="chip orange">约 <span class="count-minutes">7</span> 分钟出片</span>
+            </div>
+          </div>
+          <div class="analysis-lanes">
+            <div class="lane">
+              <div class="lane-icon" style="background:var(--blue);">E</div>
+              <div><h3>Event</h3><p>把连续照片和视频聚成一个可剪的故事。</p></div>
+              <div class="counter">story</div>
+            </div>
+            <div class="lane">
+              <div class="lane-icon" style="background:var(--purple);">P</div>
+              <div><h3>People</h3><p>保留人物、动作、场景和情绪线索。</p></div>
+              <div class="counter">tags</div>
+            </div>
+            <div class="lane">
+              <div class="lane-icon" style="background:var(--orange);">R</div>
+              <div><h3>Rhythm</h3><p>识别视频最佳时刻，为镜头节奏做准备。</p></div>
+              <div class="counter">pace</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="beat-3" class="scene" data-start="14.4" data-duration="7.8" data-track-index="1">
+      <div class="scene-content agent-stage">
+        <div>
+          <div class="kicker"><span class="dot"></span> transparent AI workflow</div>
+          <h2 style="margin-top: 24px;">五个 AI 角色接力制作</h2>
+        </div>
+        <div class="agent-row">
+          <div class="agent-path"><div class="agent-path-fill"></div></div>
+          <div class="agent-card agent-1">
+            <div class="status-dot"></div>
+            <div class="agent-icon" style="background:var(--blue);">B</div>
+            <h3>Browse</h3>
+            <p>阅读事件，找出故事线。</p>
+            <div class="artifact">EventMemory</div>
+          </div>
+          <div class="agent-card agent-2">
+            <div class="status-dot"></div>
+            <div class="agent-icon" style="background:var(--purple);">A</div>
+            <h3>Audience</h3>
+            <p>判断观众情绪和节奏。</p>
+            <div class="artifact">hook · payoff</div>
+          </div>
+          <div class="agent-card agent-3">
+            <div class="status-dot"></div>
+            <div class="agent-icon" style="background:var(--orange);">D</div>
+            <h3>Director</h3>
+            <p>写分镜和目标时长。</p>
+            <div class="artifact">shot blueprint</div>
+          </div>
+          <div class="agent-card agent-4">
+            <div class="status-dot"></div>
+            <div class="agent-icon" style="background:var(--pink);">E</div>
+            <h3>Editor</h3>
+            <p>选镜头，定剪辑顺序。</p>
+            <div class="artifact">timeline v1</div>
+          </div>
+          <div class="agent-card agent-5">
+            <div class="status-dot"></div>
+            <div class="agent-icon" style="background:var(--green);">C</div>
+            <h3>Critic</h3>
+            <p>审片，给出修订建议。</p>
+            <div class="artifact">ready to render</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="beat-4" class="scene" data-start="22.2" data-duration="7.6" data-track-index="1">
+      <div class="scene-content workflow-board">
+        <div>
+          <div class="kicker"><span class="dot"></span> create · curate · iterate</div>
+          <h2 style="margin-top: 24px;">一键扫描，也能继续改</h2>
+          <p class="body-copy">成片不是终点。你可以对已经生成的 vlog 继续说一句话，让它重新剪一版。</p>
+          <div class="segmented" style="margin-top: 34px;">
+            <div class="seg active">扫描推荐</div>
+            <div class="seg">我自己挑素材</div>
+            <div class="seg">改一改</div>
+          </div>
+          <div class="chat-panel" style="margin-top: 28px;">
+            <div class="bubble agent">已生成 18 秒初版，可以继续调整。</div>
+            <div class="bubble user">快一点，换第三个镜头，少一点字幕。</div>
+            <div class="bubble agent">收到，正在重新剪 v2。</div>
+          </div>
+        </div>
+        <div class="final-preview">
+          <div class="result-frame">
+            <div class="video-window">
+              <div class="video-gradient"></div>
+              <div class="version-pill">v2 · 已优化</div>
+            </div>
+            <div class="action-row">
+              <div class="mini-action">保存到相册</div>
+              <div class="mini-action">分享</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="beat-5" class="scene" data-start="29.8" data-duration="7.8" data-track-index="1">
+      <div class="scene-content close-stage">
+        <div class="brand-lockup">
+          <div class="brand-title">
+            <img class="app-mark" src="../../android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" alt="VlogPilot">
+            VlogPilot
+          </div>
+          <h1 style="max-width: 880px;">让回忆，不再只躺在相册里</h1>
+          <div class="proof-stack">
+            <span class="chip blue">No upload · no cloud</span>
+            <span class="chip green">Gemma 4 on device</span>
+            <span class="chip orange">1080x1920 MP4 ready to share</span>
+          </div>
+        </div>
+        <div class="final-preview">
+          <div class="result-frame">
+            <div class="video-window">
+              <div class="video-gradient"></div>
+              <div class="version-pill">final · 18s</div>
+            </div>
+            <div class="action-row">
+              <div class="mini-action">Works</div>
+              <div class="mini-action">Chat</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script>
+      const hasRealGsap = Boolean(window.gsap && window.gsap.version);
+      if (!window.gsap) {
+        const noopTimeline = {
+          fromTo() { return this; },
+          to() { return this; },
+          set() { return this; },
+          duration() { return 37.6; },
+          play() { return this; },
+          pause() { return this; },
+          paused() { return true; },
+          time() { return this; },
+          progress() { return this; }
+        };
+        window.gsap = {
+          timeline() { return Object.assign({}, noopTimeline); },
+          set() {},
+          utils: { toArray(selector) { return Array.from(document.querySelectorAll(selector)); } }
+        };
+      }
+
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      const sceneIds = ["#beat-1", "#beat-2", "#beat-3", "#beat-4", "#beat-5"];
+      const plainBeats = [
+        { id: "#beat-1", start: 0, end: 6.8 },
+        { id: "#beat-2", start: 6.8, end: 14.4 },
+        { id: "#beat-3", start: 14.4, end: 22.2 },
+        { id: "#beat-4", start: 22.2, end: 29.8 },
+        { id: "#beat-5", start: 29.8, end: 37.6 }
+      ];
+
+      function showPlainPreview(seconds) {
+        const wrapped = ((seconds % 37.6) + 37.6) % 37.6;
+        const active = plainBeats.find((beat) => wrapped >= beat.start && wrapped < beat.end) || plainBeats[0];
+        plainBeats.forEach((beat) => {
+          const el = document.querySelector(beat.id);
+          if (!el) return;
+          const visible = beat.id === active.id;
+          el.style.opacity = visible ? "1" : "0";
+          el.style.visibility = visible ? "visible" : "hidden";
+        });
+      }
+
+      function enterScene(id, at) {
+        tl.set(id, { opacity: 1, visibility: "visible" }, at);
+      }
+
+      function exitScene(id, at) {
+        tl.to(id, { opacity: 0, duration: 0.35, ease: "power2.in" }, at);
+        tl.set(id, { opacity: 0, visibility: "hidden" }, at + 0.35);
+      }
+
+      gsap.set(sceneIds.join(","), { opacity: 0, visibility: "hidden" });
+      gsap.set("#beat-1", { opacity: 1, visibility: "visible" });
+
+      enterScene("#beat-1", 0);
+      tl.fromTo("#beat-1 .app-mark, #beat-1 .kicker", { opacity: 0, y: 24 }, { opacity: 1, y: 0, duration: 0.55, stagger: 0.08, ease: "power3.out" }, 0.15);
+      tl.fromTo("#beat-1 .headline-line", { opacity: 0, y: 58 }, { opacity: 1, y: 0, duration: 0.72, stagger: 0.12, ease: "power3.out" }, 0.35);
+      tl.fromTo("#beat-1 .body-copy", { opacity: 0, y: 28 }, { opacity: 1, y: 0, duration: 0.56, ease: "power3.out" }, 0.98);
+      tl.fromTo("#beat-1 .chip", { opacity: 0, y: 22 }, { opacity: 1, y: 0, duration: 0.48, stagger: 0.08, ease: "power2.out" }, 1.22);
+      tl.fromTo("#beat-1 .phone.primary", { opacity: 0, x: 80, y: 24, scale: 0.94 }, { opacity: 1, x: 0, y: 0, scale: 1, duration: 0.8, ease: "power3.out" }, 0.45);
+      tl.fromTo("#beat-1 .phone.secondary", { opacity: 0, x: 130, y: -20, scale: 0.92, rotation: 4 }, { opacity: 1, x: 0, y: 0, scale: 1, rotation: -5, duration: 0.86, ease: "power3.out" }, 0.65);
+      tl.fromTo("#beat-1 .tile", { opacity: 0, scale: 0.84 }, { opacity: 1, scale: 1, duration: 0.36, stagger: 0.035, ease: "power2.out" }, 1.08);
+      tl.to("#beat-1 .phone-stack", { y: -10, duration: 1.8, repeat: 2, yoyo: true, ease: "sine.inOut" }, 2.0);
+      tl.to(".ambient-word.one", { x: 24, duration: 6.2, ease: "sine.inOut" }, 0);
+      exitScene("#beat-1", 6.45);
+
+      enterScene("#beat-2", 6.8);
+      tl.fromTo("#beat-2 .kicker, #beat-2 h2, #beat-2 .lock-badge", { opacity: 0, y: 34 }, { opacity: 1, y: 0, duration: 0.58, stagger: 0.1, ease: "power3.out" }, 6.95);
+      tl.fromTo("#beat-2 .contact-panel", { opacity: 0, x: -70 }, { opacity: 1, x: 0, duration: 0.62, ease: "power3.out" }, 7.45);
+      tl.fromTo("#beat-2 .analysis-lanes .lane", { opacity: 0, x: 64 }, { opacity: 1, x: 0, duration: 0.52, stagger: 0.16, ease: "power3.out" }, 7.78);
+      tl.fromTo("#beat-2 .wide-grid .tile", { opacity: 0, scale: 0.78 }, { opacity: 1, scale: 1, duration: 0.35, stagger: 0.025, ease: "power2.out" }, 7.72);
+      const days = { value: 0 };
+      const assets = { value: 0 };
+      const minutes = { value: 0 };
+      tl.to(days, { value: 90, duration: 0.85, ease: "power2.out", onUpdate: () => {
+        document.querySelector(".count-days").textContent = String(Math.round(days.value));
+      } }, 8.45);
+      tl.to(assets, { value: 12, duration: 0.85, ease: "power2.out", onUpdate: () => {
+        document.querySelector(".count-assets").textContent = String(Math.round(assets.value));
+      } }, 8.55);
+      tl.to(minutes, { value: 7, duration: 0.85, ease: "power2.out", onUpdate: () => {
+        document.querySelector(".count-minutes").textContent = String(Math.round(minutes.value));
+      } }, 8.65);
+      tl.to("#beat-2 .lane-icon", { scale: 1.06, duration: 1.2, repeat: 3, yoyo: true, ease: "sine.inOut" }, 9.0);
+      exitScene("#beat-2", 14.05);
+
+      enterScene("#beat-3", 14.4);
+      tl.fromTo("#beat-3 .kicker, #beat-3 h2", { opacity: 0, y: 36 }, { opacity: 1, y: 0, duration: 0.55, stagger: 0.12, ease: "power3.out" }, 14.58);
+      tl.fromTo("#beat-3 .agent-path-fill", { scaleX: 0, transformOrigin: "left center" }, { scaleX: 1, duration: 2.6, ease: "power2.inOut" }, 15.2);
+      tl.fromTo("#beat-3 .agent-card", { opacity: 0, y: 54, scale: 0.95 }, { opacity: 1, y: 0, scale: 1, duration: 0.56, stagger: 0.24, ease: "power3.out" }, 15.0);
+      tl.fromTo("#beat-3 .status-dot", { scale: 0.55, opacity: 0.25 }, { scale: 1, opacity: 1, duration: 0.28, stagger: 0.24, ease: "power2.out" }, 15.48);
+      tl.to("#beat-3 .agent-icon", { y: -5, duration: 0.9, repeat: 5, yoyo: true, ease: "sine.inOut" }, 16.4);
+      exitScene("#beat-3", 21.85);
+
+      enterScene("#beat-4", 22.2);
+      tl.fromTo("#beat-4 .kicker, #beat-4 h2, #beat-4 .body-copy", { opacity: 0, y: 34 }, { opacity: 1, y: 0, duration: 0.54, stagger: 0.1, ease: "power3.out" }, 22.36);
+      tl.fromTo("#beat-4 .segmented", { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.46, ease: "power3.out" }, 22.92);
+      tl.fromTo("#beat-4 .chat-panel", { opacity: 0, y: 38 }, { opacity: 1, y: 0, duration: 0.55, ease: "power3.out" }, 23.25);
+      tl.fromTo("#beat-4 .bubble", { opacity: 0, y: 20 }, { opacity: 1, y: 0, duration: 0.36, stagger: 0.32, ease: "power2.out" }, 23.62);
+      tl.fromTo("#beat-4 .result-frame", { opacity: 0, x: 70, scale: 0.94 }, { opacity: 1, x: 0, scale: 1, duration: 0.72, ease: "power3.out" }, 22.82);
+      tl.to("#beat-4 .video-gradient", { scale: 1.05, duration: 2.1, repeat: 2, yoyo: true, ease: "sine.inOut" }, 24.0);
+      tl.fromTo("#beat-4 .version-pill", { opacity: 0, y: -14 }, { opacity: 1, y: 0, duration: 0.36, ease: "power2.out" }, 25.05);
+      exitScene("#beat-4", 29.45);
+
+      enterScene("#beat-5", 29.8);
+      tl.fromTo("#beat-5 .brand-title", { opacity: 0, y: 28 }, { opacity: 1, y: 0, duration: 0.58, ease: "power3.out" }, 30.0);
+      tl.fromTo("#beat-5 h1", { opacity: 0, y: 54 }, { opacity: 1, y: 0, duration: 0.72, ease: "power3.out" }, 30.35);
+      tl.fromTo("#beat-5 .chip", { opacity: 0, x: -28 }, { opacity: 1, x: 0, duration: 0.44, stagger: 0.12, ease: "power2.out" }, 31.0);
+      tl.fromTo("#beat-5 .result-frame", { opacity: 0, x: 72, scale: 0.94 }, { opacity: 1, x: 0, scale: 1, duration: 0.74, ease: "power3.out" }, 30.4);
+      tl.to("#beat-5 .app-mark", { scale: 1.06, duration: 1.1, repeat: 3, yoyo: true, ease: "sine.inOut" }, 32.0);
+      tl.to("#beat-5 .video-gradient", { scale: 1.05, duration: 2.0, repeat: 2, yoyo: true, ease: "sine.inOut" }, 31.7);
+      tl.to("#beat-5", { opacity: 0, duration: 0.45, ease: "power2.in" }, 37.15);
+
+      window.__timelines["vlogpilot-product-intro"] = tl;
+
+      // Plain file:// preview has no HyperFrames player to advance the paused
+      // timeline. Autoplay only for direct local opens; Studio/rendering still
+      // receives the paused timeline through window.__timelines. For QA,
+      // append ?t=18.5 to seek a fixed frame.
+      if (window.location.protocol === "file:") {
+        const seekTime = new URLSearchParams(window.location.search).get("t");
+        requestAnimationFrame(() => {
+          if (seekTime !== null) {
+            const seconds = Number.parseFloat(seekTime);
+            if (Number.isFinite(seconds)) {
+              if (hasRealGsap) tl.time(seconds, false).pause();
+              else showPlainPreview(seconds);
+            }
+          } else {
+            if (hasRealGsap) {
+              tl.play(0);
+            } else {
+              const startedAt = performance.now();
+              showPlainPreview(0);
+              setInterval(() => showPlainPreview((performance.now() - startedAt) / 1000), 250);
+            }
+          }
+        });
+      }
+    </script>
+  </div>
+</body>
+</html>
