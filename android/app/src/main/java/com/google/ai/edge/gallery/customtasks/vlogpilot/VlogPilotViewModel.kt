@@ -161,6 +161,7 @@ class VlogPilotViewModel @Inject constructor(
 
   private val collectedOutputs = mutableMapOf<String, String>()
   private var decisionRefreshJob: Job? = null
+  private var albumCacheJob: Job? = null
   private val workManager by lazy { WorkManager.getInstance(appContext) }
 
   private fun refreshAssetUsageIndex(
@@ -517,7 +518,13 @@ class VlogPilotViewModel @Inject constructor(
     viewModelScope.launch {
       _curatorLoading.value = true
       val loaded = withContext(Dispatchers.IO) {
-        runCatching { PhotoIngest.loadRecent(appContext, windowDays) }.getOrDefault(emptyList())
+        runCatching {
+          PhotoIngest.loadRecent(
+            context = appContext,
+            windowDays = windowDays,
+            filter = PhotoIngest.Filter(readExif = false),
+          )
+        }.getOrDefault(emptyList())
       }
       _curatorAssets.value = loaded
       _curatorLoading.value = false
@@ -532,31 +539,50 @@ class VlogPilotViewModel @Inject constructor(
       _albumError.value = null
       val result = withContext(Dispatchers.IO) {
         runCatching {
-          val loaded = PhotoIngest.loadRecent(
+          PhotoIngest.loadRecent(
             context = appContext,
             windowDays = 0,
             filter = PhotoIngest.Filter(
               cameraOnly = false,
+              readExif = false,
               maxVideoSizeBytes = Long.MAX_VALUE,
               maxImageSizeBytes = Long.MAX_VALUE,
               minImageSizeBytes = 1L,
             ),
           ).sortedByDescending { it.takenEpochMs }
-          val cachedPerceptions = loaded.mapNotNull { asset ->
-            PerceptionCache.get(appContext, asset)?.let { perception -> asset.id to perception }
-          }.toMap()
-          loaded to cachedPerceptions
         }
       }
-      result.onSuccess { (loaded, cachedPerceptions) ->
+      result.onSuccess { loaded ->
         _albumAssets.value = loaded
-        _albumPerceptions.value = cachedPerceptions
         _albumVisibleCount.value = minOf(ALBUM_PAGE_SIZE, loaded.size)
+        val loadedIds = loaded.mapTo(mutableSetOf()) { it.id }
+        _albumPerceptions.value = _albumPerceptions.value.filterKeys { it in loadedIds }
         refreshAssetUsageIndex()
+        _albumLoading.value = false
+        prefetchAlbumPerceptionCache(loaded)
       }.onFailure { t ->
         _albumError.value = t.message ?: t::class.java.simpleName
+        _albumLoading.value = false
       }
-      _albumLoading.value = false
+    }
+  }
+
+  private fun prefetchAlbumPerceptionCache(assets: List<Asset>) {
+    albumCacheJob?.cancel()
+    albumCacheJob = viewModelScope.launch {
+      val cachedPerceptions = withContext(Dispatchers.IO) {
+        assets
+          .asSequence()
+          .take(ALBUM_CACHE_PREFETCH_LIMIT)
+          .mapNotNull { asset ->
+            PerceptionCache.get(appContext, asset)?.let { perception -> asset.id to perception }
+          }
+          .toMap()
+      }
+      if (cachedPerceptions.isNotEmpty()) {
+        _albumPerceptions.value = _albumPerceptions.value + cachedPerceptions
+        refreshAssetUsageIndex()
+      }
     }
   }
 
@@ -1020,5 +1046,6 @@ class VlogPilotViewModel @Inject constructor(
   companion object {
     private const val STALE_WORK_HEARTBEAT_MS = 10 * 60 * 1000L
     private const val ALBUM_PAGE_SIZE = 60
+    private const val ALBUM_CACHE_PREFETCH_LIMIT = 240
   }
 }

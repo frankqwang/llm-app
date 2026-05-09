@@ -117,7 +117,7 @@ import kotlinx.coroutines.withContext
 internal enum class VlogPilotTab(val label: String, val icon: ImageVector) {
   Create("创作", Icons.Outlined.Search),
   Works("作品", Icons.Outlined.Movie),
-  Assets("素材", Icons.Outlined.PhotoLibrary),
+  Assets("相册", Icons.Outlined.PhotoLibrary),
   Settings("设置", Icons.Outlined.Edit),
 }
 

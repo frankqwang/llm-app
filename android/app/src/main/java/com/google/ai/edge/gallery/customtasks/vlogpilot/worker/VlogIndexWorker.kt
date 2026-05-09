@@ -1,9 +1,9 @@
 /*
  * Copyright 2026 The pc-pilot v3 authors
  *
- * Background asset indexing for the素材 page. It only updates perception/VLM
+ * Background asset indexing for the album page. It only updates perception/VLM
  * cache and never creates stories or renders videos, so indexing cannot be
- * mistaken for "制作中".
+ * mistaken for "making".
  */
 package com.google.ai.edge.gallery.customtasks.vlogpilot.worker
 
@@ -46,6 +46,7 @@ class VlogIndexWorker(
       windowDays = windowDays,
       filter = PhotoIngest.Filter(
         cameraOnly = false,
+        readExif = false,
         maxVideoSizeBytes = Long.MAX_VALUE,
         maxImageSizeBytes = Long.MAX_VALUE,
         minImageSizeBytes = 1L,

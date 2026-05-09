@@ -24,6 +24,10 @@ object PhotoIngest {
    *  (DCIM/), drop big videos, drop tiny garbage images. */
   data class Filter(
     val cameraOnly: Boolean = true,
+    /** Full album UI does not need EXIF GPS/time correction for every image.
+     *  Keeping this true for story generation preserves accuracy; setting it
+     *  false avoids thousands of slow contentResolver.openInputStream calls. */
+    val readExif: Boolean = true,
     /** Additional substring matches against RELATIVE_PATH (case-insensitive).
      *  Useful for "include this device-specific folder too", e.g. "Pictures/Pocket3/". */
     val extraIncludePaths: List<String> = emptyList(),
@@ -97,8 +101,9 @@ object PhotoIngest {
         if (size in 1 until filter.minImageSizeBytes) continue
         if (size > filter.maxImageSizeBytes) continue
 
-        // EXIF read for accurate timestamp and GPS (DATE_TAKEN can be wrong for synced files)
-        val (exifTaken, lat, lon) = readExif(context, uri)
+        // EXIF read for accurate timestamp and GPS (DATE_TAKEN can be wrong for synced files).
+        // Full-album browsing can skip this; opening every image stream is the slow part.
+        val (exifTaken, lat, lon) = if (filter.readExif) readExif(context, uri) else Triple(null, null, null)
         val finalTaken = exifTaken ?: taken
 
         out += Asset(

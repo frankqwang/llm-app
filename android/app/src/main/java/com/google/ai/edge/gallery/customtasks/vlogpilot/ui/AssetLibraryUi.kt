@@ -1,7 +1,7 @@
 /*
  * Copyright 2026 The pc-pilot v3 authors
  *
- * Full-album material browser for VlogPilot. The story scanner can keep its
+ * Full-album browser for VlogPilot. The story scanner can keep its
  * 90-day window, while this page shows the wider MediaStore library and links
  * assets back to the stories/videos that used them.
  */
@@ -85,8 +85,12 @@ internal fun AssetLibraryTab(
   onOpenStory: (String) -> Unit,
   onOpenVideo: (String) -> Unit,
 ) {
-  LaunchedEffect(assets.isEmpty(), loading) {
-    if (assets.isEmpty() && !loading) onLoad()
+  var autoLoadRequested by remember { mutableStateOf(false) }
+  LaunchedEffect(assets.isEmpty()) {
+    if (assets.isEmpty() && !autoLoadRequested) {
+      autoLoadRequested = true
+      onLoad()
+    }
   }
 
   var selectedAssetId by remember { mutableStateOf<String?>(null) }
@@ -112,7 +116,7 @@ internal fun AssetLibraryTab(
           Icon(Icons.Outlined.PhotoLibrary, contentDescription = null, modifier = Modifier.padding(9.dp))
         }
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-          Text("素材", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+          Text("相册素材", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
           Text(
             "全相册 ${assets.size} 个 · 当前显示 ${visibleAssets.size} 个",
             style = MaterialTheme.typography.labelSmall,
@@ -122,7 +126,7 @@ internal fun AssetLibraryTab(
           )
         }
         IconButton(onClick = onRefresh, enabled = !loading) {
-          Icon(Icons.Outlined.Search, contentDescription = "重新读取素材库")
+          Icon(Icons.Outlined.Search, contentDescription = "重新读取相册")
         }
       }
 
@@ -146,14 +150,14 @@ internal fun AssetLibraryTab(
       }
       errorMessage?.takeIf { it.isNotBlank() }?.let { message ->
         Text(
-          "素材库读取失败：$message",
+          "相册读取失败：$message",
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.error,
         )
       }
       if (assets.isEmpty() && !loading) {
         Text(
-          "还没有读到相册素材。检查相册权限后点右上角重新读取。",
+          "还没有读到相册内容。检查相册权限后点右上角重新读取。",
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -193,7 +197,7 @@ internal fun AssetLibraryTab(
           onClick = onLoadMore,
           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 9.dp),
         ) {
-          Text("加载更多素材", fontWeight = FontWeight.SemiBold)
+          Text("加载更多", fontWeight = FontWeight.SemiBold)
         }
       }
     }
