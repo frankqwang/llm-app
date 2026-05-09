@@ -189,25 +189,13 @@ internal fun StoryHeroCard(
 internal fun StoryProgressCard(
   state: PipelineState,
   progress: ProgressSnapshot,
+  liveDecision: com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventDecisions?,
   onCancel: () -> Unit,
 ) {
   val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
-  val context = androidx.compose.ui.platform.LocalContext.current
   val friendly = friendlyProgress(progress, making = state is PipelineState.Running)
   val fraction = remember(friendly.current, friendly.total) {
     if (friendly.total > 0) (friendly.current.toFloat() / friendly.total.toFloat()).coerceIn(0f, 1f) else null
-  }
-  // Re-read the persistent timeline whenever the live progress ticks. Reads
-  // from filesDir so it survives process death (the worker keeps appending
-  // even when the UI hasn't re-subscribed yet).
-  val timelineEntries by androidx.compose.runtime.produceState(
-    initialValue = emptyList<com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.AgentTimelineEntry>(),
-    progress.stage,
-    progress.recent,
-  ) {
-    value = withContext(kotlinx.coroutines.Dispatchers.IO) {
-      com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.AgentTimeline.read(context, tailLimit = 200)
-    }
   }
   PanelCard {
     Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -230,21 +218,21 @@ internal fun StoryProgressCard(
           color = tokens.colors.secondaryLabel,
         )
       }
-      // Claude-style timeline: shows what the AI is doing right now and the
-      // chain of agents that fed into it. Cap height so the card doesn't
-      // dominate the viewport, but make it scrollable so the user can scroll
-      // back through earlier steps.
-      Text(
-        "工作过程",
-        style = MaterialTheme.typography.labelMedium,
-        fontWeight = FontWeight.SemiBold,
-        color = tokens.colors.secondaryLabel,
-      )
-      com.google.ai.edge.gallery.customtasks.vlogpilot.ui.AgentTimelineCard(
-        entries = timelineEntries,
-        pulse = state is PipelineState.Running,
-        maxVisibleHeight = 320.dp,
-      )
+      // Live agent perspective — shows each agent's actual output as it
+      // becomes available. The current agent's dot pulses; previous agents
+      // get a green check + collapsible card to inspect what they produced.
+      if (liveDecision != null) {
+        Text(
+          "AI 正在制作",
+          style = MaterialTheme.typography.labelMedium,
+          fontWeight = FontWeight.SemiBold,
+          color = tokens.colors.secondaryLabel,
+        )
+        com.google.ai.edge.gallery.customtasks.vlogpilot.ui.AgentWorkPanel(
+          d = liveDecision,
+          live = state is PipelineState.Running,
+        )
+      }
       com.google.ai.edge.gallery.customtasks.vlogpilot.ui.TintedActionButton(
         text = "取消",
         onClick = onCancel,

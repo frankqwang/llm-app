@@ -85,28 +85,36 @@ fun AgentTimelineCard(
     return
   }
 
-  val listState = rememberLazyListState()
-  // Auto-stick to bottom while the pipeline is running — matches how Claude's
-  // tool-call panel keeps the newest call in view as the agent works.
-  LaunchedEffect(entries.size, pulse) {
-    if (pulse && entries.isNotEmpty()) {
-      listState.animateScrollToItem(entries.size - 1)
+  // When a maxVisibleHeight is supplied we use LazyColumn for proper scroll +
+  // virtualization. When null (e.g. nested inside an outer scroll container
+  // like the detail page's LazyColumn) we fall through to a plain Column so
+  // we don't trigger the "infinity max height" crash that nested Lazy* hits
+  // when the parent doesn't know our height in advance.
+  if (maxVisibleHeight != null) {
+    val listState = rememberLazyListState()
+    LaunchedEffect(entries.size, pulse) {
+      if (pulse && entries.isNotEmpty()) {
+        listState.animateScrollToItem(entries.size - 1)
+      }
     }
-  }
-
-  val listMod = if (maxVisibleHeight != null) {
-    modifier.heightIn(max = maxVisibleHeight)
+    LazyColumn(
+      state = listState,
+      modifier = modifier
+        .fillMaxWidth()
+        .heightIn(max = maxVisibleHeight),
+      verticalArrangement = Arrangement.spacedBy(0.dp),
+    ) {
+      items(entries, key = { "${it.timestampMs}-${it.stage}-${it.detail.hashCode()}" }) { entry ->
+        val isLatest = entry === entries.last()
+        AgentTimelineRow(entry = entry, isLatest = isLatest, pulse = pulse && isLatest)
+      }
+    }
   } else {
-    modifier
-  }
-  LazyColumn(
-    state = listState,
-    modifier = listMod.fillMaxWidth(),
-    verticalArrangement = Arrangement.spacedBy(0.dp),
-  ) {
-    items(entries, key = { "${it.timestampMs}-${it.stage}-${it.detail.hashCode()}" }) { entry ->
-      val isLatest = entry === entries.last()
-      AgentTimelineRow(entry = entry, isLatest = isLatest, pulse = pulse && isLatest)
+    Column(modifier = modifier.fillMaxWidth()) {
+      val last = entries.last()
+      entries.forEach { entry ->
+        AgentTimelineRow(entry = entry, isLatest = entry === last, pulse = false)
+      }
     }
   }
 }

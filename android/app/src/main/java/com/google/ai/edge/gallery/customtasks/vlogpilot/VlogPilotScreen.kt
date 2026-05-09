@@ -309,9 +309,15 @@ fun VlogPilotScreen(
         val manifest = eventSelection
         when {
           manifest == null && primaryPipelineRunning -> item {
+            // Pick the most recent in-flight event (no mp4 yet) so its
+            // partial agent outputs feed the live work panel. Falls back to
+            // the most recent decision overall if nothing is in flight yet
+            // (early seconds of perception / annotation).
+            val liveDecision = decisions.firstOrNull { it.mp4Path == null } ?: decisions.firstOrNull()
             StoryProgressCard(
               state = state,
               progress = progress,
+              liveDecision = liveDecision,
               onCancel = viewModel::cancelPipeline,
             )
           }

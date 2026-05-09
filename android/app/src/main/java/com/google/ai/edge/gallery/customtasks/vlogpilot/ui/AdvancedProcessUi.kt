@@ -433,150 +433,18 @@ internal fun CollapsedSummary(d: EventDecisions, timeline: Timeline?) {
 @Composable
 internal fun ProcessOutputs(
   d: EventDecisions,
-  timeline: Timeline?,
-  assetMap: Map<String, Asset>,
+  @Suppress("UNUSED_PARAMETER") timeline: Timeline?,
+  @Suppress("UNUSED_PARAMETER") assetMap: Map<String, Asset>,
 ) {
-  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
-  val context = androidx.compose.ui.platform.LocalContext.current
-
-  // Replay the agent's work for THIS event from the persistent breadcrumb log.
-  // Loaded once when the section becomes visible — the file is append-only so
-  // re-reads aren't necessary unless the user re-iterates.
-  val timelineEntries by androidx.compose.runtime.produceState(
-    initialValue = emptyList<com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.AgentTimelineEntry>(),
-    d.eventId,
-    d.versionCount,
-  ) {
-    value = withContext(kotlinx.coroutines.Dispatchers.IO) {
-      val all = com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.AgentTimeline.read(context, tailLimit = 1500)
-      com.google.ai.edge.gallery.customtasks.vlogpilot.pipeline.AgentTimeline.forEvent(all, d.eventId)
-    }
-  }
-  if (timelineEntries.isNotEmpty()) {
-    DecisionSection(
-      icon = Icons.Outlined.Timer,
-      title = "工作时间线",
-      subtitle = "${timelineEntries.size} 步 · 最早 ${formatRelativeTime(timelineEntries.first().timestampMs)}",
-    ) {
-      com.google.ai.edge.gallery.customtasks.vlogpilot.ui.AgentTimelineCard(
-        entries = timelineEntries,
-        pulse = false,
-        maxVisibleHeight = null,
-      )
-    }
-  }
-
-  d.memory?.let { memory ->
-    DecisionSection(icon = Icons.Outlined.Visibility, title = "Browse", subtitle = "事件记忆") {
-      Text(
-        memory.storylineSummary,
-        style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.onSurface,
-      )
-      if (memory.emotionalArc.isNotBlank()) KeyValue("情绪弧线", memory.emotionalArc)
-      if (memory.charactersObserved.isNotEmpty()) KeyValue("人物", memory.charactersObserved.joinToString("、"))
-      if (memory.visualStyleSignals.isNotBlank()) KeyValue("视觉信号", memory.visualStyleSignals)
-      memory.keyMoments.take(4).forEach { moment ->
-        Text(
-          "#${moment.imageIndex} · ${moment.why}",
-          style = MaterialTheme.typography.bodySmall,
-          color = tokens.colors.secondaryLabel,
-        )
-      }
-    }
-  }
-
-  d.audience?.let { audience ->
-    DecisionSection(icon = Icons.Outlined.Person, title = "Audience", subtitle = "观看诉求") {
-      if (audience.emotionalPayoff.isNotBlank()) KeyValue("情绪回报", audience.emotionalPayoff)
-      if (audience.hookStrategy.isNotBlank()) KeyValue("开头钩子", audience.hookStrategy)
-      if (audience.povVoice.isNotBlank()) KeyValue("视角", audience.povVoice)
-      if (audience.pacingGuidance.isNotBlank()) KeyValue("节奏", audience.pacingGuidance)
-      if (audience.avoidList.isNotEmpty()) KeyValue("避免", audience.avoidList.joinToString("、"))
-    }
-  }
-
-  d.director?.let { director ->
-    DecisionSection(icon = Icons.Outlined.Movie, title = "Director", subtitle = "叙事脚本") {
-      if (director.title.isNotBlank()) {
-        Text(
-          director.title,
-          style = MaterialTheme.typography.titleMedium,
-          fontWeight = FontWeight.Bold,
-          color = MaterialTheme.colorScheme.onSurface,
-        )
-      }
-      KeyValue("基调", director.tone)
-      KeyValue("目标时长", formatSec(director.targetDurationSec.toDouble()))
-      if (director.narrativeArc.isNotEmpty()) KeyValue("叙事弧线", director.narrativeArc.joinToString("  →  "))
-      if (director.shotBlueprint.isNotEmpty()) {
-        Spacer(Modifier.height(4.dp))
-        director.shotBlueprint.take(10).forEach { req ->
-          ShotBlueprintRow(
-            position = req.position,
-            role = req.role.name.lowercase(),
-            durationSec = req.durationSec,
-            requirement = req.visualRequirements,
-          )
-        }
-      }
-    }
-  }
-
-  timeline?.let { tl ->
-    DecisionSection(icon = Icons.Outlined.Edit, title = "Editor", subtitle = "最终时间线 ${tl.shots.size} shots") {
-      tl.shots.forEach { shot ->
-        ShotRow(shot = shot, asset = assetMap[shot.assetId])
-      }
-    }
-  }
-
-  val critiqueHistory = timeline?.critiqueHistory.orEmpty()
-  if (d.critique != null || critiqueHistory.isNotEmpty()) {
-    DecisionSection(icon = Icons.Outlined.Search, title = "Critic", subtitle = "审片反馈") {
-      val critique = d.critique ?: critiqueHistory.lastOrNull()
-      if (critique == null || (critique.issues.isEmpty() && critique.revisedRequests.isEmpty())) {
-        Text(
-          "没有发现需要修改的问题。",
-          style = MaterialTheme.typography.bodyMedium,
-          color = tokens.colors.systemGreen,
-        )
-      } else {
-        critique.issues.forEach { issue ->
-          Row(
-            modifier = Modifier.padding(vertical = 3.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.Top,
-          ) {
-            Text(
-              "•",
-              style = MaterialTheme.typography.bodyMedium,
-              color = tokens.colors.systemOrange,
-              fontWeight = FontWeight.Bold,
-            )
-            Text(
-              issue,
-              modifier = Modifier.weight(1f),
-              style = MaterialTheme.typography.bodyMedium,
-              color = MaterialTheme.colorScheme.onSurface,
-            )
-          }
-        }
-        if (critique.revisedRequests.isNotEmpty()) {
-          KeyValue("重选镜头", "${critique.revisedRequests.size} 个")
-        }
-      }
-      if (critiqueHistory.size > 1) {
-        KeyValue("迭代次数", critiqueHistory.size.toString())
-      }
-    }
-  }
-
-  d.perf?.let { perf ->
-    DecisionSection(icon = Icons.Outlined.Timer, title = "Timing", subtitle = "阶段耗时") {
-      PerfGrid(perf)
-    }
-  }
+  // Claude-agent-style work perspective — each agent's actual output as a
+  // collapsible card. Replaces both the old structured-fields list and the
+  // bare timestamp timeline; this view shows WHAT the AI produced rather
+  // than WHEN each stage ticked. The timeline / assetMap params are kept
+  // for ABI stability with existing callers that still pass them.
+  com.google.ai.edge.gallery.customtasks.vlogpilot.ui.AgentWorkPanel(
+    d = d,
+    live = false,
+  )
 }
 
 /** Single bullet row inside the Director section. Tinted color for the role
