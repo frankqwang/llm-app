@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="app_name">相册挖掘-本地agent版</string>
+  <string name="app_name_first_part">相册挖掘</string>
+  <string name="app_name_second_part">本地agent版</string>
+  <string name="tos_dialog_title_app">欢迎使用相册挖掘-本地agent版</string>
+</resources>
