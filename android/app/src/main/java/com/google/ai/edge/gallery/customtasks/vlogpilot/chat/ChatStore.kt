@@ -27,7 +27,14 @@ object ChatStore {
   private const val META_FILE = "meta.json"
   private const val MESSAGES_FILE = "messages.jsonl"
 
-  private val json = Json { prettyPrint = true; ignoreUnknownKeys = true; isLenient = true }
+  // Reader is lenient and ignores unknown keys so schema additions don't break
+  // older on-disk records. Writer is COMPACT (single line per record) so the
+  // .jsonl invariant holds — readLines() + decodeFromString(line) only works
+  // when each record is one line. Pretty-print here was a long-standing bug:
+  // messages survived in-memory but vanished after every app restart because
+  // the loader couldn't parse the multi-line entries the writer produced.
+  private val readerJson = Json { ignoreUnknownKeys = true; isLenient = true }
+  private val writerJson = Json { prettyPrint = false; ignoreUnknownKeys = true }
   private val lock = Any()
 
   private fun rootDir(context: Context): File =
@@ -47,20 +54,60 @@ object ChatStore {
       ?: emptyList()
   }
 
-  /** Reads all messages for a conversation in chronological order. */
+  /** Reads all messages for a conversation in chronological order.
+   *  Falls back to a brace-balanced parser if the file was written by an
+   *  earlier version that pretty-printed records across multiple lines. */
   fun loadMessages(context: Context, convoId: String): List<ChatMessage> {
     val file = File(convoDir(context, convoId), MESSAGES_FILE)
     if (!file.isFile) return emptyList()
     return try {
-      file.readLines()
+      val perLine = file.readLines()
         .mapNotNull { line ->
           if (line.isBlank()) return@mapNotNull null
-          runCatching { json.decodeFromString(ChatMessage.serializer(), line) }.getOrNull()
+          runCatching { readerJson.decodeFromString(ChatMessage.serializer(), line) }.getOrNull()
+        }
+      if (perLine.isNotEmpty()) return perLine
+      // Legacy fallback — a previous build wrote pretty-printed JSON which
+      // can't be parsed line-by-line. Recover by extracting brace-balanced
+      // chunks from the whole file content.
+      extractJsonObjects(file.readText())
+        .mapNotNull { chunk ->
+          runCatching { readerJson.decodeFromString(ChatMessage.serializer(), chunk) }.getOrNull()
         }
     } catch (t: Throwable) {
       Log.w(TAG, "loadMessages($convoId) failed: ${t.message}")
       emptyList()
     }
+  }
+
+  /** Splits a string containing concatenated JSON objects into individual
+   *  object strings. Brace-balanced; ignores braces inside string literals. */
+  private fun extractJsonObjects(text: String): List<String> {
+    val out = mutableListOf<String>()
+    var depth = 0
+    var inString = false
+    var escape = false
+    var start = -1
+    text.forEachIndexed { i, c ->
+      if (escape) { escape = false; return@forEachIndexed }
+      if (inString) {
+        if (c == '\\') escape = true
+        else if (c == '"') inString = false
+        return@forEachIndexed
+      }
+      when (c) {
+        '"' -> inString = true
+        '{' -> { if (depth == 0) start = i; depth++ }
+        '}' -> {
+          depth--
+          if (depth == 0 && start >= 0) {
+            out.add(text.substring(start, i + 1))
+            start = -1
+          }
+        }
+      }
+    }
+    return out
   }
 
   /** Appends a message and bumps the conversation's updatedAt. Thread-safe. */
@@ -69,7 +116,7 @@ object ChatStore {
       val dir = convoDir(context, msg.conversationId)
       val msgFile = File(dir, MESSAGES_FILE)
       runCatching {
-        msgFile.appendText(json.encodeToString(ChatMessage.serializer(), msg) + "\n")
+        msgFile.appendText(writerJson.encodeToString(ChatMessage.serializer(), msg) + "\n")
       }.onFailure { Log.w(TAG, "appendMessage failed: ${it.message}") }
       // Bump meta.updatedAt
       val metaFile = File(dir, META_FILE)
@@ -127,7 +174,7 @@ object ChatStore {
   private fun readMeta(file: File): ChatConversation? {
     if (!file.isFile) return null
     return try {
-      json.decodeFromString(ChatConversation.serializer(), file.readText())
+      readerJson.decodeFromString(ChatConversation.serializer(), file.readText())
     } catch (t: Throwable) {
       Log.w(TAG, "readMeta($file) failed: ${t.message}")
       null
@@ -137,7 +184,7 @@ object ChatStore {
   private fun writeMeta(file: File, convo: ChatConversation) {
     runCatching {
       file.parentFile?.mkdirs()
-      file.writeText(json.encodeToString(ChatConversation.serializer(), convo))
+      file.writeText(writerJson.encodeToString(ChatConversation.serializer(), convo))
     }.onFailure { Log.w(TAG, "writeMeta failed: ${it.message}") }
   }
 }

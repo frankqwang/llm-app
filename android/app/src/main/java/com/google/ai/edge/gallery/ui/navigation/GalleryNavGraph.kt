@@ -187,9 +187,9 @@ fun GalleryNavHost(
     enterTransition = { EnterTransition.None },
     exitTransition = { ExitTransition.None },
   ) {
-    // VlogPilot direct landing — c-end users see the big Generate button on launch.
-    // The "Models" action in the top bar is the escape hatch to gallery's model
-    // import flow + the rest of the gallery's tasks via the home screen.
+    // VlogPilot direct landing — c-end users see the VlogPilot tabs on launch.
+    // The Gallery entry lives in VlogPilot settings so the main tabs keep
+    // their vertical space for product content.
     composable(route = ROUTE_VLOGPILOT) {
       com.google.ai.edge.gallery.customtasks.vlogpilot.VlogPilotRootScreen(
         modelManagerViewModel = modelManagerViewModel,

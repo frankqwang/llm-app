@@ -185,6 +185,67 @@ internal fun StoryHeroCard(
   }
 }
 
+/** Compact "AI is making one for you, tap to see progress" hint shown on the
+ *  Works tab while a pipeline is running. The full per-stage view lives in
+ *  Chat (which is the source of truth for live progress) — Works should stay
+ *  about finished works, not about process. */
+@Composable
+internal fun PipelineRunningHint(
+  progress: ProgressSnapshot,
+  onTap: () -> Unit,
+  onCancel: () -> Unit,
+) {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
+  val subtitle = progress.headline.ifBlank { "AI 正在为你制作 vlog" }
+  androidx.compose.material3.Surface(
+    modifier = Modifier
+      .fillMaxWidth()
+      .clickable { onTap() },
+    shape = RoundedCornerShape(16.dp),
+    color = tokens.colors.accentTint,
+    tonalElevation = 0.dp,
+  ) {
+    Row(
+      modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+      Box(
+        modifier = Modifier
+          .size(36.dp)
+          .clip(RoundedCornerShape(12.dp))
+          .background(tokens.colors.accent.copy(alpha = 0.18f)),
+        contentAlignment = Alignment.Center,
+      ) {
+        Icon(
+          imageVector = Icons.Outlined.Movie,
+          contentDescription = null,
+          tint = tokens.colors.accent,
+          modifier = Modifier.size(20.dp),
+        )
+      }
+      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+          "AI 正在制作中",
+          style = MaterialTheme.typography.bodyMedium,
+          fontWeight = FontWeight.SemiBold,
+          color = tokens.colors.accent,
+        )
+        Text(
+          "$subtitle · 点这里看进度",
+          style = MaterialTheme.typography.labelSmall,
+          color = tokens.colors.secondaryLabel,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
+      androidx.compose.material3.TextButton(onClick = onCancel) {
+        Text("取消", color = tokens.colors.systemRed, style = MaterialTheme.typography.labelMedium)
+      }
+    }
+  }
+}
+
 @Composable
 internal fun StoryProgressCard(
   state: PipelineState,

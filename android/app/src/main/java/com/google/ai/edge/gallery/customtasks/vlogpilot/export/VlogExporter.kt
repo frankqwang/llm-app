@@ -18,6 +18,8 @@ package com.google.ai.edge.gallery.customtasks.vlogpilot.export
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
@@ -32,12 +34,18 @@ object VlogExporter {
   // and most third-party social apps' video pickers.
   private const val GALLERY_SUBDIR = "VlogPilot"
 
-  data class SaveResult(val uri: Uri, val displayName: String)
+  data class SaveResult(val uri: Uri, val displayName: String, val coverUri: Uri? = null)
 
   /**
    * Copy the rendered MP4 into the public Movies/VlogPilot/ folder via
-   * MediaStore. Returns the inserted URI on success; null when the source
-   * file is missing or the insert/write fails.
+   * MediaStore, and write a poster JPG (the first frame of the video) into
+   * Pictures/VlogPilot/ so social apps + file managers have a real cover.
+   *
+   * The MP4 itself also carries the vlog title via MediaStore.Video.Media.TITLE
+   * so any gallery that surfaces metadata shows the human title (not just the
+   * file name). Returns null when the source file is missing or the insert
+   * fails. Cover write is best-effort — a failure there doesn't abort the
+   * MP4 save (the user still gets the video).
    *
    * Should be called from a coroutine on Dispatchers.IO — does blocking I/O.
    */
@@ -47,6 +55,7 @@ object VlogExporter {
       Log.w(TAG, "source mp4 missing or empty: $mp4Path")
       return null
     }
+    val rawTitle = displayName.trim()
     val safeName = sanitizeFileName(displayName).ifBlank { "vlog_${System.currentTimeMillis()}" }
     val finalName = if (safeName.endsWith(".mp4", ignoreCase = true)) safeName else "$safeName.mp4"
 
@@ -54,6 +63,10 @@ object VlogExporter {
     val collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
     val values = ContentValues().apply {
       put(MediaStore.Video.Media.DISPLAY_NAME, finalName)
+      // TITLE is the human-readable name surfaced by metadata-aware galleries
+      // (Google Photos, vivo's stock gallery). Without it, only the filename
+      // shows — which has Chinese chars stripped by sanitizeFileName.
+      put(MediaStore.Video.Media.TITLE, rawTitle.ifBlank { finalName })
       put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
       put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/$GALLERY_SUBDIR")
       put(MediaStore.Video.Media.IS_PENDING, 1)
@@ -84,7 +97,82 @@ object VlogExporter {
 
     val finalize = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
     runCatching { resolver.update(uri, finalize, null, null) }
-    return SaveResult(uri, finalName)
+
+    // Best-effort cover poster — extracted from the video at ~1s in. If this
+    // fails we still return success on the MP4; the user can always grab a
+    // frame later.
+    val coverName = if (safeName.endsWith(".mp4", ignoreCase = true)) {
+      safeName.removeSuffix(".mp4").removeSuffix(".MP4")
+    } else safeName
+    val coverUri = runCatching { writeCoverPoster(context, mp4Path, coverName, rawTitle) }
+      .onFailure { Log.w(TAG, "cover write failed: ${it.message}") }
+      .getOrNull()
+    return SaveResult(uri, finalName, coverUri)
+  }
+
+  /** Extract a single frame from the rendered MP4 and save it as a JPG into
+   *  Pictures/VlogPilot/ with the vlog title as TITLE metadata. Lets the user
+   *  share the cover separately to platforms that take a custom cover (小红书,
+   *  Instagram). Returns the inserted URI or null on failure. */
+  private fun writeCoverPoster(
+    context: Context,
+    mp4Path: String,
+    baseName: String,
+    title: String,
+  ): Uri? {
+    val frame = extractFrame(mp4Path) ?: return null
+    val resolver = context.contentResolver
+    val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    val coverFileName = "$baseName.jpg"
+    val values = ContentValues().apply {
+      put(MediaStore.Images.Media.DISPLAY_NAME, coverFileName)
+      put(MediaStore.Images.Media.TITLE, title.ifBlank { baseName })
+      put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+      put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/$GALLERY_SUBDIR")
+      put(MediaStore.Images.Media.IS_PENDING, 1)
+    }
+    val uri = try {
+      resolver.insert(collection, values)
+    } catch (t: Throwable) {
+      Log.e(TAG, "cover insert failed: ${t.message}", t)
+      null
+    } ?: return null
+
+    val wrote = try {
+      resolver.openOutputStream(uri)?.use { out ->
+        frame.compress(Bitmap.CompressFormat.JPEG, 92, out)
+      } ?: false
+      true
+    } catch (t: Throwable) {
+      Log.e(TAG, "cover write failed: ${t.message}", t)
+      false
+    } finally {
+      frame.recycle()
+    }
+    if (!wrote) {
+      runCatching { resolver.delete(uri, null, null) }
+      return null
+    }
+    val finalize = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+    runCatching { resolver.update(uri, finalize, null, null) }
+    return uri
+  }
+
+  /** Pull a frame ~1 second in from the rendered MP4. Falls back to the very
+   *  first frame if the seek fails. Returns null when MediaMetadataRetriever
+   *  can't open the file at all. */
+  private fun extractFrame(mp4Path: String): Bitmap? {
+    val retriever = MediaMetadataRetriever()
+    return try {
+      retriever.setDataSource(mp4Path)
+      retriever.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+        ?: retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+    } catch (t: Throwable) {
+      Log.w(TAG, "extractFrame failed for $mp4Path: ${t.message}")
+      null
+    } finally {
+      runCatching { retriever.release() }
+    }
   }
 
   /**

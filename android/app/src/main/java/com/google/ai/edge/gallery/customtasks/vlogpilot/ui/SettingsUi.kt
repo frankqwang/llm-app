@@ -41,6 +41,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Apps
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.ErrorOutline
@@ -120,6 +121,7 @@ internal fun SettingsCard(
   running: Boolean,
   onIntentSelect: (GenerationIntent) -> Unit,
   onPowerSelect: (PowerProfile) -> Unit,
+  onOpenGallery: () -> Unit,
 ) {
   PanelCard {
     Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -144,6 +146,15 @@ internal fun SettingsCard(
         onSelect = onPowerSelect,
         enabled = !running,
       )
+      com.google.ai.edge.gallery.customtasks.vlogpilot.ui.HairlineDivider(startInset = 0.dp)
+      FilledTonalButton(
+        onClick = onOpenGallery,
+        modifier = Modifier.fillMaxWidth(),
+      ) {
+        Icon(Icons.Outlined.Apps, contentDescription = null, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(8.dp))
+        Text("打开 AI Edge Gallery")
+      }
     }
   }
 }

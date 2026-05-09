@@ -60,7 +60,7 @@ import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventSelectionSta
 internal enum class WorksFilter(val label: String) {
   All("全部"),
   Completed("已生成"),
-  Candidates("候选"),
+  Candidates("待制作"),
 }
 
 internal sealed class WorkRow {
@@ -72,6 +72,7 @@ internal sealed class WorkRow {
 internal fun UnifiedWorksFeed(
   decisions: List<EventDecisions>,
   manifest: EventSelectionManifest?,
+  activeEventIds: Set<String> = emptySet(),
   onOpenVlog: (String) -> Unit,
   onMakeCandidate: (EventCandidateSnapshot) -> Unit,
 ) {
@@ -100,7 +101,7 @@ internal fun UnifiedWorksFeed(
   Column(verticalArrangement = Arrangement.spacedBy(tokens.spacing.sm)) {
     LargeTitleHeader(
       title = "作品",
-      subtitle = "${decisions.size} 已生成 · ${candidates.size} AI 推荐",
+      subtitle = "${decisions.size} 已生成 · ${candidates.size} 待制作",
     )
 
     LazyRow(
@@ -133,7 +134,7 @@ internal fun UnifiedWorksFeed(
           Text(
             when (filter) {
               WorksFilter.Completed -> "还没有已生成的作品"
-              WorksFilter.Candidates -> "AI 还没有推荐的故事，到对话页让它先扫一遍相册"
+              WorksFilter.Candidates -> "还没有待制作的候选素材，到对话页让 AI 先扫一遍相册"
               WorksFilter.All -> "还没有作品。到对话页让 AI 帮你做一条"
             },
             style = MaterialTheme.typography.bodyMedium,
@@ -149,6 +150,7 @@ internal fun UnifiedWorksFeed(
             )
             is WorkRow.Candidate -> CandidateRow(
               snapshot = row.snapshot,
+              active = row.snapshot.eventId in activeEventIds,
               onClick = { onMakeCandidate(row.snapshot) },
             )
           }
@@ -250,7 +252,7 @@ private fun CompletedRow(d: EventDecisions, onClick: () -> Unit) {
 }
 
 @Composable
-private fun CandidateRow(snapshot: EventCandidateSnapshot, onClick: () -> Unit) {
+private fun CandidateRow(snapshot: EventCandidateSnapshot, active: Boolean, onClick: () -> Unit) {
   val tokens = VlogPilotTokens
   Row(
     modifier = Modifier
@@ -260,21 +262,39 @@ private fun CandidateRow(snapshot: EventCandidateSnapshot, onClick: () -> Unit) 
     horizontalArrangement = Arrangement.spacedBy(tokens.spacing.md),
     verticalAlignment = Alignment.CenterVertically,
   ) {
-    // Sparkle icon container — distinct from completed rows so the user
-    // can tell at a glance which rows still need to be made.
+    val cover = snapshot.assets.firstOrNull()
     Box(
       modifier = Modifier
         .size(72.dp)
         .clip(RoundedCornerShape(12.dp))
-        .background(tokens.colors.systemOrange.copy(alpha = if (tokens.colors.isDark) 0.22f else 0.12f)),
+        .background(tokens.colors.groupedSurfaceRaised),
       contentAlignment = Alignment.Center,
     ) {
-      Icon(
-        Icons.Outlined.AutoAwesome,
-        contentDescription = null,
-        tint = tokens.colors.systemOrange,
-        modifier = Modifier.size(28.dp),
-      )
+      if (cover != null) {
+        AssetThumb(asset = cover, modifier = Modifier.size(72.dp))
+      } else {
+        Icon(
+          Icons.Outlined.AutoAwesome,
+          contentDescription = null,
+          tint = tokens.colors.systemOrange,
+          modifier = Modifier.size(28.dp),
+        )
+      }
+      Box(
+        modifier = Modifier
+          .align(Alignment.BottomEnd)
+          .padding(4.dp)
+          .clip(RoundedCornerShape(6.dp))
+          .background(tokens.colors.systemOrange.copy(alpha = 0.88f))
+          .padding(horizontal = 5.dp, vertical = 1.dp),
+      ) {
+        Text(
+          "AI",
+          style = MaterialTheme.typography.labelSmall,
+          color = Color.White,
+          fontWeight = FontWeight.SemiBold,
+        )
+      }
     }
     Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
       Text(
@@ -297,19 +317,19 @@ private fun CandidateRow(snapshot: EventCandidateSnapshot, onClick: () -> Unit) 
         verticalAlignment = Alignment.CenterVertically,
       ) {
         Text(
-          "${snapshot.assets.size} 素材 · 适合度 ${(snapshot.valueScore * 100).toInt()}",
+          "${snapshot.assets.size} 素材 · 适合度 ${(snapshot.valueScore.coerceIn(0f, 1f) * 100).toInt()}",
           modifier = Modifier.weight(1f),
           style = MaterialTheme.typography.labelMedium,
           color = tokens.colors.tertiaryLabel,
           maxLines = 1,
           overflow = TextOverflow.Ellipsis,
         )
-        StatusTag("AI 推荐", tokens.colors.systemOrange)
+        StatusTag(if (active) "制作中" else "待制作", if (active) tokens.colors.accent else tokens.colors.systemOrange)
       }
     }
     Icon(
       imageVector = Icons.AutoMirrored.Outlined.KeyboardArrowRight,
-      contentDescription = "去对话页生成",
+      contentDescription = "打开编辑",
       tint = tokens.colors.tertiaryLabel,
       modifier = Modifier.size(20.dp),
     )

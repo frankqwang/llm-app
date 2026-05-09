@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -28,6 +29,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -43,9 +45,12 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -68,11 +73,18 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.google.ai.edge.gallery.customtasks.vlogpilot.AssetThumb
+import com.google.ai.edge.gallery.customtasks.vlogpilot.ProgressSnapshot
+import com.google.ai.edge.gallery.customtasks.vlogpilot.compactStoryMeta
+import com.google.ai.edge.gallery.customtasks.vlogpilot.friendlyProgress
+import com.google.ai.edge.gallery.customtasks.vlogpilot.storyReason
+import com.google.ai.edge.gallery.customtasks.vlogpilot.storyTitle
 import com.google.ai.edge.gallery.customtasks.vlogpilot.chat.ChatConversation
 import com.google.ai.edge.gallery.customtasks.vlogpilot.chat.ChatMessage
 import com.google.ai.edge.gallery.customtasks.vlogpilot.chat.ChatRole
 import com.google.ai.edge.gallery.customtasks.vlogpilot.chat.ChatViewModel
 import com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
+import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventCandidateSnapshot
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventDecisions
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventSelectionManifest
 import java.text.SimpleDateFormat
@@ -89,8 +101,12 @@ internal fun ChatScreen(
   viewModel: ChatViewModel,
   decisions: List<EventDecisions>,
   eventSelection: EventSelectionManifest?,
+  focusedCandidate: EventCandidateSnapshot? = null,
+  progress: ProgressSnapshot = ProgressSnapshot(),
+  pipelineRunning: Boolean = false,
   onSend: (text: String, currentEventId: String?) -> Unit,
   onOpenResult: (eventId: String) -> Unit = {},
+  onFocusEventChange: (String?) -> Unit = {},
   pendingPrefill: String? = null,
   autoSendPrefill: Boolean = false,
   onPrefillConsumed: () -> Unit = {},
@@ -104,9 +120,14 @@ internal fun ChatScreen(
   val activeConvoId by viewModel.activeConversationId.collectAsStateSafe()
   val messages by viewModel.messages.collectAsStateSafe()
   val activeConvo = conversations.firstOrNull { it.id == activeConvoId }
+  val hasWorkContext = focusedCandidate != null || pipelineRunning
 
   var showHistory by remember { mutableStateOf(false) }
   var inputText by remember { mutableStateOf("") }
+
+  LaunchedEffect(activeConvo?.eventId) {
+    onFocusEventChange(activeConvo?.eventId)
+  }
 
   // Consume any pending prefill from the Works tab handoff. When
   // autoSendPrefill is true (e.g. the user tapped a candidate row), we
@@ -115,7 +136,7 @@ internal fun ChatScreen(
     if (!pendingPrefill.isNullOrBlank()) {
       if (autoSendPrefill) {
         viewModel.appendUserMessage(pendingPrefill)
-        onSend(pendingPrefill, activeConvo?.eventId)
+        onSend(pendingPrefill, activeConvo?.eventId ?: focusedCandidate?.eventId)
       } else {
         inputText = pendingPrefill
       }
@@ -123,16 +144,40 @@ internal fun ChatScreen(
     }
   }
 
-  Column(modifier = Modifier.fillMaxWidth().heightIn(min = 600.dp)) {
+  // fillMaxSize + weight(1f) on the messages section → input bar always
+  // pinned to the bottom of the available area. The previous heightIn(600dp)
+  // floor caused the input bar to float in the middle of taller screens
+  // because the chat lived inside a LazyColumn item.
+  Column(modifier = Modifier.fillMaxSize()) {
     // ── Header: title + rescan + history + new conversation ───────────────
-    ChatHeader(
-      conversation = activeConvo,
-      onNew = { viewModel.newConversation() },
-      onShowHistory = { showHistory = true },
-      onRescan = onRescan,
-    )
+    if (!hasWorkContext) {
+      ChatHeader(
+        conversation = activeConvo,
+        onNew = {
+          onFocusEventChange(null)
+          viewModel.newConversation()
+        },
+        onShowHistory = { showHistory = true },
+        onRescan = onRescan,
+      )
 
-    Spacer(Modifier.height(8.dp))
+      Spacer(Modifier.height(8.dp))
+    }
+
+    if (hasWorkContext) {
+      ChatWorkContextCard(
+        candidate = focusedCandidate,
+        progress = progress,
+        running = pipelineRunning,
+        onStart = { candidate ->
+          val command = "帮我做「${storyTitle(candidate)}」这个候选故事"
+          viewModel.bindActiveEvent(candidate.eventId)
+          viewModel.appendUserMessage(command)
+          onSend(command, candidate.eventId)
+        },
+      )
+      Spacer(Modifier.height(8.dp))
+    }
 
     // ── Messages ────────────────────────────────────────────────────────────
     val listState = rememberLazyListState()
@@ -153,18 +198,24 @@ internal fun ChatScreen(
       }
     }
     if (messages.isEmpty()) {
-      ChatWelcomeBlock(
-        decisionsCount = decisions.count { it.mp4Path != null },
-        candidateCount = eventSelection?.candidates?.size ?: 0,
-        onRescan = onRescan,
-        onOpenCurator = onOpenCurator,
-      )
+      Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+        if (!hasWorkContext) {
+          ChatWelcomeBlock(
+            decisionsCount = decisions.count { it.mp4Path != null },
+            candidateCount = eventSelection?.candidates?.size ?: 0,
+            onRescan = onRescan,
+            onOpenCurator = onOpenCurator,
+          )
+        } else {
+          ChatWorkEmptyHint(running = pipelineRunning)
+        }
+      }
     } else {
       LazyColumn(
         state = listState,
         modifier = Modifier
           .fillMaxWidth()
-          .heightIn(min = 360.dp, max = 520.dp),
+          .weight(1f),
         verticalArrangement = Arrangement.spacedBy(10.dp),
       ) {
         items(messages, key = { it.id }) { msg -> ChatMessageRow(msg, decisions, onOpenResult) }
@@ -174,14 +225,14 @@ internal fun ChatScreen(
     Spacer(Modifier.height(12.dp))
 
     // ── Suggestion chips (only on fresh conversation) ───────────────────────
-    if (messages.size <= 1) {
+    if (messages.size <= 1 && !hasWorkContext) {
       ChatSuggestions(
         onTap = { suggestion -> inputText = suggestion },
       )
       Spacer(Modifier.height(12.dp))
     }
 
-    // ── Input bar ───────────────────────────────────────────────────────────
+    // ── Input bar (always at bottom thanks to weight on the section above) ─
     ChatInputBar(
       value = inputText,
       onValueChange = { inputText = it },
@@ -189,7 +240,7 @@ internal fun ChatScreen(
         val text = inputText.trim()
         if (text.isNotBlank()) {
           viewModel.appendUserMessage(text)
-          onSend(text, activeConvo?.eventId)
+          onSend(text, activeConvo?.eventId ?: focusedCandidate?.eventId)
           inputText = ""
         }
       },
@@ -201,6 +252,7 @@ internal fun ChatScreen(
       conversations = conversations,
       activeId = activeConvoId,
       onSelect = {
+        onFocusEventChange(conversations.firstOrNull { convo -> convo.id == it }?.eventId)
         viewModel.switchTo(it)
         showHistory = false
       },
@@ -266,6 +318,237 @@ private fun ChatHeader(
     IconButton(onClick = onNew) {
       Icon(Icons.Outlined.Edit, contentDescription = "新建对话", tint = tokens.colors.accent)
     }
+  }
+}
+
+@Composable
+private fun ChatWorkContextCard(
+  candidate: EventCandidateSnapshot?,
+  progress: ProgressSnapshot,
+  running: Boolean,
+  onStart: (EventCandidateSnapshot) -> Unit,
+) {
+  val tokens = VlogPilotTokens
+  val friendly = friendlyProgress(progress, making = running)
+  val fraction = remember(friendly.current, friendly.total) {
+    if (friendly.total > 0) (friendly.current.toFloat() / friendly.total.toFloat()).coerceIn(0f, 1f) else null
+  }
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(18.dp),
+    color = if (running) tokens.colors.accentTint else MaterialTheme.colorScheme.surface,
+    tonalElevation = 0.dp,
+  ) {
+    Column(
+      modifier = Modifier.padding(14.dp),
+      verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.Top,
+      ) {
+        Box(
+          modifier = Modifier
+            .size(34.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(
+              if (running) tokens.colors.accent.copy(alpha = 0.18f)
+              else tokens.colors.systemOrange.copy(alpha = if (tokens.colors.isDark) 0.22f else 0.12f),
+            ),
+          contentAlignment = Alignment.Center,
+        ) {
+          Icon(
+            if (running) Icons.Outlined.Movie else Icons.Outlined.PhotoLibrary,
+            contentDescription = null,
+            tint = if (running) tokens.colors.accent else tokens.colors.systemOrange,
+            modifier = Modifier.size(19.dp),
+          )
+        }
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+          Text(
+            candidate?.let(::storyTitle) ?: "制作进行中",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+          Text(
+            if (candidate != null) compactStoryMeta(candidate) else friendly.detail.ifBlank { "过程会实时显示在这里" },
+            style = MaterialTheme.typography.labelMedium,
+            color = tokens.colors.secondaryLabel,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
+        if (!running && candidate != null) {
+          Button(onClick = { onStart(candidate) }) {
+            Text("开始制作")
+          }
+        }
+      }
+
+      candidate?.let {
+        CandidateAssetPreview(candidate = it, compact = running)
+      }
+
+      if (running) {
+        if (fraction != null) {
+          LinearProgressIndicator(
+            progress = { fraction },
+            modifier = Modifier
+              .fillMaxWidth()
+              .height(5.dp)
+              .clip(RoundedCornerShape(999.dp)),
+          )
+        }
+        Text(
+          friendly.title,
+          style = MaterialTheme.typography.bodyMedium,
+          fontWeight = FontWeight.SemiBold,
+          color = tokens.colors.accent,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+          friendly.detail,
+          style = MaterialTheme.typography.bodySmall,
+          color = tokens.colors.secondaryLabel,
+          maxLines = 2,
+          overflow = TextOverflow.Ellipsis,
+        )
+        if (progress.recent.isNotEmpty()) {
+          Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            progress.recent.take(4).forEach { item ->
+              Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                verticalAlignment = Alignment.Top,
+              ) {
+                Box(
+                  modifier = Modifier
+                    .padding(top = 6.dp)
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(tokens.colors.accent),
+                )
+                Text(
+                  item,
+                  modifier = Modifier.weight(1f),
+                  style = MaterialTheme.typography.labelSmall,
+                  color = tokens.colors.secondaryLabel,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                )
+              }
+            }
+          }
+        }
+      } else if (candidate != null) {
+        Text(
+          storyReason(candidate),
+          style = MaterialTheme.typography.bodySmall,
+          color = tokens.colors.secondaryLabel,
+          maxLines = 2,
+          overflow = TextOverflow.Ellipsis,
+        )
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          ContextMetric("素材", candidate.assets.size.toString(), Modifier.weight(1f))
+          ContextMetric("视频", candidate.realVideoCount.toString(), Modifier.weight(1f))
+          ContextMetric("适合度", (candidate.valueScore.coerceIn(0f, 1f) * 100).toInt().toString(), Modifier.weight(1f))
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun CandidateAssetPreview(candidate: EventCandidateSnapshot, compact: Boolean) {
+  val tokens = VlogPilotTokens
+  val thumbWidth = if (compact) 44.dp else 58.dp
+  val thumbHeight = if (compact) 54.dp else 72.dp
+  val shownAssets = candidate.assets.take(if (compact) 7 else 8)
+  LazyRow(
+    modifier = Modifier.fillMaxWidth(),
+    horizontalArrangement = Arrangement.spacedBy(7.dp),
+  ) {
+    items(shownAssets, key = { it.id }) { asset ->
+      AssetThumb(
+        asset = asset,
+        modifier = Modifier
+          .widthIn(min = thumbWidth, max = thumbWidth)
+          .height(thumbHeight),
+      )
+    }
+    if (candidate.event.assetIds.size > shownAssets.size) {
+      item {
+        Box(
+          modifier = Modifier
+            .widthIn(min = thumbWidth, max = thumbWidth)
+            .height(thumbHeight)
+            .clip(RoundedCornerShape(12.dp))
+            .background(tokens.colors.groupedSurfaceRaised),
+          contentAlignment = Alignment.Center,
+        ) {
+          Text(
+            "+${candidate.event.assetIds.size - shownAssets.size}",
+            style = MaterialTheme.typography.labelMedium,
+            color = tokens.colors.secondaryLabel,
+            fontWeight = FontWeight.SemiBold,
+          )
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun ContextMetric(label: String, value: String, modifier: Modifier = Modifier) {
+  val tokens = VlogPilotTokens
+  Surface(
+    modifier = modifier,
+    shape = RoundedCornerShape(10.dp),
+    color = if (tokens.colors.isDark) tokens.colors.groupedSurfaceRaised else tokens.colors.groupedBackground,
+    tonalElevation = 0.dp,
+  ) {
+    Column(
+      modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+      verticalArrangement = Arrangement.spacedBy(1.dp),
+    ) {
+      Text(
+        label,
+        style = MaterialTheme.typography.labelSmall,
+        color = tokens.colors.tertiaryLabel,
+        maxLines = 1,
+      )
+      Text(
+        value,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.onSurface,
+        fontWeight = FontWeight.SemiBold,
+        maxLines = 1,
+      )
+    }
+  }
+}
+
+@Composable
+private fun ChatWorkEmptyHint(running: Boolean) {
+  val tokens = VlogPilotTokens
+  Box(
+    modifier = Modifier.fillMaxSize(),
+    contentAlignment = Alignment.Center,
+  ) {
+    Text(
+      if (running) "制作步骤会继续出现在这里。" else "确认素材后，点上方「开始制作」。",
+      style = MaterialTheme.typography.bodyMedium,
+      color = tokens.colors.tertiaryLabel,
+      textAlign = TextAlign.Center,
+    )
   }
 }
 

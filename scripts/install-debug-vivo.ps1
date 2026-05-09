@@ -122,11 +122,16 @@ $proc = Start-Process `
 
 $deadline = (Get-Date).AddSeconds($PollSeconds)
 $tapCount = 0
+$lastStatus = Get-Date
 while (-not $proc.HasExited -and (Get-Date) -lt $deadline) {
   Start-Sleep -Milliseconds 600
   if (Tap-VivoInstallPrompt -AdbPath $adbPath) {
     $tapCount++
     Write-Host "Handled installer prompt ($tapCount)"
+  }
+  if (((Get-Date) - $lastStatus).TotalSeconds -ge 5) {
+    Write-Host "installDebug still running... installer prompts handled: $tapCount"
+    $lastStatus = Get-Date
   }
 }
 

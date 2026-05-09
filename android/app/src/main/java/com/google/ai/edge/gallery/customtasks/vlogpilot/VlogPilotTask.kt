@@ -60,7 +60,7 @@ class VlogPilotTask @Inject constructor() : CustomTask {
   @Composable
   override fun MainScreen(data: Any) {
     // Real entry is GalleryNavGraph's dedicated ROUTE_VLOGPILOT branch which hosts
-    // VlogPilotRootScreen with the Apps button + top bar. This MainScreen exists
+    // VlogPilotRootScreen with the VlogPilot tabs. This MainScreen exists
     // only because the CustomTask interface requires it; route it through the
     // same RootScreen (sans gallery-link, since the host can't be reached from
     // here without a NavController) so any unexpected fallback path stays

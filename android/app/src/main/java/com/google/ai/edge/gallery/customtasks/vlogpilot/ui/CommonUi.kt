@@ -208,37 +208,71 @@ private const val THUMB_MAX_SIDE = 240
 
 @Composable
 internal fun VideoPreview(mp4Path: String) {
-  // The rendered MP4 is already a self-contained 9:16 frame (with its own
-  // blurred-bg compose for non-vertical sources). No outer letterboxing
-  // needed — we clip directly to the player and cap the height so the
-  // result page doesn't get dominated by a single tall preview.
-  AndroidView(
-    factory = { ctx ->
-      VideoView(ctx).apply {
-        tag = mp4Path
-        setVideoPath(mp4Path)
-        setMediaController(MediaController(ctx).also { it.setAnchorView(this) })
-        setOnPreparedListener { player ->
-          player.isLooping = true
-          seekTo(1)
+  // 9:16 preview, capped to a compact size so the action buttons + shot rail
+  // below stay visible without scrolling. The previous version filled the
+  // full screen width and topped out at 540dp tall — on a phone that meant
+  // the video dominated 60% of the screen and Android's MediaController bar
+  // bled into the Save/Share buttons below it. We now:
+  //   - cap width to ~220dp (height ≈ 390dp at 9:16) and center the player
+  //   - tap-to-toggle play/pause via custom logic (no MediaController bar)
+  //   - overlay a play/pause icon when paused so the affordance stays clear
+  val playing = remember { mutableStateOf(false) }
+  Box(
+    modifier = Modifier.fillMaxWidth(),
+    contentAlignment = Alignment.Center,
+  ) {
+    Box(
+      modifier = Modifier
+        .widthIn(max = 220.dp)
+        .aspectRatio(9f / 16f)
+        .clip(RoundedCornerShape(20.dp))
+        .background(Color.Black),
+      contentAlignment = Alignment.Center,
+    ) {
+      AndroidView(
+        factory = { ctx ->
+          VideoView(ctx).apply {
+            tag = mp4Path
+            setVideoPath(mp4Path)
+            setOnPreparedListener { player ->
+              player.isLooping = true
+              seekTo(1)
+            }
+            seekTo(1)
+            setOnClickListener {
+              if (isPlaying) { pause(); playing.value = false }
+              else { start(); playing.value = true }
+            }
+          }
+        },
+        update = { view ->
+          if (view.tag != mp4Path) {
+            view.tag = mp4Path
+            view.setVideoPath(mp4Path)
+            view.seekTo(1)
+            playing.value = false
+          }
+        },
+        modifier = Modifier.fillMaxSize(),
+      )
+      if (!playing.value) {
+        Box(
+          modifier = Modifier
+            .size(56.dp)
+            .clip(RoundedCornerShape(28.dp))
+            .background(Color.Black.copy(alpha = 0.45f)),
+          contentAlignment = Alignment.Center,
+        ) {
+          Icon(
+            imageVector = androidx.compose.material.icons.Icons.Outlined.PlayArrow,
+            contentDescription = "播放",
+            tint = Color.White,
+            modifier = Modifier.size(32.dp),
+          )
         }
-        seekTo(1)
       }
-    },
-    update = { view ->
-      if (view.tag != mp4Path) {
-        view.tag = mp4Path
-        view.setVideoPath(mp4Path)
-        view.seekTo(1)
-      }
-    },
-    modifier = Modifier
-      .fillMaxWidth()
-      .heightIn(max = 540.dp)
-      .aspectRatio(9f / 16f)
-      .clip(RoundedCornerShape(20.dp))
-      .background(Color.Black),
-  )
+    }
+  }
 }
 
 @Composable

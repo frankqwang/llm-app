@@ -13,6 +13,7 @@ import android.graphics.Bitmap
 import android.os.Build
 import android.widget.MediaController
 import android.widget.VideoView
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -32,6 +33,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -64,6 +66,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -121,6 +124,7 @@ internal fun VlogPilotScreen(
   chatViewModel: com.google.ai.edge.gallery.customtasks.vlogpilot.chat.ChatViewModel,
   bottomPadding: Dp,
   modelManagerViewModel: ModelManagerViewModel,
+  onOpenGallery: () -> Unit,
   modifier: Modifier = Modifier,
   viewModel: VlogPilotViewModel = hiltViewModel(),
 ) {
@@ -156,6 +160,7 @@ internal fun VlogPilotScreen(
   // typed into the input box but the user still has to confirm.
   var chatPrefill by remember { mutableStateOf<String?>(null) }
   var chatAutoSend by remember { mutableStateOf(false) }
+  var chatFocusEventId by remember { mutableStateOf<String?>(null) }
   // When non-null, the bottom-sheet feedback editor is open targeting this event.
   var iterationSheetEventId by remember { mutableStateOf<String?>(null) }
   var iterationSheetTargetOrder by remember { mutableStateOf<Int?>(null) }
@@ -164,6 +169,34 @@ internal fun VlogPilotScreen(
   // Inline error banner shown inside CuratorScreen when submit fails (e.g. no model imported).
   var curatorError by remember { mutableStateOf<String?>(null) }
   var pendingPermissionAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+
+  LaunchedEffect(selectedTab) {
+    if (selectedTab != VlogPilotTab.Works) {
+      detailEventId = null
+      selectedStoryId = null
+      iterationSheetEventId = null
+      iterationSheetTargetOrder = null
+    }
+    if (selectedTab != VlogPilotTab.Chat) {
+      curatorOpen = false
+      curatorError = null
+    }
+  }
+
+  BackHandler(enabled = curatorOpen) {
+    curatorError = null
+    curatorOpen = false
+  }
+  BackHandler(enabled = detailEventId != null && iterationSheetEventId == null) {
+    detailEventId = null
+  }
+  BackHandler(enabled = iterationSheetEventId != null) {
+    iterationSheetEventId = null
+    iterationSheetTargetOrder = null
+  }
+  BackHandler(enabled = selectedStoryId != null) {
+    selectedStoryId = null
+  }
 
   val perms = remember {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -228,11 +261,29 @@ internal fun VlogPilotScreen(
   }
 
   val primaryPipelineRunning = operation.blocksPrimaryPipeline
+  val chatFocusedCandidate = remember(chatFocusEventId, eventSelection, runConfig, primaryPipelineRunning) {
+    val activeId = chatFocusEventId
+      ?: if (primaryPipelineRunning) {
+        runConfig.onlySelectedEventIds.firstOrNull()
+          ?: eventSelection?.selectedEventIds?.firstOrNull()
+      } else {
+        null
+      }
+    activeId?.let { id -> eventSelection?.candidates?.firstOrNull { it.eventId == id } }
+      ?: if (primaryPipelineRunning) {
+        eventSelection?.candidates?.firstOrNull { it.eventId in runConfig.onlySelectedEventIds }
+      } else {
+        null
+      }
+  }
 
-  // Full-screen curator overlay — replaces the tabbed body when active. Dialogs
-  // (StoryDetail / IterationSheet) below this composable still render normally.
+  // Full-screen curator overlay — replaces the tabbed body when active. The
+  // outer modifier carries the parent Scaffold's top inset, and we add bottomPadding
+  // here so its bottomBar (the "开始制作" CTA) isn't covered by the parent's tab nav.
+  // Without this, users only saw the "已选 N 张" footer and the tap target was unreachable.
   if (curatorOpen) {
-    CuratorScreen(
+    Box(modifier = modifier.padding(bottom = bottomPadding)) {
+      CuratorScreen(
       assets = curatorAssets,
       loading = curatorLoading,
       errorMessage = curatorError,
@@ -248,16 +299,23 @@ internal fun VlogPilotScreen(
         }
         if (model != null) {
           curatorError = null
-          viewModel.submitCuratedRequest(selectedIds, intentText, model)
+          val requestId = viewModel.submitCuratedRequest(selectedIds, intentText, model)
+          val eventId = "user_$requestId"
+          chatFocusEventId = eventId
+          chatViewModel.newConversation(
+            initialTitle = intentText.ifBlank { "手动创作" }.take(24),
+            eventId = eventId,
+          )
           curatorOpen = false
-          onTabChange(VlogPilotTab.Works)
+          onTabChange(VlogPilotTab.Chat)
         } else {
           // Keep curator open so the user doesn't lose their selection + intent text.
           // Banner explains what they need to do next.
           curatorError = "没有找到已导入的 LLM。请先在 Models 中导入一个支持图像的本地模型（例如 Gemma 4 E2B-IT）。"
         }
       },
-    )
+      )
+    }
     return
   }
 
@@ -267,7 +325,10 @@ internal fun VlogPilotScreen(
 
   // Vlog detail navigation: full-screen page replaces the tabbed view when
   // a row is tapped in 作品库. Hardware back arrow returns to the list.
+  // Box wrapper carries the parent Scaffold's top + bottom insets so the
+  // detail page content doesn't run under the system status area or bottom tab nav.
   detailEventId?.let { id ->
+    Box(modifier = modifier.padding(bottom = bottomPadding)) {
     com.google.ai.edge.gallery.customtasks.vlogpilot.VlogDetailScreen(
       decisions = decisions,
       projects = projects,
@@ -278,10 +339,13 @@ internal fun VlogPilotScreen(
         iterationSheetTargetOrder = shotOrder
       },
       onChangeStory = {
+        chatFocusEventId = id
+        chatViewModel.bindActiveEvent(id)
         detailEventId = null
         onTabChange(VlogPilotTab.Chat)
       },
     )
+    }
     iterationSheetEventId?.let { eventId ->
       val target = decisions.firstOrNull { it.eventId == eventId } ?: return@let
       IterationSheet(
@@ -292,16 +356,113 @@ internal fun VlogPilotScreen(
           iterationSheetTargetOrder = null
         },
         onSubmit = { feedback ->
+          chatFocusEventId = eventId
+          chatViewModel.bindActiveEvent(eventId)
           viewModel.submitFeedback(eventId, feedback)
+          detailEventId = null
           iterationSheetEventId = null
           iterationSheetTargetOrder = null
+          onTabChange(VlogPilotTab.Chat)
         },
       )
     }
     return
   }
 
-  LazyColumn(
+  // Chat tab needs full-screen vertical space so its input bar can pin to the
+  // bottom via Column weight(1f). LazyColumn items get unbounded vertical
+  // constraints, which breaks weight — so we bypass the LazyColumn here.
+  // imePadding() lifts the input bar above the soft keyboard when it opens.
+  if (selectedTab == VlogPilotTab.Chat) {
+    Box(
+      modifier = modifier
+        .fillMaxSize()
+        .padding(horizontal = 16.dp)
+        .padding(bottom = bottomPadding)
+        .padding(top = 12.dp)
+        .imePadding(),
+    ) {
+      com.google.ai.edge.gallery.customtasks.vlogpilot.ui.ChatScreen(
+        viewModel = chatViewModel,
+        decisions = decisions,
+        eventSelection = eventSelection,
+        focusedCandidate = chatFocusedCandidate,
+        progress = progress,
+        pipelineRunning = primaryPipelineRunning,
+        pendingPrefill = chatPrefill,
+        autoSendPrefill = chatAutoSend,
+        onPrefillConsumed = {
+          chatPrefill = null
+          chatAutoSend = false
+        },
+        onOpenResult = { eventId -> detailEventId = eventId },
+        onFocusEventChange = { chatFocusEventId = it },
+        onSend = { text, currentEventId ->
+          // Phase 3b keyword routing. Order matters: most specific first.
+          // The chat VM has already appended the user message; this
+          // callback's job is to KICK OFF the right pipeline action AND
+          // make sure something visible happens — never sit silent on a
+          // user-typed message, that's the worst chat UX failure mode.
+          val normalized = text.trim()
+          val matchedCandidate = matchCandidateByTitle(normalized, eventSelection)
+          fun reply(text: String) = chatViewModel.appendAgentMessage(
+            com.google.ai.edge.gallery.customtasks.vlogpilot.chat.ChatRole.AGENT_STATUS,
+            text,
+          )
+          fun hasModel() = modelManagerViewModel.getAllDownloadedModels().isNotEmpty()
+          when {
+            matchedCandidate != null -> if (!hasModel()) {
+              reply("还没有可用模型。先去 Models 页导入一个本地 Gemma 模型，回来我就能开工。")
+            } else {
+              chatFocusEventId = matchedCandidate.eventId
+              chatViewModel.bindActiveEvent(matchedCandidate.eventId)
+              requireAlbumPermission {
+                selectedModelOrReport()?.let { viewModel.runOnlyEvent(matchedCandidate.eventId, it) }
+              }
+              reply("好的，开始制作「${storyTitle(matchedCandidate)}」——读素材、写分镜、剪一条出来，过程会实时显示在这里。")
+            }
+            isIterationCommand(normalized) -> {
+              val targetEventId = currentEventId ?: decisions.firstOrNull()?.eventId
+              when {
+                targetEventId == null -> reply("还没有可以改的成片。你可以先让我做一条，比如「帮我做一条这周的家庭日常」。")
+                !hasModel() -> reply("还没有可用模型，先去 Models 导入一个再来改。")
+                else -> {
+                  val feedback = buildIterationFromText(
+                    normalized,
+                    eventId = targetEventId,
+                    baseVersion = decisions.firstOrNull { it.eventId == targetEventId }?.versionCount ?: 1,
+                  )
+                  viewModel.submitFeedback(targetEventId, feedback)
+                  reply("收到，按你的反馈在改了。")
+                }
+              }
+            }
+            isGenerationCommand(normalized) -> if (!hasModel()) {
+              reply("还没有可用模型。先去 Models 导入一个本地 Gemma 模型再来。")
+            } else {
+              requireAlbumPermission {
+                selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
+              }
+              reply("好的，正在扫相册、挑事件，挑完会出几个候选给你看。")
+            }
+            else -> reply("我没太听明白。试试这样说：\n• 「帮我做一条这周的家庭日常」（让我先扫相册）\n• 「再快一点」（已有成片时调节奏）\n或者点上面的「重扫」按钮，让 AI 推几个故事。")
+          }
+        },
+        onRescan = {
+          requireAlbumPermission {
+            selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
+          }
+        },
+        onOpenCurator = {
+          requireAlbumPermission {
+            viewModel.loadCuratorAssets()
+            curatorOpen = true
+          }
+        },
+      )
+    }
+    // Dialogs render after this if/else flow — they apply to all tabs.
+  } else LazyColumn(
     modifier = modifier
       .fillMaxSize()
       .padding(horizontal = 16.dp)
@@ -310,92 +471,24 @@ internal fun VlogPilotScreen(
     verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
     when (selectedTab) {
-      VlogPilotTab.Chat -> {
-        item {
-          com.google.ai.edge.gallery.customtasks.vlogpilot.ui.ChatScreen(
-            viewModel = chatViewModel,
-            decisions = decisions,
-            eventSelection = eventSelection,
-            pendingPrefill = chatPrefill,
-            autoSendPrefill = chatAutoSend,
-            onPrefillConsumed = {
-              chatPrefill = null
-              chatAutoSend = false
-            },
-            onOpenResult = { eventId -> detailEventId = eventId },
-            onSend = { text, currentEventId ->
-              // Phase 3b keyword routing. Order matters: most specific first.
-              // The chat VM has already appended the user message; this
-              // callback's job is to KICK OFF the right pipeline action AND
-              // make sure something visible happens — never sit silent on a
-              // user-typed message, that's the worst chat UX failure mode.
-              val normalized = text.trim()
-              val matchedCandidate = matchCandidateByTitle(normalized, eventSelection)
-              fun reply(text: String) = chatViewModel.appendAgentMessage(
-                com.google.ai.edge.gallery.customtasks.vlogpilot.chat.ChatRole.AGENT_STATUS,
-                text,
-              )
-              fun hasModel() = modelManagerViewModel.getAllDownloadedModels().isNotEmpty()
-              when {
-                matchedCandidate != null -> if (!hasModel()) {
-                  reply("还没有可用模型。先去 Models 页导入一个本地 Gemma 模型，回来我就能开工。")
-                } else {
-                  viewModel.toggleSelectedEvent(matchedCandidate.eventId)
-                  requireAlbumPermission {
-                    selectedModelOrReport()?.let { viewModel.runFullPipeline(it) }
-                  }
-                  reply("好的，开始制作「${storyTitle(matchedCandidate)}」——读素材、写分镜、剪一条出来，过程会实时显示在这里。")
-                }
-                isIterationCommand(normalized) -> {
-                  val targetEventId = currentEventId ?: decisions.firstOrNull()?.eventId
-                  when {
-                    targetEventId == null -> reply("还没有可以改的成片。你可以先让我做一条，比如「帮我做一条这周的家庭日常」。")
-                    !hasModel() -> reply("还没有可用模型，先去 Models 导入一个再来改。")
-                    else -> {
-                      val feedback = buildIterationFromText(
-                        normalized,
-                        eventId = targetEventId,
-                        baseVersion = decisions.firstOrNull { it.eventId == targetEventId }?.versionCount ?: 1,
-                      )
-                      viewModel.submitFeedback(targetEventId, feedback)
-                      reply("收到，按你的反馈在改了。")
-                    }
-                  }
-                }
-                isGenerationCommand(normalized) -> if (!hasModel()) {
-                  reply("还没有可用模型。先去 Models 导入一个本地 Gemma 模型再来。")
-                } else {
-                  requireAlbumPermission {
-                    selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
-                  }
-                  reply("好的，正在扫相册、挑事件，挑完会出几个候选给你看。")
-                }
-                else -> reply("我没太听明白。试试这样说：\n• 「帮我做一条这周的家庭日常」（让我先扫相册）\n• 「再快一点」（已有成片时调节奏）\n或者点上面的「重扫」按钮，让 AI 推几个故事。")
-              }
-            },
-            onRescan = {
-              requireAlbumPermission {
-                selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
-              }
-            },
-            onOpenCurator = {
-              requireAlbumPermission {
-                viewModel.loadCuratorAssets()
-                curatorOpen = true
-              }
-            },
-          )
-        }
-      }
+      VlogPilotTab.Chat -> Unit  // Rendered above; unreachable here.
       VlogPilotTab.Works -> {
-        // Live progress stays at the top so the user sees AI working.
+        // When the AI is working, surface a small tappable hint that links
+        // to Chat (which is the source of truth for live progress). Showing
+        // the full StoryProgressCard here duplicated the Chat-tab agent_tool
+        // cards and made the Works tab feel like "process" instead of
+        // "finished works".
         if (primaryPipelineRunning) {
           item {
-            val liveDecision = decisions.firstOrNull { it.mp4Path == null } ?: decisions.firstOrNull()
-            StoryProgressCard(
-              state = state,
+            PipelineRunningHint(
               progress = progress,
-              liveDecision = liveDecision,
+              onTap = {
+                chatFocusEventId = chatFocusEventId
+                  ?: runConfig.onlySelectedEventIds.firstOrNull()
+                  ?: eventSelection?.selectedEventIds?.firstOrNull()
+                chatFocusEventId?.let { chatViewModel.bindActiveEvent(it) }
+                onTabChange(VlogPilotTab.Chat)
+              },
               onCancel = viewModel::cancelPipeline,
             )
           }
@@ -407,16 +500,17 @@ internal fun VlogPilotScreen(
           UnifiedWorksFeed(
             decisions = decisions,
             manifest = eventSelection,
+            activeEventIds = if (primaryPipelineRunning) {
+              runConfig.onlySelectedEventIds + eventSelection?.selectedEventIds.orEmpty()
+            } else {
+              emptySet()
+            },
             onOpenVlog = { eventId -> detailEventId = eventId },
             onMakeCandidate = { snapshot ->
-              // Fresh conversation per candidate handoff. Otherwise the active
-              // convo may already be bound to a different eventId, which makes
-              // ChatViewModel.appendFromPipeline silently filter the new
-              // event's progress messages — i.e. the user sees no AI activity
-              // on the second candidate they tap.
-              chatViewModel.newConversation(initialTitle = storyTitle(snapshot))
-              chatPrefill = "帮我做「${storyTitle(snapshot)}」这个候选故事"
-              chatAutoSend = true
+              chatFocusEventId = snapshot.eventId
+              chatViewModel.newConversation(initialTitle = storyTitle(snapshot), eventId = snapshot.eventId)
+              chatPrefill = null
+              chatAutoSend = false
               onTabChange(VlogPilotTab.Chat)
             },
           )
@@ -469,6 +563,7 @@ internal fun VlogPilotScreen(
             running = primaryPipelineRunning,
             onIntentSelect = viewModel::setIntent,
             onPowerSelect = viewModel::setPowerProfile,
+            onOpenGallery = onOpenGallery,
           )
         }
         item { PromptDebugCard() }
@@ -502,8 +597,11 @@ internal fun VlogPilotScreen(
         onDislike = viewModel::excludeEvent,
         onUndoDislike = viewModel::clearExcluded,
         onMake = {
+          chatFocusEventId = it
+          chatViewModel.newConversation(initialTitle = storyTitle(candidate), eventId = it)
           makeStory(it)
           selectedStoryId = null
+          onTabChange(VlogPilotTab.Chat)
         },
         onPin = viewModel::pinEvent,
         onRegenerate = viewModel::forceRegenerateEvent,
@@ -524,11 +622,12 @@ internal fun VlogPilotScreen(
           iterationSheetTargetOrder = null
         },
         onSubmit = { feedback ->
+          chatFocusEventId = eid
+          chatViewModel.bindActiveEvent(eid)
           viewModel.submitFeedback(eid, feedback)
           iterationSheetEventId = null
           iterationSheetTargetOrder = null
-          // Auto-switch to Works tab so the user sees the progress strip.
-          onTabChange(VlogPilotTab.Works)
+          onTabChange(VlogPilotTab.Chat)
         },
       )
     }

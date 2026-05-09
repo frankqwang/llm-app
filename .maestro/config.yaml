@@ -7,3 +7,5 @@ executionOrder:
     - smoke
     - tab-walk
     - chat-fallback
+    - chat-layout
+    - works-clean

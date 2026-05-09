@@ -11,6 +11,7 @@
 package com.google.ai.edge.gallery.customtasks.vlogpilot.chat
 
 import android.content.Context
+import android.util.Log
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineEventBus
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineProgress
 import kotlinx.coroutines.CoroutineScope
@@ -20,6 +21,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -28,6 +30,7 @@ import kotlinx.coroutines.withContext
 class ChatViewModel(private val context: Context) {
 
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+  private val tag = "ChatViewModel"
 
   private val _conversations = MutableStateFlow<List<ChatConversation>>(emptyList())
   val conversations: StateFlow<List<ChatConversation>> = _conversations.asStateFlow()
@@ -76,13 +79,33 @@ class ChatViewModel(private val context: Context) {
     scope.launch { reloadConversations() }
   }
 
-  fun newConversation(initialTitle: String = "新对话") {
+  fun newConversation(initialTitle: String = "新对话", eventId: String? = null) {
     scope.launch {
       val convo = withContext(Dispatchers.IO) {
-        ChatStore.createConversation(context, title = initialTitle)
+        ChatStore.createConversation(context, title = initialTitle, eventId = eventId)
       }
       reloadConversations()
       switchTo(convo.id)
+    }
+  }
+
+  /** Link the active conversation to the story currently being edited.
+   *  Pipeline progress is filtered by eventId, so binding before enqueueing
+   *  work keeps live progress visible in the Chat tab instead of only in
+   *  the Works running strip. */
+  fun bindActiveEvent(eventId: String) {
+    val convoId = ensureActiveConversation()
+    val now = System.currentTimeMillis()
+    _conversations.update { list ->
+      list.map { convo ->
+        if (convo.id == convoId) convo.copy(eventId = eventId, updatedAtMs = now) else convo
+      }
+    }
+    scope.launch {
+      withContext(Dispatchers.IO) {
+        ChatStore.updateConversation(context, convoId, eventId = eventId)
+      }
+      reloadConversations()
     }
   }
 
@@ -110,21 +133,25 @@ class ChatViewModel(private val context: Context) {
 
   /** Append a USER message — caller (router) is responsible for triggering
    *  any pipeline action that should follow. The chat stream itself is just
-   *  the visual log; ChatCommandRouter does the work. */
-  fun appendUserMessage(text: String): ChatMessage? {
-    val convoId = _activeConversationId.value ?: return null
+   *  the visual log; ChatCommandRouter does the work.
+   *
+   *  If no active conversation exists yet (init still loading), seed one
+   *  inline so the user's tap is never silently dropped. */
+  fun appendUserMessage(text: String): ChatMessage {
+    val convoId = ensureActiveConversation()
+    val now = System.currentTimeMillis()
     val msg = ChatMessage(
-      id = "msg_${System.currentTimeMillis()}_user",
+      id = "msg_${now}_user",
       conversationId = convoId,
-      timestampMs = System.currentTimeMillis(),
+      timestampMs = now,
       role = ChatRole.USER,
       text = text,
     )
-    persistAndPush(msg)
+    pushSync(msg)
     // If the conversation title is still the default, retitle to the
     // user's first message — like Claude.ai's auto-titled threads.
     val convo = _conversations.value.firstOrNull { it.id == convoId }
-    if (convo != null && convo.title == "新对话") {
+    if (convo == null || convo.title == "新对话") {
       scope.launch {
         withContext(Dispatchers.IO) {
           ChatStore.updateConversation(context, convoId, title = text.take(20))
@@ -135,20 +162,39 @@ class ChatViewModel(private val context: Context) {
     return msg
   }
 
-  /** Append a SYSTEM / AGENT_STATUS / etc message produced by the router. */
+  /** Append a SYSTEM / AGENT_STATUS / etc message produced by the router.
+   *  Updates the message stream synchronously so UI reflects the reply
+   *  immediately — disk persistence is best-effort and runs in background. */
   fun appendAgentMessage(role: ChatRole, text: String, eventId: String? = null, agentStage: String? = null, mp4Path: String? = null) {
-    val convoId = _activeConversationId.value ?: return
+    val convoId = ensureActiveConversation()
+    val now = System.currentTimeMillis()
+    // Suffix with a short random tag so two replies in the same millisecond
+    // (which the LazyColumn keys by .id) don't collide and drop one row.
+    val rand = (1000..9999).random()
     val msg = ChatMessage(
-      id = "msg_${System.currentTimeMillis()}_${role.name.lowercase()}",
+      id = "msg_${now}_${role.name.lowercase()}_$rand",
       conversationId = convoId,
-      timestampMs = System.currentTimeMillis(),
+      timestampMs = now,
       role = role,
       text = text,
       eventId = eventId,
       agentStage = agentStage,
       mp4Path = mp4Path,
     )
-    persistAndPush(msg)
+    pushSync(msg)
+  }
+
+  /** Returns the active conversation id, creating one synchronously if
+   *  none is set yet. The fallback only happens early in init (the UI
+   *  composes before the seed-conversation coroutine completes); without
+   *  it, the user's first tap before init finishes would be dropped. */
+  private fun ensureActiveConversation(): String {
+    _activeConversationId.value?.let { return it }
+    Log.w(tag, "no active conversation — seeding one inline")
+    val convo = ChatStore.createConversation(context, title = "新对话")
+    _conversations.value = listOf(convo) + _conversations.value
+    _activeConversationId.value = convo.id
+    return convo.id
   }
 
   fun close() {
@@ -160,14 +206,17 @@ class ChatViewModel(private val context: Context) {
     _conversations.value = convos
   }
 
-  private fun persistAndPush(msg: ChatMessage) {
+  /** Push a message to the message stream synchronously, so the UI sees it
+   *  this frame, then persist to disk in the background. The previous
+   *  scope-launched flow lost messages whenever the chat scope was cancelled
+   *  between the user tap and the IO completion — a free-form chat reply
+   *  could vanish even though the user message above it persisted fine. */
+  private fun pushSync(msg: ChatMessage) {
+    if (_activeConversationId.value == msg.conversationId) {
+      _messages.update { it + msg }
+    }
     scope.launch {
       withContext(Dispatchers.IO) { ChatStore.appendMessage(context, msg) }
-      // Optimistically push to UI; reload from disk would race with the
-      // append so we synthesize the new list locally.
-      if (_activeConversationId.value == msg.conversationId) {
-        _messages.value = _messages.value + msg
-      }
     }
   }
 

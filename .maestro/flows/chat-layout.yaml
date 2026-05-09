@@ -1,0 +1,34 @@
+# Verifies chat-tab layout invariants:
+# 1. The input bar stays visible above the bottom tab nav.
+# 2. Sending a free-form message produces an immediate visible reply.
+
+appId: com.google.aiedge.gallery
+name: chat-layout
+tags:
+  - regression
+---
+- launchApp:
+    clearState: false
+
+- tapOn: "对话"
+- assertVisible: "和 AI 聊聊你想做什么..."
+
+- assertVisible: "作品"
+- assertVisible: "对话"
+- assertVisible: "相册"
+- assertVisible: "设置"
+
+- tapOn:
+    text: "和 AI 聊聊你想做什么..."
+- inputText: "测试一下你能不能回复"
+- tapOn:
+    text: "发送"
+    optional: true
+- tapOn:
+    id: "发送"
+    optional: true
+
+- assertVisible: "测试一下你能不能回复"
+- extendedWaitUntil:
+    visible: "我没太听明白"
+    timeout: 5000

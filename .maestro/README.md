@@ -1,88 +1,74 @@
-# Maestro UI tests
+# Maestro UI Tests
 
-End-to-end smoke + regression tests for VlogPilot, run via [Maestro](https://maestro.mobile.dev/).
+End-to-end smoke and regression tests for VlogPilot.
 
-## Why Maestro
+## Recommended Local Run
 
-Project already has a unit-test layer (`./gradlew :app:testDebugUnitTest` — 46 cases covering JSON extractor, event selector, iteration planner, user curation). Those cover the algorithmic paths.
+Connect one Android phone with USB debugging enabled, unlock it, accept the USB debugging prompt, then run from the repository root:
 
-Maestro fills the gap above that: **UI shell and routing**. Things like:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run-android-regression.ps1
+```
 
-- Does the bottom-tab IA still hang together after a refactor?
-- Does the chat input + send flow produce a user bubble + AI reply?
-- Do all 4 tabs render their primary content?
+The script:
 
-It runs on a real device or emulator, drives the actual Compose UI, asserts on visible text or accessibility labels — no coordinates, robust to layout drift.
+- resolves `adb.exe` from the Android SDK
+- checks that exactly one authorized device is connected
+- wakes/unlocks the device where possible
+- installs the debug APK through `scripts/install-debug-vivo.ps1`
+- launches VlogPilot
+- saves screenshots, UI XML, and logcat under `.debug/android-regression/<timestamp>/`
 
-## Install (one-time)
+By default this does **not** run Maestro, because Maestro may install its helper app (`dev.mobile.maestro`) on a real phone. To run UI flows deliberately:
 
-Mac / Linux / Git Bash on Windows:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run-android-regression.ps1 -RunMaestro -AllowMaestroHelperInstall
+```
+
+The script refuses to run any flow containing `clearState: true` unless `-AllowClearState` is explicitly passed.
+
+For a run against an already installed build:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run-android-regression.ps1 -SkipInstall
+```
+
+## One-Time Requirements
+
+Install Maestro:
 
 ```bash
 curl -Ls "https://get.maestro.mobile.dev" | bash
-# Then add ~/.maestro/bin to PATH
 ```
 
-Or grab a release jar from <https://github.com/mobile-dev-inc/maestro/releases>.
+On Windows, make sure Maestro is available on `PATH`, then verify:
 
-Smoke check:
-
-```bash
+```powershell
 maestro --version
 ```
 
-## Running flows
+ADB does not need to be on `PATH`; the regression script resolves it from:
 
-Connect a real device or boot an emulator first (`adb devices` should list one). Then from repo root:
-
-```bash
-# All flows in one go
-maestro test .maestro/flows/
-
-# Single flow
-maestro test .maestro/flows/smoke.yaml
-
-# Filter by tag
-maestro test --include-tags=smoke .maestro/flows/
+```text
+%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe
 ```
 
-Outputs land under `.maestro/output/` (gitignored via `.debug/` rules).
+## Flows
 
-## Flows shipped
-
-| Flow | Tag | What it validates |
+| Flow | Tag | Coverage |
 |---|---|---|
-| `smoke.yaml` | smoke | App launches, 4 bottom tabs render, primary copy visible on each. |
-| `tab-walk.yaml` | quick | Lightweight tab roundtrip — useful when iterating on IA. |
-| `chat-fallback.yaml` | regression | The "no silent failure" guarantee: typing a generation command on a fresh emulator (no model imported) produces an AI fallback reply instead of dead air. |
+| `smoke.yaml` | `smoke` | App launches, the four main tabs render, key screen copy appears. |
+| `tab-walk.yaml` | `quick` | Fast bottom-tab round trip. |
+| `chat-fallback.yaml` | `regression` | Chat never goes silent after a generation command with no model imported. |
+| `chat-layout.yaml` | `regression` | Chat input stays anchored above bottom navigation and replies appear. |
+| `works-clean.yaml` | `regression` | Works remains a browse surface, not a full process/editor surface. |
 
-## When to add a flow
+## Test Strategy
 
-Add a flow when you're shipping UI behavior that:
+Use three layers:
 
-- A unit test can't cover (it lives at the screen level)
-- A user would notice if it broke (so the regression cost is real)
-- Has stable text or accessibility labels you can match against
+1. Unit tests for pure Kotlin logic.
+2. Maestro flows for user-visible navigation and interaction regressions.
+3. ADB artifacts for debugging failures: screenshot, UI tree, and logcat.
 
-Don't add a flow for transient state, animations, or anything that depends on a Gemma model being imported (model-bound paths are too long for typical CI budgets — verify those manually on a real device once per release).
-
-## CI integration (future)
-
-Recipe to wire into GitHub Actions when we want to gate PRs on UI tests:
-
-```yaml
-- name: Set up emulator
-  uses: reactivecircus/android-emulator-runner@v2
-  with:
-    api-level: 35
-    target: google_apis
-    arch: x86_64
-
-- name: Install Maestro
-  run: curl -Ls "https://get.maestro.mobile.dev" | bash
-
-- name: Run smoke flows
-  run: maestro test --include-tags=smoke .maestro/flows/
-```
-
-Smoke tag only — full regression suite is too long for PR loops; run on nightly.
+Model-bound generation can be covered on the same phone once the Gemma model is imported, but those tests should be kept out of fast PR smoke runs because they are long-running and device-dependent.

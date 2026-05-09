@@ -1,9 +1,6 @@
-# Verifies chat fallback messages — the core "no silent failure" guarantee.
-# Sends a generation command on a fresh emulator (no Gemma model imported)
-# and expects the AI to reply with a "no model" status message instead
-# of leaving the user staring at their own bubble.
-#
-# Run: maestro test .maestro/flows/chat-fallback.yaml
+# Verifies the "no silent failure" guarantee in Chat.
+# On a clean device with no imported model, a generation command should still
+# produce a visible model-missing reply instead of dead air.
 
 appId: com.google.aiedge.gallery
 name: chat-fallback
@@ -11,30 +8,22 @@ tags:
   - regression
 ---
 - launchApp:
-    # Fresh state — guarantees no prior conversation with cached responses.
-    clearState: true
+    clearState: false
 
 - tapOn: "对话"
 - assertVisible: "和 AI 聊聊你想做什么..."
 
-# Type a generation command and send.
 - tapOn:
     text: "和 AI 聊聊你想做什么..."
 - inputText: "帮我做一条这周的旅行 vlog"
 - tapOn:
-    id: "send_button"
+    text: "发送"
     optional: true
-# Fallback if id-based locator fails — Send icon is the only round button
-# at the right edge of the input bar.
 - tapOn:
-    text: "Send"
+    id: "发送"
     optional: true
 
-# Expect the user bubble to appear immediately.
 - assertVisible: "帮我做一条这周的旅行 vlog"
-
-# AI fallback must reply within ~3 seconds — no model is imported on a
-# clean emulator, so the "还没有可用模型" path fires.
 - extendedWaitUntil:
     visible: "可用模型"
     timeout: 5000

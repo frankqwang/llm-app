@@ -3,6 +3,9 @@
 #
 # Run this AFTER `gradlew.bat assembleDebug` succeeds and a device is plugged in
 # with USB debugging on.
+param(
+  [switch]$ResetApp
+)
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -21,8 +24,12 @@ $devices = & $adb devices | Select-String -Pattern '\sdevice$'
 if ($devices.Count -eq 0) { throw "no device authorised. Check USB-debug auth dialog on phone." }
 Write-Host ($devices -join "`n")
 
-Write-Host "==> uninstalling old build (ignore failure if first run)..." -ForegroundColor Cyan
-& $adb uninstall com.google.aiedge.gallery 2>&1 | Out-Null
+if ($ResetApp) {
+  Write-Host "==> resetting app by uninstalling old build..." -ForegroundColor Yellow
+  & $adb uninstall com.google.aiedge.gallery 2>&1 | Out-Null
+} else {
+  Write-Host "==> preserving existing app data (pass -ResetApp to uninstall first)." -ForegroundColor Cyan
+}
 
 Write-Host "==> installing APK..." -ForegroundColor Cyan
 & $adb install -r $apk

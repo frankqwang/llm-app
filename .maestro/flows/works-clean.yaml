@@ -1,0 +1,21 @@
+# Verifies the Works tab stays about browsing, not editing/process detail.
+# Live production detail belongs in Chat; Works can show only a compact
+# "制作中" handoff when a job is active.
+
+appId: com.google.aiedge.gallery
+name: works-clean
+tags:
+  - regression
+---
+- launchApp:
+    clearState: false
+
+- tapOn: "作品"
+- assertVisible: "作品"
+
+- assertNotVisible: "Browse"
+- assertNotVisible: "Audience"
+- assertNotVisible: "Director"
+- assertNotVisible: "Editor"
+- assertNotVisible: "Critic"
+- assertNotVisible: "实时制作过程"

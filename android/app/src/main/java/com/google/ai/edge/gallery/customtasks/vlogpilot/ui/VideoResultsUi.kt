@@ -637,11 +637,12 @@ private fun VideoExpandedDetail(
               VlogExporter.saveToGallery(context, path, title)
             }
             exporting = false
-            Toast.makeText(
-              context,
-              if (result != null) "已保存到相册：${result.displayName}" else "保存失败，请确认空间充足",
-              Toast.LENGTH_SHORT,
-            ).show()
+            val msg = when {
+              result == null -> "保存失败，请确认空间充足"
+              result.coverUri != null -> "已保存到相册（含封面）：${result.displayName}"
+              else -> "已保存到相册：${result.displayName}"
+            }
+            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
           }
         },
         enabled = playablePath != null && !exporting,
@@ -669,19 +670,20 @@ private fun VideoExpandedDetail(
       modifier = Modifier.fillMaxWidth(),
       horizontalArrangement = Arrangement.spacedBy(VlogPilotTokens.spacing.sm),
     ) {
+      // Same tint family as the publish row above so all four action chips
+      // read as one cohesive bar — the loud purple/orange used to make the
+      // iteration row feel detached from the publish row above.
       TintedActionButton(
         text = "改一改",
         icon = Icons.Outlined.Tune,
         onClick = { onOpenIterationSheet(d.eventId, null) },
         enabled = d.mp4Path != null,
-        tint = VlogPilotTokens.colors.systemPurple,
         modifier = Modifier.weight(1f),
       )
       TintedActionButton(
         text = "换故事",
         icon = Icons.Outlined.Edit,
         onClick = onChangeStory,
-        tint = VlogPilotTokens.colors.systemOrange,
         modifier = Modifier.weight(1f),
       )
     }
@@ -703,12 +705,12 @@ private fun VideoExpandedDetail(
       ReferenceAssetsSection(assets = d.inputAssets)
     }
 
-    StageRail(d)
+    // Version history (iteration ledger) is the only "process" surface kept
+    // here. The per-stage agent rail (Browse / Audience / Director / Editor /
+    // Critic / Render) used to live on this page too, but that information is
+    // already streamed live to the Chat tab as agent_tool cards — duplicating
+    // it here just made the detail page longer and lower-density.
     VersionHistorySection(project = project, d = d, history = history)
-    if (d.memory != null || d.audience != null || d.director != null || timeline != null || d.critique != null || d.perf != null) {
-      SectionHeader(Icons.Outlined.Visibility, "制作过程", "Browse / Audience / Director / Editor / Critic / Render")
-      ProcessOutputs(d = d, timeline = timeline, assetMap = assetMap)
-    }
   }
 }
 
@@ -793,19 +795,27 @@ private fun ShotEditTimeline(
   canEdit: Boolean,
   onOpenIterationSheet: (String, Int?) -> Unit,
 ) {
+  // Horizontal scroller — same affordance as the 参考素材 grid below, vs. the
+  // old vertical card stack which ate ~5 screens of height for 5 shots.
+  // Tap a card = open IterationSheet for that specific shot.
   DecisionSection(
     icon = Icons.Outlined.Tune,
     title = "轻剪辑",
-    subtitle = "${timeline.shots.size} 个镜头，可点单个镜头让 AI 局部修改",
+    subtitle = "${timeline.shots.size} 个镜头，左右滑动 · 点单个镜头让 AI 局部修改",
   ) {
-    timeline.shots.sortedBy { it.order }.forEach { shot ->
-      ShotEditCard(
-        eventId = eventId,
-        shot = shot,
-        asset = assetMap[shot.assetId],
-        canEdit = canEdit,
-        onOpenIterationSheet = onOpenIterationSheet,
-      )
+    LazyRow(
+      modifier = Modifier.fillMaxWidth(),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      items(timeline.shots.sortedBy { it.order }, key = { it.order }) { shot ->
+        ShotEditCard(
+          eventId = eventId,
+          shot = shot,
+          asset = assetMap[shot.assetId],
+          canEdit = canEdit,
+          onOpenIterationSheet = onOpenIterationSheet,
+        )
+      }
     }
   }
 }
@@ -818,102 +828,64 @@ private fun ShotEditCard(
   canEdit: Boolean,
   onOpenIterationSheet: (String, Int?) -> Unit,
 ) {
+  // Compact vertical card for horizontal scrolling: thumbnail on top, then
+  // index + duration line, then optional caption (1 line). Width is fixed so
+  // every card is the same size and the row reads like a film strip.
   Surface(
-    modifier = Modifier.fillMaxWidth(),
+    modifier = Modifier
+      .width(96.dp)
+      .clickable(enabled = canEdit) { onOpenIterationSheet(eventId, shot.order) },
     shape = RoundedCornerShape(10.dp),
     color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f),
     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.28f)),
   ) {
-    Row(
-      modifier = Modifier.padding(8.dp),
-      horizontalArrangement = Arrangement.spacedBy(9.dp),
-      verticalAlignment = Alignment.Top,
+    Column(
+      modifier = Modifier.padding(6.dp),
+      verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
       if (asset != null) {
         AssetThumb(
           asset = asset,
           modifier = Modifier
-            .width(54.dp)
-            .height(72.dp),
+            .fillMaxWidth()
+            .aspectRatio(9f / 16f),
           showType = false,
         )
       } else {
         Box(
           modifier = Modifier
-            .width(54.dp)
-            .height(72.dp)
-            .clip(RoundedCornerShape(10.dp))
+            .fillMaxWidth()
+            .aspectRatio(9f / 16f)
+            .clip(RoundedCornerShape(8.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant),
           contentAlignment = Alignment.Center,
         ) {
           Icon(Icons.Outlined.PhotoLibrary, contentDescription = null, modifier = Modifier.size(20.dp))
         }
       }
-      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-          Text(
-            "#${shot.order}",
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.primary,
-          )
-          Text(
-            listOf(
-              shot.mediaType.name.lowercase(),
-              formatSec(shot.durationSec.toDouble()),
-              shot.transitionIn.name.lowercase(),
-            ).joinToString(" · "),
-            modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-          )
-        }
-        if (asset != null) {
-          Text(
-            asset.displayName,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.outline,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-          )
-        }
-        if (shot.caption.isNotBlank()) {
-          Text(
-            "字幕：${shot.caption}",
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-          )
-        }
-        shot.videoTrim?.let { trim ->
-          Text(
-            "片段：${"%.1f".format(Locale.US, trim.startSec)}-${"%.1f".format(Locale.US, trim.endSec)}s",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-          )
-        }
+      Text(
+        "#${shot.order} · ${formatSec(shot.durationSec.toDouble())}",
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.primary,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+      if (shot.caption.isNotBlank()) {
         Text(
-          shot.rationale.ifBlank { "AI 选入时间线" },
+          shot.caption,
           style = MaterialTheme.typography.labelSmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          color = MaterialTheme.colorScheme.onSurface,
           maxLines = 2,
           overflow = TextOverflow.Ellipsis,
         )
-      }
-      Surface(
-        modifier = Modifier.clickable(enabled = canEdit) { onOpenIterationSheet(eventId, shot.order) },
-        shape = RoundedCornerShape(999.dp),
-        color = if (canEdit) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-        contentColor = if (canEdit) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.outline,
-      ) {
+      } else {
         Text(
-          "改",
-          modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+          shot.transitionIn.name.lowercase(),
           style = MaterialTheme.typography.labelSmall,
-          fontWeight = FontWeight.SemiBold,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
         )
       }
     }
