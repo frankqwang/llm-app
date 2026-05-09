@@ -36,6 +36,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Delete
@@ -89,6 +90,7 @@ internal fun ChatScreen(
   decisions: List<EventDecisions>,
   eventSelection: EventSelectionManifest?,
   onSend: (text: String, currentEventId: String?) -> Unit,
+  onOpenResult: (eventId: String) -> Unit = {},
   pendingPrefill: String? = null,
   autoSendPrefill: Boolean = false,
   onPrefillConsumed: () -> Unit = {},
@@ -164,7 +166,7 @@ internal fun ChatScreen(
           .heightIn(min = 360.dp, max = 520.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
       ) {
-        items(messages, key = { it.id }) { msg -> ChatMessageRow(msg, decisions) }
+        items(messages, key = { it.id }) { msg -> ChatMessageRow(msg, decisions, onOpenResult) }
       }
     }
 
@@ -432,7 +434,11 @@ private fun ChatInputBar(
 }
 
 @Composable
-private fun ChatMessageRow(msg: ChatMessage, decisions: List<EventDecisions>) {
+private fun ChatMessageRow(
+  msg: ChatMessage,
+  decisions: List<EventDecisions>,
+  onOpenResult: (String) -> Unit,
+) {
   when (msg.role) {
     ChatRole.USER -> UserBubble(msg.text)
     ChatRole.AGENT_STATUS -> AgentStatusLine(msg.text)
@@ -444,7 +450,7 @@ private fun ChatMessageRow(msg: ChatMessage, decisions: List<EventDecisions>) {
       val decision = msg.eventId?.let { id -> decisions.firstOrNull { it.eventId == id } }
       AgentToolCard(label = msg.text, stage = msg.agentStage, decision = decision)
     }
-    ChatRole.RESULT -> ResultCard(msg, decisions)
+    ChatRole.RESULT -> ResultCard(msg, decisions, onOpenResult)
     ChatRole.LOADING -> LoadingDots()
   }
 }
@@ -701,10 +707,23 @@ private fun formatMs(ms: Long): String = when {
 }
 
 @Composable
-private fun ResultCard(msg: ChatMessage, @Suppress("UNUSED_PARAMETER") decisions: List<EventDecisions>) {
+private fun ResultCard(
+  msg: ChatMessage,
+  decisions: List<EventDecisions>,
+  onOpenResult: (String) -> Unit,
+) {
   val tokens = VlogPilotTokens
+  val decision = msg.eventId?.let { id -> decisions.firstOrNull { it.eventId == id } }
+  val durationLabel = decision?.let { d ->
+    (d.timelineFinal ?: d.timelineV1)?.let { t ->
+      val totalSec = t.shots.sumOf { it.durationSec.toDouble() }
+      "${t.shots.size} 镜头 · ${"%.1f".format(java.util.Locale.US, totalSec)}s"
+    }
+  }
   Surface(
-    modifier = Modifier.fillMaxWidth(),
+    modifier = Modifier
+      .fillMaxWidth()
+      .let { mod -> if (msg.eventId != null) mod.clickable { onOpenResult(msg.eventId) } else mod },
     shape = RoundedCornerShape(16.dp),
     color = tokens.colors.systemGreen.copy(alpha = if (tokens.colors.isDark) 0.18f else 0.10f),
   ) {
@@ -721,20 +740,32 @@ private fun ResultCard(msg: ChatMessage, @Suppress("UNUSED_PARAMETER") decisions
         )
         Text(
           msg.text.ifBlank { "搞定！" },
+          modifier = Modifier.weight(1f),
           style = MaterialTheme.typography.titleSmall,
           fontWeight = FontWeight.SemiBold,
           color = tokens.colors.systemGreen,
         )
+        if (msg.eventId != null) {
+          Icon(
+            Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+            contentDescription = "查看详情",
+            tint = tokens.colors.systemGreen,
+            modifier = Modifier.size(18.dp),
+          )
+        }
+      }
+      durationLabel?.let {
+        Text(it, style = MaterialTheme.typography.bodySmall, color = tokens.colors.secondaryLabel)
       }
       msg.mp4Path?.let {
         Text(
-          "输出：${it.substringAfterLast('/')}",
+          it.substringAfterLast('/'),
           style = MaterialTheme.typography.labelSmall,
-          color = tokens.colors.secondaryLabel,
+          color = tokens.colors.tertiaryLabel,
         )
       }
       Text(
-        "去「作品」tab 查看完整结果，或继续输入「改一改」让我调整。",
+        "点击查看完整结果，或继续输入「改一改」让我调整。",
         style = MaterialTheme.typography.bodySmall,
         color = tokens.colors.secondaryLabel,
       )

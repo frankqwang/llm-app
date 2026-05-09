@@ -322,6 +322,7 @@ internal fun VlogPilotScreen(
               chatPrefill = null
               chatAutoSend = false
             },
+            onOpenResult = { eventId -> detailEventId = eventId },
             onSend = { text, currentEventId ->
               // Phase 3b keyword routing. Order matters: most specific first.
               // The chat VM has already appended the user message; this
