@@ -150,8 +150,11 @@ internal fun VlogPilotScreen(
   var detailEventId by remember { mutableStateOf<String?>(null) }
   // Pending chat prefill — set when the user taps a candidate row in Works
   // and we hop to Chat tab with "做这个候选" pre-typed. Cleared once Chat
-  // composes the message.
+  // composes the message. autoSendPrefill = true means the candidate path
+  // (1-tap from Works) submits immediately; false means the prefill is
+  // typed into the input box but the user still has to confirm.
   var chatPrefill by remember { mutableStateOf<String?>(null) }
+  var chatAutoSend by remember { mutableStateOf(false) }
   // When non-null, the bottom-sheet feedback editor is open targeting this event.
   var iterationSheetEventId by remember { mutableStateOf<String?>(null) }
   var iterationSheetTargetOrder by remember { mutableStateOf<Int?>(null) }
@@ -312,16 +315,33 @@ internal fun VlogPilotScreen(
             decisions = decisions,
             eventSelection = eventSelection,
             pendingPrefill = chatPrefill,
-            onPrefillConsumed = { chatPrefill = null },
+            autoSendPrefill = chatAutoSend,
+            onPrefillConsumed = {
+              chatPrefill = null
+              chatAutoSend = false
+            },
             onSend = { text, currentEventId ->
-              // Simple keyword routing — Phase 3b. The chat VM has already
-              // appended the user message and the agent stream will append
-              // pipeline events as they fire; this callback's job is to
-              // KICK OFF the right pipeline action.
+              // Phase 3b keyword routing. Order matters: most specific first.
+              // The chat VM has already appended the user message; this
+              // callback's job is to KICK OFF the right pipeline action.
               val normalized = text.trim()
+              val matchedCandidate = matchCandidateByTitle(normalized, eventSelection)
               when {
-                // Iteration intents — apply to the currently linked vlog or
-                // the most recent one.
+                // 1) Candidate match: user said "做「夏夜烧烤」" → start that
+                //    specific candidate, not a fresh full scan.
+                matchedCandidate != null -> {
+                  // Mark only this candidate selected, then run.
+                  viewModel.toggleSelectedEvent(matchedCandidate.eventId)
+                  // makeSelectedStories needs runConfig to actually have the
+                  // selected id — toggle is sync so by the time the next
+                  // call sees runConfig it should be there. If not, the
+                  // call returns early and we fall back to refresh.
+                  requireAlbumPermission {
+                    selectedModelOrReport()?.let { viewModel.runFullPipeline(it) }
+                  }
+                }
+                // 2) Iteration intent — apply to the currently linked vlog or
+                //    the most recent one.
                 isIterationCommand(normalized) -> {
                   val targetEventId = currentEventId ?: decisions.firstOrNull()?.eventId
                   if (targetEventId != null) {
@@ -333,17 +353,16 @@ internal fun VlogPilotScreen(
                     viewModel.submitFeedback(targetEventId, feedback)
                   }
                 }
-                // Generation intent — kick off a fresh scan.
+                // 3) Generation intent without a specific candidate — scan
+                //    + let AI pick.
                 isGenerationCommand(normalized) -> {
                   requireAlbumPermission {
                     selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
                   }
                 }
-                // Otherwise just acknowledge — the chat VM keeps the user
-                // message visible; AI silently waits for clearer instruction.
-                else -> {
-                  // No-op; chat VM already showed the user's text.
-                }
+                // 4) Else — no-op, the chat VM keeps the user's message
+                //    visible. AI waits for a clearer instruction.
+                else -> Unit
               }
             },
             onRescan = {
@@ -383,6 +402,7 @@ internal fun VlogPilotScreen(
             onOpenVlog = { eventId -> detailEventId = eventId },
             onMakeCandidate = { snapshot ->
               chatPrefill = "帮我做「${storyTitle(snapshot)}」这个候选故事"
+              chatAutoSend = true
               onTabChange(VlogPilotTab.Chat)
             },
           )
@@ -516,6 +536,36 @@ private val ITERATION_VERBS = listOf("改", "修改", "调整", "再")
 
 internal fun isGenerationCommand(text: String): Boolean =
   GENERATION_KEYWORDS.any { it in text }
+
+/** If the user's text contains a candidate's title (or its core date / type
+ *  tokens), return that candidate. Powers the chat handoff: tap a candidate
+ *  in Works → "帮我做「TITLE」" auto-sends → router catches it here →
+ *  triggers that specific candidate, not a fresh scan. */
+internal fun matchCandidateByTitle(
+  text: String,
+  selection: com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventSelectionManifest?,
+): com.google.ai.edge.gallery.customtasks.vlogpilot.worker.EventCandidateSnapshot? {
+  val candidates = selection?.candidates ?: return null
+  if (candidates.isEmpty()) return null
+
+  // First pass — exact «title» surrounded by Chinese book-title quotes
+  // (the auto-generated handoff format).
+  val quoted = Regex("「(.+?)」").find(text)?.groupValues?.getOrNull(1)?.trim()
+  if (!quoted.isNullOrBlank()) {
+    candidates.firstOrNull { storyTitle(it) == quoted }?.let { return it }
+    candidates.firstOrNull { storyTitle(it).contains(quoted) }?.let { return it }
+    candidates.firstOrNull { quoted.contains(storyTitle(it)) }?.let { return it }
+  }
+
+  // Second pass — substring of any candidate's title in the user's text.
+  // Sort by title length desc so "4月26日的动物故事" beats just "动物".
+  return candidates
+    .sortedByDescending { storyTitle(it).length }
+    .firstOrNull { c ->
+      val t = storyTitle(c).trim()
+      t.isNotBlank() && t in text
+    }
+}
 
 internal fun isIterationCommand(text: String): Boolean =
   ITERATION_FASTER_KEYWORDS.any { it in text } ||

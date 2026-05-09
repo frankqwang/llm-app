@@ -89,6 +89,7 @@ internal fun ChatScreen(
   eventSelection: EventSelectionManifest?,
   onSend: (text: String, currentEventId: String?) -> Unit,
   pendingPrefill: String? = null,
+  autoSendPrefill: Boolean = false,
   onPrefillConsumed: () -> Unit = {},
   // Phase 1 fallback callbacks — kept so the empty-state buttons still work.
   onRescan: () -> Unit = {},
@@ -109,10 +110,17 @@ internal fun ChatScreen(
   var showHistory by remember { mutableStateOf(false) }
   var inputText by remember { mutableStateOf("") }
 
-  // Consume any pending prefill from the Works tab handoff.
-  LaunchedEffect(pendingPrefill) {
+  // Consume any pending prefill from the Works tab handoff. When
+  // autoSendPrefill is true (e.g. the user tapped a candidate row), we
+  // submit immediately so they don't have to tap send again.
+  LaunchedEffect(pendingPrefill, autoSendPrefill) {
     if (!pendingPrefill.isNullOrBlank()) {
-      inputText = pendingPrefill
+      if (autoSendPrefill) {
+        viewModel.appendUserMessage(pendingPrefill)
+        onSend(pendingPrefill, activeConvo?.eventId)
+      } else {
+        inputText = pendingPrefill
+      }
       onPrefillConsumed()
     }
   }
@@ -149,7 +157,7 @@ internal fun ChatScreen(
           .heightIn(min = 360.dp, max = 520.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
       ) {
-        items(messages, key = { it.id }) { msg -> ChatMessageRow(msg) }
+        items(messages, key = { it.id }) { msg -> ChatMessageRow(msg, decisions) }
       }
     }
 
@@ -417,13 +425,19 @@ private fun ChatInputBar(
 }
 
 @Composable
-private fun ChatMessageRow(msg: ChatMessage) {
+private fun ChatMessageRow(msg: ChatMessage, decisions: List<EventDecisions>) {
   when (msg.role) {
     ChatRole.USER -> UserBubble(msg.text)
     ChatRole.AGENT_STATUS -> AgentStatusLine(msg.text)
     ChatRole.SYSTEM -> SystemLine(msg.text)
-    ChatRole.AGENT_TOOL -> AgentToolCard(label = msg.text, stage = msg.agentStage)
-    ChatRole.RESULT -> ResultCard(msg)
+    ChatRole.AGENT_TOOL -> {
+      // Look up the matching EventDecisions so we can show the agent's
+      // actual output when the user expands the card. Decision may not
+      // exist yet (agent is still running) — card stays in loading state.
+      val decision = msg.eventId?.let { id -> decisions.firstOrNull { it.eventId == id } }
+      AgentToolCard(label = msg.text, stage = msg.agentStage, decision = decision)
+    }
+    ChatRole.RESULT -> ResultCard(msg, decisions)
     ChatRole.LOADING -> LoadingDots()
   }
 }
@@ -490,7 +504,7 @@ private fun SystemLine(text: String) {
 }
 
 @Composable
-private fun AgentToolCard(label: String, stage: String?) {
+private fun AgentToolCard(label: String, stage: String?, decision: EventDecisions?) {
   val tokens = VlogPilotTokens
   val tint = when (stage) {
     "browse" -> tokens.colors.accent
@@ -501,47 +515,186 @@ private fun AgentToolCard(label: String, stage: String?) {
     "render", "rendering" -> tokens.colors.accent
     else -> tokens.colors.secondaryLabel
   }
+  // The agent's output for this stage. Null while still running.
+  val output = remember(decision, stage) { decision?.let { agentOutputFor(it, stage) } }
+  val hasOutput = output != null
+  var expanded by remember(decision?.eventId, stage) { mutableStateOf(false) }
+
   Surface(
     modifier = Modifier.fillMaxWidth(),
     shape = RoundedCornerShape(14.dp),
     color = MaterialTheme.colorScheme.surface,
     tonalElevation = 0.dp,
   ) {
-    Row(
-      modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-      verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-      Box(
+    Column {
+      Row(
         modifier = Modifier
-          .size(28.dp)
-          .clip(RoundedCornerShape(8.dp))
-          .background(tint.copy(alpha = if (tokens.colors.isDark) 0.22f else 0.12f)),
-        contentAlignment = Alignment.Center,
+          .fillMaxWidth()
+          .clickable(enabled = hasOutput) { expanded = !expanded }
+          .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
       ) {
-        Icon(
-          Icons.Outlined.AutoAwesome,
-          contentDescription = null,
-          tint = tint,
-          modifier = Modifier.size(16.dp),
-        )
+        Box(
+          modifier = Modifier
+            .size(28.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(tint.copy(alpha = if (tokens.colors.isDark) 0.22f else 0.12f)),
+          contentAlignment = Alignment.Center,
+        ) {
+          Icon(
+            Icons.Outlined.AutoAwesome,
+            contentDescription = null,
+            tint = tint,
+            modifier = Modifier.size(16.dp),
+          )
+        }
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+          Text(
+            label,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+          if (output != null && !expanded) {
+            Text(
+              output.summary,
+              style = MaterialTheme.typography.labelSmall,
+              color = tokens.colors.tertiaryLabel,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
+          }
+        }
+        if (hasOutput) {
+          Icon(
+            imageVector = if (expanded) Icons.Outlined.History else Icons.Outlined.Edit,
+            contentDescription = if (expanded) "收起" else "展开",
+            tint = tokens.colors.tertiaryLabel,
+            modifier = Modifier.size(16.dp),
+          )
+        } else {
+          LoadingDot(tint = tint)
+        }
       }
-      Text(
-        label,
-        modifier = Modifier.weight(1f),
-        style = MaterialTheme.typography.bodyMedium,
-        fontWeight = FontWeight.Medium,
-        color = MaterialTheme.colorScheme.onSurface,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-      )
-      LoadingDot(tint = tint)
+      AnimatedExpand(expanded = expanded && output != null) {
+        Column(
+          modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+          verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+          HairlineDivider(startInset = 0.dp)
+          Spacer(Modifier.height(2.dp))
+          output?.body?.forEach { line ->
+            Text(
+              line,
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurface,
+            )
+          }
+        }
+      }
     }
   }
 }
 
+/** Distilled agent output for the chat AGENT_TOOL card. summary is a 1-line
+ *  preview shown collapsed; body is bullet-style detail shown expanded. */
+private data class AgentOutput(val summary: String, val body: List<String>)
+
+private fun agentOutputFor(d: EventDecisions, stage: String?): AgentOutput? = when (stage) {
+  "browse" -> d.memory?.let { m ->
+    AgentOutput(
+      summary = m.storylineSummary.take(40),
+      body = buildList {
+        if (m.storylineSummary.isNotBlank()) add(m.storylineSummary)
+        if (m.charactersObserved.isNotEmpty()) add("人物：${m.charactersObserved.joinToString("、")}")
+        if (m.emotionalArc.isNotBlank()) add("情绪弧线：${m.emotionalArc}")
+        if (m.visualStyleSignals.isNotBlank()) add("视觉信号：${m.visualStyleSignals}")
+      },
+    )
+  }
+  "audience" -> d.audience?.let { a ->
+    val pace = when (a.pace) {
+      com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Pace.SNAPPY -> "快剪 15-18s"
+      com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Pace.BALANCED -> "均衡 18-22s"
+      com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Pace.LINGERING -> "留白 22-28s"
+    }
+    AgentOutput(
+      summary = "$pace · ${a.emotionalPayoff.take(20)}",
+      body = listOfNotNull(
+        "节奏：$pace",
+        a.emotionalPayoff.takeIf { it.isNotBlank() }?.let { "情绪回报：$it" },
+        a.hookStrategy.takeIf { it.isNotBlank() }?.let { "开头钩子：$it" },
+        a.pacingGuidance.takeIf { it.isNotBlank() }?.let { "节奏建议：$it" },
+        a.avoidList.takeIf { it.isNotEmpty() }?.let { "避免：${it.joinToString("、")}" },
+      ),
+    )
+  }
+  "director" -> d.director?.let { dir ->
+    AgentOutput(
+      summary = "${dir.title.ifBlank { "(未命名)" }} · ${dir.shotBlueprint.size} 镜头 · ${dir.targetDurationSec.toInt()}s",
+      body = buildList {
+        if (dir.title.isNotBlank()) add("标题：${dir.title}")
+        if (dir.tone.isNotBlank()) add("基调：${dir.tone}")
+        if (dir.narrativeArc.isNotEmpty()) add("叙事弧：${dir.narrativeArc.joinToString(" → ")}")
+        dir.shotBlueprint.take(5).forEach { sr ->
+          add("${sr.position}. ${sr.role.name.lowercase()} · ${"%.1f".format(java.util.Locale.US, sr.durationSec)}s · ${sr.visualRequirements.take(30)}")
+        }
+        if (dir.shotBlueprint.size > 5) add("…另外 ${dir.shotBlueprint.size - 5} 个镜头")
+      },
+    )
+  }
+  "editor" -> (d.timelineFinal ?: d.timelineV1)?.let { t ->
+    val totalSec = t.shots.sumOf { it.durationSec.toDouble() }
+    AgentOutput(
+      summary = "${t.shots.size} 镜头 · ${"%.1f".format(java.util.Locale.US, totalSec)}s",
+      body = buildList {
+        t.shots.sortedBy { it.order }.take(5).forEach { shot ->
+          val rationale = shot.rationale.take(30)
+          add("#${shot.order} ${"%.1f".format(java.util.Locale.US, shot.durationSec)}s${if (rationale.isNotBlank()) " · $rationale" else ""}")
+        }
+        if (t.shots.size > 5) add("…另外 ${t.shots.size - 5} 个镜头")
+      },
+    )
+  }
+  "critic" -> d.critique?.let { c ->
+    val v = when (c.verdict) {
+      com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.CriticVerdict.ACCEPT -> "通过"
+      com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.CriticVerdict.REVISE -> "需修订"
+      com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.CriticVerdict.ABORT -> "放弃"
+    }
+    AgentOutput(
+      summary = "$v · ${c.issues.size} 条意见",
+      body = buildList {
+        add("结论：$v")
+        c.issues.forEach { add("• $it") }
+        if (c.revisedRequests.isNotEmpty()) add("修订镜头：${c.revisedRequests.size} 处")
+      },
+    )
+  }
+  "render", "rendering" -> d.mp4Path?.let { mp4 ->
+    AgentOutput(
+      summary = mp4.substringAfterLast('/'),
+      body = listOfNotNull(
+        "输出文件：${mp4.substringAfterLast('/')}",
+        d.perf?.totalMs?.takeIf { it > 0 }?.let { "总耗时：${formatMs(it)}" },
+        d.perf?.renderMs?.takeIf { it > 0 }?.let { "渲染耗时：${formatMs(it)}" },
+      ),
+    )
+  }
+  else -> null
+}
+
+private fun formatMs(ms: Long): String = when {
+  ms < 1000 -> "${ms}ms"
+  ms < 60_000 -> "${ms / 1000}s"
+  else -> "${ms / 60_000}m${(ms % 60_000) / 1000}s"
+}
+
 @Composable
-private fun ResultCard(msg: ChatMessage) {
+private fun ResultCard(msg: ChatMessage, @Suppress("UNUSED_PARAMETER") decisions: List<EventDecisions>) {
   val tokens = VlogPilotTokens
   Surface(
     modifier = Modifier.fillMaxWidth(),
