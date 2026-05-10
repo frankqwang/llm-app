@@ -21,11 +21,13 @@ import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
+import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -38,7 +40,11 @@ private const val AUDIO_METER_MIN_DB = -2.0f
 private const val AUDIO_METER_MAX_DB = 100.0f
 
 /** The UI state of the HoldToDictateViewModel. */
-data class HoldToDictateUiState(val recognizing: Boolean = false, val recognizedText: String = "")
+data class HoldToDictateUiState(
+  val recognizing: Boolean = false,
+  val recognizedText: String = "",
+  val errorMessage: String = "",
+)
 
 @HiltViewModel
 class HoldToDictateViewModel @Inject constructor(@ApplicationContext private val context: Context) :
@@ -50,6 +56,7 @@ class HoldToDictateViewModel @Inject constructor(@ApplicationContext private val
   private val recognizerIntent: Intent
   private var onRecognitionDone: ((String) -> Unit)? = null
   private var onAmplitudeChanged: ((Int) -> Unit)? = null
+  private val recognitionAvailable = SpeechRecognizer.isRecognitionAvailable(context)
 
   init {
     // Initialize SpeechRecognizer
@@ -62,19 +69,25 @@ class HoldToDictateViewModel @Inject constructor(@ApplicationContext private val
     recognizerIntent =
       Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
         putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
       }
   }
 
   fun startSpeechRecognition(onDone: (String) -> Unit, onAmplitudeChanged: (Int) -> Unit) {
+    if (!recognitionAvailable) {
+      setError("当前系统没有可用的语音识别服务。")
+      onDone("")
+      return
+    }
     onRecognitionDone = onDone
     this.onAmplitudeChanged = onAmplitudeChanged
 
-    speechRecognizer.startListening(recognizerIntent)
+    setError("")
     setRecognizedText(text = "")
     setRecognizing(recognizing = true)
+    speechRecognizer.startListening(recognizerIntent)
   }
 
   fun stopSpeechRecognition() {
@@ -86,6 +99,7 @@ class HoldToDictateViewModel @Inject constructor(@ApplicationContext private val
   }
 
   fun cancelSpeechRecognition() {
+    speechRecognizer.cancel()
     setRecognizing(recognizing = false)
   }
 
@@ -95,6 +109,14 @@ class HoldToDictateViewModel @Inject constructor(@ApplicationContext private val
 
   fun setRecognizedText(text: String) {
     _uiState.update { uiState.value.copy(recognizedText = text) }
+  }
+
+  fun clearError() {
+    setError("")
+  }
+
+  private fun setError(message: String) {
+    _uiState.update { uiState.value.copy(errorMessage = message) }
   }
 
   override fun onReadyForSpeech(params: Bundle?) {}
@@ -109,7 +131,11 @@ class HoldToDictateViewModel @Inject constructor(@ApplicationContext private val
 
   override fun onEndOfSpeech() {}
 
-  override fun onError(error: Int) {}
+  override fun onError(error: Int) {
+    Log.w(TAG, "SpeechRecognizer error=$error")
+    setError(errorMessage(error))
+    setRecognizing(recognizing = false)
+  }
 
   override fun onResults(results: Bundle?) {
     val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
@@ -137,6 +163,19 @@ class HoldToDictateViewModel @Inject constructor(@ApplicationContext private val
   }
 
   override fun onEvent(eventType: Int, params: Bundle?) {}
+
+  private fun errorMessage(error: Int): String = when (error) {
+    SpeechRecognizer.ERROR_AUDIO -> "麦克风录音失败。"
+    SpeechRecognizer.ERROR_CLIENT -> "语音识别启动失败，请再试一次。"
+    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "没有麦克风权限。"
+    SpeechRecognizer.ERROR_NETWORK,
+    SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "语音识别网络异常。"
+    SpeechRecognizer.ERROR_NO_MATCH -> "没有识别到有效语音。"
+    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "语音识别正在忙，请稍后再试。"
+    SpeechRecognizer.ERROR_SERVER -> "系统语音识别服务异常。"
+    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "没有听到声音。"
+    else -> "语音识别失败，请再试一次。"
+  }
 }
 
 private fun convertRmsDbToAmplitude(rmsdB: Float): Int {

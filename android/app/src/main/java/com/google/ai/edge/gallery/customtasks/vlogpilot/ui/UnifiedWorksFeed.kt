@@ -82,7 +82,7 @@ internal fun UnifiedWorksFeed(
   val completedIds = remember(decisions) { decisions.mapTo(mutableSetOf()) { it.eventId } }
   val candidates = remember(manifest, completedIds) {
     manifest?.candidates
-      ?.filter { it.status != EventSelectionStatus.COMPLETED && it.eventId !in completedIds }
+      ?.filter { it.eventId !in completedIds }
       ?.filter { it.status != EventSelectionStatus.EXCLUDED }
       ?: emptyList()
   }
@@ -324,7 +324,12 @@ private fun CandidateRow(snapshot: EventCandidateSnapshot, active: Boolean, onCl
           maxLines = 1,
           overflow = TextOverflow.Ellipsis,
         )
-        StatusTag(if (active) "制作中" else "待制作", if (active) tokens.colors.accent else tokens.colors.systemOrange)
+        val statusText = when {
+          active -> "制作中"
+          snapshot.status == EventSelectionStatus.COMPLETED -> "需重导出"
+          else -> "待制作"
+        }
+        StatusTag(statusText, if (active) tokens.colors.accent else tokens.colors.systemOrange)
       }
     }
     Icon(

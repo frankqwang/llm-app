@@ -12,6 +12,7 @@ package com.google.ai.edge.gallery.customtasks.vlogpilot.chat
 
 import android.content.Context
 import android.util.Log
+import com.google.ai.edge.gallery.data.SAMPLE_RATE
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineEventBus
 import com.google.ai.edge.gallery.customtasks.vlogpilot.worker.PipelineProgress
 import kotlinx.coroutines.CoroutineScope
@@ -162,6 +163,36 @@ class ChatViewModel(private val context: Context) {
     return msg
   }
 
+  fun appendUserAudioMessage(audioWav: ByteArray): ChatMessage {
+    val convoId = ensureActiveConversation()
+    val now = System.currentTimeMillis()
+    val msgId = "msg_${now}_user_audio"
+    val audioPath = runCatching {
+      ChatStore.saveAudioAttachment(context, convoId, msgId, audioWav)
+    }.getOrNull()
+    val durationMs = wavDurationMs(audioWav)
+    val msg = ChatMessage(
+      id = msgId,
+      conversationId = convoId,
+      timestampMs = now,
+      role = ChatRole.USER,
+      text = "语音指令",
+      audioPath = audioPath,
+      audioDurationMs = durationMs,
+    )
+    pushSync(msg)
+    val convo = _conversations.value.firstOrNull { it.id == convoId }
+    if (convo == null || convo.title == "新对话") {
+      scope.launch {
+        withContext(Dispatchers.IO) {
+          ChatStore.updateConversation(context, convoId, title = "语音指令")
+        }
+        reloadConversations()
+      }
+    }
+    return msg
+  }
+
   /** Append a SYSTEM / AGENT_STATUS / etc message produced by the router.
    *  Updates the message stream synchronously so UI reflects the reply
    *  immediately — disk persistence is best-effort and runs in background. */
@@ -258,10 +289,31 @@ class ChatViewModel(private val context: Context) {
       "扫描完成 · ${event.assetCount} 张素材 · ${event.eventCount} 个事件",
       null, null, null,
     )
-    is PipelineProgress.Perceiving -> null  // too noisy per-asset
+    is PipelineProgress.Perceiving ->
+      if (shouldEmitProgress(event.current, event.total)) {
+        Translated(
+          ChatRole.AGENT_STATUS,
+          "读取素材特征 · ${event.current}/${event.total} · ${event.assetName.ifBlank { event.mediaType }}",
+          null,
+          null,
+          null,
+        )
+      } else {
+        null
+      }
     is PipelineProgress.Annotating ->
-      if (event.current == 1) Translated(ChatRole.AGENT_STATUS, "开始为素材打标签 (${event.total} 张)...", null, null, null)
-      else null
+      if (shouldEmitProgress(event.current, event.total)) {
+        val verb = if (event.phase == "start") "正在打标" else "已标注"
+        Translated(
+          ChatRole.AGENT_STATUS,
+          "$verb · ${event.current}/${event.total} · ${event.assetName.ifBlank { event.mediaType }}",
+          null,
+          null,
+          null,
+        )
+      } else {
+        null
+      }
     is PipelineProgress.AnnotationDone -> Translated(
       ChatRole.AGENT_STATUS, "素材标签完成 · ${event.annotated}/${event.total}", null, null, null,
     )
@@ -306,5 +358,20 @@ class ChatViewModel(private val context: Context) {
     "critic" -> "Critic · 审片"
     "render", "rendering" -> "Render · 渲染"
     else -> "Stage · $stage"
+  }
+
+  private fun shouldEmitProgress(current: Int, total: Int): Boolean {
+    if (current <= 1 || current >= total) return true
+    val step = when {
+      total <= 40 -> 1
+      total <= 120 -> 4
+      else -> 5
+    }
+    return current % step == 0
+  }
+
+  private fun wavDurationMs(audioWav: ByteArray): Long {
+    val pcmBytes = (audioWav.size - 44).coerceAtLeast(0)
+    return (pcmBytes * 1000L) / (SAMPLE_RATE * 2L)
   }
 }

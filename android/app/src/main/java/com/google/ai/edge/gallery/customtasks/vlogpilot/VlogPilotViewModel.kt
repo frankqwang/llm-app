@@ -584,7 +584,8 @@ class VlogPilotViewModel @Inject constructor(
           .asSequence()
           .take(ALBUM_CACHE_PREFETCH_LIMIT)
           .mapNotNull { asset ->
-            PerceptionCache.get(appContext, asset)?.let { perception -> asset.id to perception }
+            (PerceptionCache.get(appContext, asset) ?: PerceptionCache.get(appContext, asset.id))
+              ?.let { perception -> asset.id to perception }
           }
           .toMap()
       }
@@ -601,14 +602,30 @@ class VlogPilotViewModel @Inject constructor(
     _albumVisibleCount.value = minOf(_albumVisibleCount.value + ALBUM_PAGE_SIZE, assets.size)
   }
 
-  fun indexAssets(assetIds: List<String> = emptyList()) {
+  fun indexAssets(assetIds: List<String> = emptyList(), replaceExisting: Boolean = false) {
     VlogPipelineWorker.ensureChannel(appContext)
     val req = OneTimeWorkRequestBuilder<VlogIndexWorker>()
-      .setInputData(VlogIndexWorker.inputData(assetIds = assetIds, windowDays = 0))
+      .setInputData(
+        VlogIndexWorker.inputData(
+          assetIds = assetIds,
+          windowDays = 0,
+          forceAnnotation = replaceExisting,
+        ),
+      )
       .build()
+    val workName = if (assetIds.size == 1) {
+      VlogIndexWorker.singleAssetWorkName(assetIds.first())
+    } else {
+      VlogIndexWorker.WORK_NAME
+    }
+    val policy = if (replaceExisting || assetIds.size == 1) {
+      ExistingWorkPolicy.REPLACE
+    } else {
+      ExistingWorkPolicy.KEEP
+    }
     workManager.enqueueUniqueWork(
-      VlogIndexWorker.WORK_NAME,
-      ExistingWorkPolicy.KEEP,
+      workName,
+      policy,
       req,
     )
   }

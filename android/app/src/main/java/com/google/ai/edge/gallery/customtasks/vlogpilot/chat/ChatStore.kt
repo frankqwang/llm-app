@@ -127,6 +127,20 @@ object ChatStore {
     }
   }
 
+  fun saveAudioAttachment(
+    context: Context,
+    convoId: String,
+    messageId: String,
+    audioWav: ByteArray,
+  ): String {
+    val file = File(File(convoDir(context, convoId), "attachments"), "$messageId.wav")
+    synchronized(lock) {
+      file.parentFile?.mkdirs()
+      file.writeBytes(audioWav)
+    }
+    return file.absolutePath
+  }
+
   /** Creates a new conversation and persists its meta. */
   fun createConversation(context: Context, title: String, eventId: String? = null): ChatConversation {
     val now = System.currentTimeMillis()

@@ -421,10 +421,7 @@ internal fun assetMeta(asset: Asset): String {
 
 internal fun annotationSummary(tags: VlmTags?, videoSummary: String? = null): String {
   if (tags == null) return "未读取到标注缓存"
-  if (tags.scene.isBlank() && tags.subjects.isEmpty() && tags.action.isBlank() && tags.mood.isBlank()) {
-    return "VLM 标签为空"
-  }
-  return listOfNotNull(
+  val parts = listOfNotNull(
     tags.visualDescription.takeIf { it.isNotBlank() },
     tags.scene.takeIf { it.isNotBlank() },
     tags.subjects.takeIf { it.isNotEmpty() }?.joinToString("、"),
@@ -435,6 +432,7 @@ internal fun annotationSummary(tags: VlmTags?, videoSummary: String? = null): St
     tags.lighting.takeIf { it.isNotBlank() },
     tags.motionHint.takeIf { it.isNotBlank() },
     videoSummary?.takeIf { it.isNotBlank() },
-  ).joinToString(" · ")
+  )
+  return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ") ?: "VLM 标签为空"
 }
 

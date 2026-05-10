@@ -45,6 +45,9 @@ data class ChatMessage(
   val eventId: String? = null,
   // For RESULT: where the rendered mp4 lives (so the chat can play it)
   val mp4Path: String? = null,
+  // For USER voice messages: saved local WAV attachment and duration.
+  val audioPath: String? = null,
+  val audioDurationMs: Long? = null,
 )
 
 @Serializable

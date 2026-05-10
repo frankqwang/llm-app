@@ -30,6 +30,7 @@ import com.google.ai.edge.gallery.common.SystemPromptHelper
 import com.google.ai.edge.gallery.common.getJsonResponse
 import com.google.ai.edge.gallery.common.isAICoreSupported
 import com.google.ai.edge.gallery.customtasks.common.CustomTask
+import com.google.ai.edge.gallery.customtasks.vlogpilot.VlogPilotTask
 import com.google.ai.edge.gallery.data.Accelerator
 import com.google.ai.edge.gallery.data.BuiltInTaskId
 import com.google.ai.edge.gallery.data.Category
@@ -641,6 +642,7 @@ constructor(
         BuiltInTaskId.LLM_TINY_GARDEN,
         BuiltInTaskId.LLM_MOBILE_ACTIONS,
         BuiltInTaskId.LLM_AGENT_CHAT,
+        VlogPilotTask.TASK_ID,
       )
     for (task in getTasksByIds(ids = setOfTasks)) {
       // Remove duplicated imported model if existed.
@@ -1154,6 +1156,7 @@ constructor(
       if (model.llmSupportMobileActions) {
         tasks.get(key = BuiltInTaskId.LLM_MOBILE_ACTIONS)?.models?.add(model)
       }
+      tasks.get(key = VlogPilotTask.TASK_ID)?.models?.add(model)
 
       // Update status.
       modelDownloadStatus[model.name] =
@@ -1162,6 +1165,8 @@ constructor(
           receivedBytes = importedModel.fileSize,
           totalBytes = importedModel.fileSize,
         )
+      modelInstances[model.name] =
+        ModelInitializationStatus(status = ModelInitializationStatusType.NOT_INITIALIZED)
     }
 
     val textInputHistory = dataStoreRepository.readTextInputHistory()

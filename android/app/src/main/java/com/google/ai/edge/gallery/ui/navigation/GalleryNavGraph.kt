@@ -194,6 +194,7 @@ fun GalleryNavHost(
       com.google.ai.edge.gallery.customtasks.vlogpilot.VlogPilotRootScreen(
         modelManagerViewModel = modelManagerViewModel,
         onOpenGallery = { navController.navigate(ROUTE_HOMESCREEN) },
+        onOpenModelManager = { navController.navigate(ROUTE_MODEL_MANAGER) },
       )
     }
 

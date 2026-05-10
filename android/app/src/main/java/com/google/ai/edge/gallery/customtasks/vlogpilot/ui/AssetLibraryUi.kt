@@ -7,7 +7,10 @@
  */
 package com.google.ai.edge.gallery.customtasks.vlogpilot
 
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,6 +21,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -29,8 +33,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Visibility
@@ -53,13 +59,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.PerceptionCache
+import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.MediaLoader
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Asset
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.MediaType
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.Perception
@@ -69,6 +79,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /** Holds the album-tab UI state across the LazyListScope items + the
@@ -108,7 +119,7 @@ internal fun LazyListScope.assetLibraryItems(
   val grouped = visibleAssets.groupBy { assetDayLabel(it.takenEpochMs) }
   val loadedAssetIds = assets.mapTo(mutableSetOf()) { it.id }
   val albumUsages = loadedAssetIds.mapNotNull { usageByAssetId[it] }
-  val annotatedCount = albumUsages.count { it.annotated }
+  val annotatedCount = albumUsages.count { it.isAnnotatedForUi() }
   val selectedCount = albumUsages.count { it.selectedStoryIds.isNotEmpty() }
   val shotCount = albumUsages.count { it.shotOrdersByVideo.isNotEmpty() }
   val renderedCount = albumUsages.count { it.finishedVideoIds.isNotEmpty() }
@@ -225,6 +236,7 @@ internal fun AssetLibraryDialog(
   usageByAssetId: Map<String, AssetUsage>,
   decisions: List<EventDecisions>,
   manifest: EventSelectionManifest?,
+  onAnnotateAsset: (Asset) -> Boolean,
   onOpenStory: (String) -> Unit,
   onOpenVideo: (String) -> Unit,
 ) {
@@ -236,6 +248,7 @@ internal fun AssetLibraryDialog(
         usage = usageByAssetId[asset.id] ?: AssetUsage(),
         decisions = decisions,
         manifest = manifest,
+        onAnnotateAsset = onAnnotateAsset,
         onDismiss = { state.selectedAssetId = null },
         onOpenStory = { eventId ->
           state.selectedAssetId = null
@@ -304,12 +317,38 @@ internal enum class AlbumScope(val label: String) {
     All -> true
     Videos -> asset.mediaType == MediaType.VIDEO
     Photos -> asset.mediaType == MediaType.IMAGE || asset.mediaType == MediaType.LIVE_PHOTO
-    Annotated -> usage?.annotated == true
+    Annotated -> usage?.isAnnotatedForUi() == true
     Used -> usage?.selectedStoryIds?.isNotEmpty() == true ||
       usage?.shotOrdersByVideo?.isNotEmpty() == true ||
       usage?.finishedVideoIds?.isNotEmpty() == true
   }
 }
+
+private fun AssetUsage.isAnnotatedForUi(): Boolean =
+  annotated ||
+    perception?.let(::hasSemanticAnnotationForUi) == true
+
+private fun chooseUiPerception(existing: Perception?, incoming: Perception?): Perception? =
+  when {
+    incoming == null -> existing
+    existing == null -> incoming
+    !hasSemanticAnnotationForUi(existing) && hasSemanticAnnotationForUi(incoming) -> incoming
+    else -> existing
+  }
+
+private fun hasSemanticAnnotationForUi(perception: Perception): Boolean =
+  perception.vlmTags.scene.isNotBlank() ||
+    perception.vlmTags.subjects.isNotEmpty() ||
+    perception.vlmTags.action.isNotBlank() ||
+    perception.vlmTags.mood.isNotBlank() ||
+    perception.vlmTags.salient.isNotBlank() ||
+    perception.vlmTags.visualDescription.isNotBlank() ||
+    perception.vlmTags.composition.isNotBlank() ||
+    perception.vlmTags.lighting.isNotBlank() ||
+    perception.vlmTags.motionHint.isNotBlank() ||
+    perception.videoInsight.summary.isNotBlank() ||
+    perception.videoInsight.visualDescription.isNotBlank() ||
+    perception.videoInsight.actionArc.isNotBlank()
 
 @Composable
 private fun AlbumHeader(
@@ -470,7 +509,7 @@ private fun AssetGridTile(
 @Composable
 private fun AlbumStatusDots(usage: AssetUsage?, modifier: Modifier = Modifier) {
   val colors = listOfNotNull(
-    if (usage?.annotated == true) Color(0xFF9CC2FF) else null,
+    if (usage?.isAnnotatedForUi() == true) Color(0xFF9CC2FF) else null,
     if (usage?.selectedStoryIds?.isNotEmpty() == true) Color(0xFF78D8B2) else null,
     if (usage?.shotOrdersByVideo?.isNotEmpty() == true) Color(0xFFFFD166) else null,
     if (usage?.finishedVideoIds?.isNotEmpty() == true) Color(0xFFFF9E9E) else null,
@@ -501,71 +540,64 @@ private fun AssetDetailDialog(
   usage: AssetUsage,
   decisions: List<EventDecisions>,
   manifest: EventSelectionManifest?,
+  onAnnotateAsset: (Asset) -> Boolean,
   onDismiss: () -> Unit,
   onOpenStory: (String) -> Unit,
   onOpenVideo: (String) -> Unit,
 ) {
   val context = LocalContext.current
-  val perception by produceState<Perception?>(initialValue = usage.perception, asset.id) {
-    if (usage.perception == null) {
-      value = withContext(Dispatchers.IO) { PerceptionCache.get(context, asset) }
+  var annotateRequested by remember(asset.id) { mutableStateOf(false) }
+  var perception by remember(asset.id) { mutableStateOf(usage.perception) }
+
+  LaunchedEffect(asset.id, usage.perception) {
+    val cached = withContext(Dispatchers.IO) {
+      PerceptionCache.get(context, asset) ?: PerceptionCache.get(context, asset.id)
+    }
+    perception = chooseUiPerception(usage.perception, cached)
+  }
+
+  LaunchedEffect(annotateRequested, asset.id) {
+    if (!annotateRequested) return@LaunchedEffect
+    repeat(45) {
+      val cached = withContext(Dispatchers.IO) {
+        PerceptionCache.get(context, asset) ?: PerceptionCache.get(context, asset.id)
+      }
+      perception = chooseUiPerception(perception, cached)
+      if (cached?.let(::hasSemanticAnnotationForUi) == true) return@LaunchedEffect
+      delay(2_000)
     }
   }
 
   val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
-  Dialog(onDismissRequest = onDismiss) {
+  val dialogColor = if (tokens.colors.isDark) Color(0xFF1C1C1E) else MaterialTheme.colorScheme.surface
+  Dialog(
+    onDismissRequest = onDismiss,
+    properties = DialogProperties(usePlatformDefaultWidth = false),
+  ) {
     Surface(
       modifier = Modifier
-        .fillMaxWidth()
-        .heightIn(max = 760.dp),
-      shape = RoundedCornerShape(24.dp),
-      color = MaterialTheme.colorScheme.background,
+        .fillMaxWidth(0.985f)
+        .fillMaxHeight(0.92f),
+      shape = RoundedCornerShape(18.dp),
+      color = dialogColor,
       tonalElevation = 0.dp,
     ) {
       Column(
         modifier = Modifier
           .verticalScroll(rememberScrollState())
-          .padding(horizontal = 18.dp, vertical = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+          .padding(horizontal = 8.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
       ) {
-        // Hero: square thumbnail + name + meta lines, mirrors iOS Photos' info sheet.
-        Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
-          AssetThumb(
-            asset = asset,
-            modifier = Modifier
-              .width(80.dp)
-              .height(80.dp),
-          )
-          Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(
-              asset.displayName.ifBlank { shortId(asset.id) },
-              style = MaterialTheme.typography.titleLarge,
-              fontWeight = FontWeight.Bold,
-              color = MaterialTheme.colorScheme.onBackground,
-              maxLines = 2,
-              overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-              assetMeta(asset),
-              style = MaterialTheme.typography.bodyMedium,
-              color = tokens.colors.secondaryLabel,
-            )
-            Text(
-              assetDateTimeLabel(asset.takenEpochMs),
-              style = MaterialTheme.typography.bodyMedium,
-              color = tokens.colors.tertiaryLabel,
-            )
-          }
-        }
-
-        MetricGrid(
-          items = listOf(
-            MetricDatum("类型", friendlyMediaType(asset)),
-            MetricDatum("尺寸", if (asset.widthPx > 0 && asset.heightPx > 0) "${asset.widthPx}×${asset.heightPx}" else "-"),
-            MetricDatum("时长", if (asset.durationMs > 0) formatSec(asset.durationMs / 1000.0) else "-"),
-            MetricDatum("大小", readableBytes(asset.sizeBytes)),
-          ),
-          columns = 2,
+        AssetHeroPreview(asset = asset)
+        CompactAssetHeader(asset = asset)
+        com.google.ai.edge.gallery.customtasks.vlogpilot.ui.TintedActionButton(
+          text = if (annotateRequested) "已加入后台标注" else "用本地模型标注",
+          icon = Icons.Outlined.AutoAwesome,
+          enabled = !annotateRequested,
+          onClick = {
+            annotateRequested = onAnnotateAsset(asset)
+          },
+          modifier = Modifier.fillMaxWidth(),
         )
 
         DecisionSection(
@@ -577,6 +609,12 @@ private fun AssetDetailDialog(
           if (p == null) {
             Text(
               "还没有 VLM 标注缓存。素材进入故事扫描或制作后会写入这里。",
+              style = MaterialTheme.typography.bodyMedium,
+              color = tokens.colors.secondaryLabel,
+            )
+          } else if (!hasSemanticAnnotationForUi(p)) {
+            Text(
+              "已有基础检测，但还没有 VLM 语义标注。通常是模型返回空、素材被质量过滤，或者旧缓存只保存了清晰度/亮度/人脸等基础信号。点上方按钮会强制重新用本地模型标注。",
               style = MaterialTheme.typography.bodyMedium,
               color = tokens.colors.secondaryLabel,
             )
@@ -629,6 +667,98 @@ private fun AssetDetailDialog(
     }
   }
 }
+
+@Composable
+private fun AssetHeroPreview(asset: Asset) {
+  val context = LocalContext.current
+  val bitmap by produceState<Bitmap?>(initialValue = null, asset.id) {
+    value = withContext(Dispatchers.IO) {
+      MediaLoader.loadImage(context, asset, maxSide = 1800, preferRgb565 = false)
+    }
+  }
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
+  val heroShape = RoundedCornerShape(16.dp)
+  Box(
+    modifier = Modifier
+      .fillMaxWidth()
+      .heightIn(min = 360.dp, max = 620.dp)
+      .clip(heroShape)
+      .background(if (tokens.colors.isDark) Color(0xFF111318) else tokens.colors.groupedBackground)
+      .border(1.dp, tokens.colors.opaqueSeparator, heroShape),
+    contentAlignment = Alignment.Center,
+  ) {
+    val bmp = bitmap
+    if (bmp != null) {
+      Image(
+        bitmap = bmp.asImageBitmap(),
+        contentDescription = asset.displayName,
+        modifier = Modifier.fillMaxSize(),
+        contentScale = ContentScale.Fit,
+      )
+    } else {
+      Icon(
+        Icons.Outlined.PhotoLibrary,
+        contentDescription = null,
+        tint = Color.White.copy(alpha = 0.72f),
+        modifier = Modifier.size(34.dp),
+      )
+    }
+    val badge = listOfNotNull(
+      friendlyMediaType(asset),
+      if (asset.durationMs > 0) formatSec(asset.durationMs / 1000.0) else null,
+    ).joinToString(" · ")
+    Surface(
+      modifier = Modifier
+        .align(Alignment.BottomEnd)
+        .padding(8.dp),
+      shape = RoundedCornerShape(999.dp),
+      color = Color.Black.copy(alpha = 0.58f),
+      contentColor = Color.White,
+    ) {
+      Text(
+        badge,
+        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+        style = MaterialTheme.typography.labelSmall,
+        fontWeight = FontWeight.SemiBold,
+      )
+    }
+  }
+}
+
+@Composable
+private fun CompactAssetHeader(asset: Asset) {
+  val tokens = com.google.ai.edge.gallery.customtasks.vlogpilot.ui.theme.VlogPilotTokens
+  Column(
+    modifier = Modifier
+      .fillMaxWidth()
+      .padding(horizontal = 2.dp),
+    verticalArrangement = Arrangement.spacedBy(4.dp),
+  ) {
+    Text(
+      asset.displayName.ifBlank { shortId(asset.id) },
+      style = MaterialTheme.typography.titleMedium,
+      fontWeight = FontWeight.Bold,
+      color = MaterialTheme.colorScheme.onBackground,
+      maxLines = 2,
+      overflow = TextOverflow.Ellipsis,
+    )
+    Text(
+      compactAssetMeta(asset),
+      style = MaterialTheme.typography.bodySmall,
+      color = tokens.colors.secondaryLabel,
+      maxLines = 2,
+      overflow = TextOverflow.Ellipsis,
+    )
+  }
+}
+
+private fun compactAssetMeta(asset: Asset): String = listOfNotNull(
+  friendlyMediaType(asset),
+  if (asset.widthPx > 0 && asset.heightPx > 0) "${asset.widthPx}×${asset.heightPx}" else null,
+  if (asset.durationMs > 0) formatSec(asset.durationMs / 1000.0) else null,
+  readableBytes(asset.sizeBytes).takeIf { it != "-" },
+  assetDateTimeLabel(asset.takenEpochMs).takeIf { it.isNotBlank() },
+).joinToString(" · ")
 
 @Composable
 private fun QualityPill(label: String, value: String) {

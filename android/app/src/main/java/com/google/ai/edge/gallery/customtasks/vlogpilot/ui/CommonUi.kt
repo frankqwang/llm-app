@@ -217,6 +217,7 @@ internal fun VideoPreview(mp4Path: String) {
   //   - tap-to-toggle play/pause via custom logic (no MediaController bar)
   //   - overlay a play/pause icon when paused so the affordance stays clear
   val playing = remember { mutableStateOf(false) }
+  val failed = remember(mp4Path) { mutableStateOf(false) }
   Box(
     modifier = Modifier.fillMaxWidth(),
     contentAlignment = Alignment.Center,
@@ -235,11 +236,18 @@ internal fun VideoPreview(mp4Path: String) {
             tag = mp4Path
             setVideoPath(mp4Path)
             setOnPreparedListener { player ->
+              failed.value = false
               player.isLooping = true
               seekTo(1)
             }
+            setOnErrorListener { _, _, _ ->
+              failed.value = true
+              playing.value = false
+              true
+            }
             seekTo(1)
             setOnClickListener {
+              if (failed.value) return@setOnClickListener
               if (isPlaying) { pause(); playing.value = false }
               else { start(); playing.value = true }
             }
@@ -248,6 +256,7 @@ internal fun VideoPreview(mp4Path: String) {
         update = { view ->
           if (view.tag != mp4Path) {
             view.tag = mp4Path
+            failed.value = false
             view.setVideoPath(mp4Path)
             view.seekTo(1)
             playing.value = false
@@ -255,7 +264,15 @@ internal fun VideoPreview(mp4Path: String) {
         },
         modifier = Modifier.fillMaxSize(),
       )
-      if (!playing.value) {
+      if (failed.value) {
+        Text(
+          "视频文件不可播放或已损坏",
+          modifier = Modifier.padding(16.dp),
+          style = MaterialTheme.typography.bodyMedium,
+          color = Color.White.copy(alpha = 0.82f),
+          textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
+      } else if (!playing.value) {
         Box(
           modifier = Modifier
             .size(56.dp)

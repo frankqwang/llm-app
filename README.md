@@ -1,4 +1,4 @@
-# 智数副驾驶 (AlnumCopilot)
+# 相册挖掘-本地agent版 (AlnumCopilot)
 
 基于 [Google AI Edge Gallery](https://github.com/google-ai-edge/gallery) (Apache-2.0) 的分支。本仓库交付的应用是 **VlogPilot**：一键点击，Gemma 4 E2B-IT 通过 [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM) 在设备端本地运行，将相册最近 30 天的照片自动剪辑为 AI 策划的 vlog 候选——不上传、不上云、不需要账号。
 

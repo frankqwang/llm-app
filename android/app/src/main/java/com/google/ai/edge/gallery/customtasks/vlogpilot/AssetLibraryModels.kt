@@ -49,7 +49,7 @@ internal fun buildAssetUsageIndex(
         current.copy(
           annotated = current.annotated || perception?.let(::perceptionIsAnnotated) == true,
           storyIds = current.storyIds + decision.eventId,
-          perception = current.perception ?: perception,
+          perception = choosePerception(current.perception, perception),
         )
       }
     }
@@ -67,15 +67,31 @@ internal fun buildAssetUsageIndex(
     update(assetId) { current ->
       current.copy(
         annotated = current.annotated || perceptionIsAnnotated(perception),
-        perception = current.perception ?: perception,
+        perception = choosePerception(current.perception, perception),
       )
     }
   }
   return usage
 }
 
+private fun choosePerception(existing: Perception?, incoming: Perception?): Perception? =
+  when {
+    incoming == null -> existing
+    existing == null -> incoming
+    !perceptionIsAnnotated(existing) && perceptionIsAnnotated(incoming) -> incoming
+    else -> existing
+  }
+
 private fun perceptionIsAnnotated(perception: Perception): Boolean =
   perception.vlmTags.scene.isNotBlank() ||
     perception.vlmTags.subjects.isNotEmpty() ||
     perception.vlmTags.action.isNotBlank() ||
-    perception.videoInsight.summary.isNotBlank()
+    perception.vlmTags.mood.isNotBlank() ||
+    perception.vlmTags.salient.isNotBlank() ||
+    perception.vlmTags.visualDescription.isNotBlank() ||
+    perception.vlmTags.composition.isNotBlank() ||
+    perception.vlmTags.lighting.isNotBlank() ||
+    perception.vlmTags.motionHint.isNotBlank() ||
+    perception.videoInsight.summary.isNotBlank() ||
+    perception.videoInsight.visualDescription.isNotBlank() ||
+    perception.videoInsight.actionArc.isNotBlank()

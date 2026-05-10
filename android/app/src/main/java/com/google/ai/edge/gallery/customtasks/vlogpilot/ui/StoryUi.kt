@@ -679,7 +679,7 @@ internal fun StoryShelfHeader(
             )
             if (running) {
               Text(
-                if (refreshOnly) "正在更新候选" else "制作进行中",
+                if (refreshOnly) "正在重扫故事" else "制作进行中",
                 style = MaterialTheme.typography.labelSmall,
                 color = tokens.colors.secondaryLabel,
               )

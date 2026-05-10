@@ -39,6 +39,7 @@ import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
 fun VlogPilotRootScreen(
   modelManagerViewModel: ModelManagerViewModel,
   onOpenGallery: () -> Unit,
+  onOpenModelManager: () -> Unit = onOpenGallery,
 ) {
   VlogPilotTheme {
     var selectedTab by remember { mutableStateOf(VlogPilotTab.Works) }
@@ -69,6 +70,7 @@ fun VlogPilotRootScreen(
         bottomPadding = innerPadding.calculateBottomPadding(),
         modelManagerViewModel = modelManagerViewModel,
         onOpenGallery = onOpenGallery,
+        onOpenModelManager = onOpenModelManager,
         modifier = Modifier.padding(top = innerPadding.calculateTopPadding()),
       )
     }

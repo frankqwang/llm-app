@@ -1322,11 +1322,22 @@ private suspend fun buildTimeline(
   }
 
   private fun needsVlmAnnotation(perception: Perception, asset: Asset): Boolean {
-    if (perception.vlmTags.scene.isBlank()) return true
+    if (!hasSemanticAnnotation(perception)) return true
     if (asset.mediaType == MediaType.IMAGE) return false
     val expectedFrames = VideoFrameSheetBuilder.targetFrameCount(asset)
     return perception.videoInsight.frameTimestampsSec.size < expectedFrames
   }
+
+  private fun hasSemanticAnnotation(perception: Perception): Boolean =
+    perception.vlmTags.scene.isNotBlank() ||
+      perception.vlmTags.subjects.isNotEmpty() ||
+      perception.vlmTags.action.isNotBlank() ||
+      perception.vlmTags.mood.isNotBlank() ||
+      perception.vlmTags.salient.isNotBlank() ||
+      perception.vlmTags.visualDescription.isNotBlank() ||
+      perception.videoInsight.summary.isNotBlank() ||
+      perception.videoInsight.visualDescription.isNotBlank() ||
+      perception.videoInsight.actionArc.isNotBlank()
 
   /**
    * Per-asset VLM annotation — extracted from run() so its many suspend points

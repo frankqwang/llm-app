@@ -8,6 +8,7 @@
 package com.google.ai.edge.gallery.customtasks.vlogpilot.worker
 
 import android.content.Context
+import android.media.MediaMetadataRetriever
 import android.util.Log
 import com.google.ai.edge.gallery.customtasks.vlogpilot.perception.PerceptionCache
 import com.google.ai.edge.gallery.customtasks.vlogpilot.schemas.AudienceBrief
@@ -143,11 +144,11 @@ object DecisionStore {
     val dir = File(File(context.filesDir, "decisions"), eventId)
     if (!dir.isDirectory) return null
     val candidatesDir = File(context.filesDir, "candidates")
-    val mp4 = File(candidatesDir, "$eventId.mp4").takeIf { it.isFile }?.absolutePath
+    val mp4 = File(candidatesDir, "$eventId.mp4").takeIf { it.isPlayableMp4Candidate() }?.absolutePath
     val inputs = readJson<EventInputManifest>(dir, "event_inputs.json")
     val inputAssets = inputs?.assets.orEmpty()
     val inputPerceptions = inputAssets.mapNotNull { asset ->
-      PerceptionCache.get(context, asset)?.let { asset.id to it }
+      (PerceptionCache.get(context, asset) ?: PerceptionCache.get(context, asset.id))?.let { asset.id to it }
     }.toMap()
     val history = IterationStore.loadHistory(context, eventId)
     val previousMp4 = IterationStore.previousVersionPath(context, eventId)
@@ -178,11 +179,11 @@ object DecisionStore {
     val candidatesDir = File(context.filesDir, "candidates")
     return root.listFiles()?.filter { it.isDirectory }?.map { dir ->
       val eid = dir.name
-      val mp4 = File(candidatesDir, "$eid.mp4").takeIf { it.isFile }?.absolutePath
+      val mp4 = File(candidatesDir, "$eid.mp4").takeIf { it.isPlayableMp4Candidate() }?.absolutePath
       val inputs = readJson<EventInputManifest>(dir, "event_inputs.json")
       val inputAssets = inputs?.assets.orEmpty()
       val inputPerceptions = inputAssets.mapNotNull { asset ->
-        PerceptionCache.get(context, asset)?.let { asset.id to it }
+        (PerceptionCache.get(context, asset) ?: PerceptionCache.get(context, asset.id))?.let { asset.id to it }
       }.toMap()
       val history = IterationStore.loadHistory(context, eid)
       EventDecisions(
@@ -219,5 +220,23 @@ object DecisionStore {
     } catch (t: Throwable) {
       Log.w(TAG, "failed to persist $eventId/$fileName: ${t.message}")
     }
+  }
+
+  private fun File.isPlayableMp4Candidate(): Boolean {
+    if (!isFile || length() <= 1024L) return false
+    return runCatching {
+      val retriever = MediaMetadataRetriever()
+      try {
+        retriever.setDataSource(absolutePath)
+        val durationMs =
+          retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+            ?: 0L
+        val hasVideo =
+          retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO) == "yes"
+        durationMs > 0L && hasVideo
+      } finally {
+        runCatching { retriever.release() }
+      }
+    }.getOrDefault(false)
   }
 }

@@ -52,6 +52,7 @@ import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material.icons.outlined.Visibility
@@ -122,7 +123,9 @@ internal fun SettingsCard(
   onIntentSelect: (GenerationIntent) -> Unit,
   onPowerSelect: (PowerProfile) -> Unit,
   onOpenGallery: () -> Unit,
+  onOpenModelManager: () -> Unit,
 ) {
+  var showDeveloperEntrypoints by remember { mutableStateOf(false) }
   PanelCard {
     Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
       SectionHeader(
@@ -148,12 +151,30 @@ internal fun SettingsCard(
       )
       com.google.ai.edge.gallery.customtasks.vlogpilot.ui.HairlineDivider(startInset = 0.dp)
       FilledTonalButton(
-        onClick = onOpenGallery,
+        onClick = onOpenModelManager,
+        modifier = Modifier.fillMaxWidth(),
+      ) {
+        Icon(Icons.Outlined.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(8.dp))
+        Text("模型管理")
+      }
+      FilledTonalButton(
+        onClick = { showDeveloperEntrypoints = !showDeveloperEntrypoints },
         modifier = Modifier.fillMaxWidth(),
       ) {
         Icon(Icons.Outlined.Apps, contentDescription = null, modifier = Modifier.size(18.dp))
         Spacer(Modifier.width(8.dp))
-        Text("打开 AI Edge Gallery")
+        Text(if (showDeveloperEntrypoints) "收起开发者入口" else "开发者入口")
+      }
+      if (showDeveloperEntrypoints) {
+        FilledTonalButton(
+          onClick = onOpenGallery,
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Icon(Icons.Outlined.Apps, contentDescription = null, modifier = Modifier.size(18.dp))
+          Spacer(Modifier.width(8.dp))
+          Text("打开 AI Edge Gallery")
+        }
       }
     }
   }

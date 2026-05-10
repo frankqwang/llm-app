@@ -40,6 +40,7 @@ import kotlinx.coroutines.withTimeout
 class AgentRuntime(
   private val context: Context,
   private val gemmaModel: Model,
+  private val supportAudio: Boolean = supportsNativeAudioInput(gemmaModel),
 ) : Closeable {
 
   @Volatile private var ownedInit = false
@@ -80,7 +81,7 @@ class AgentRuntime(
           model = gemmaModel,
           taskId = TASK_ID,
           supportImage = true,
-          supportAudio = false,
+          supportAudio = supportAudio,
           systemInstruction = null,
           onDone = { error ->
             if (error.isEmpty()) {
@@ -116,6 +117,7 @@ class AgentRuntime(
     systemPrompt: String,
     userText: String,
     images: List<Bitmap> = emptyList(),
+    audioClips: List<ByteArray> = emptyList(),
     label: String = "ask",
   ): String {
     PowerPacer.applyBackgroundThreadPriority()
@@ -129,13 +131,13 @@ class AgentRuntime(
     var outcome = "ok"
     try {
       MODEL_CALL_MUTEX.withLock {
-        writeLastAgentCall(finalLabel, userText, images)
+        writeLastAgentCall(finalLabel, userText, images, audioClips)
         withTimeout(ASK_TIMEOUT_MS) {
           suspendCancellableCoroutine<Unit> { cont ->
             LlmChatModelHelper.resetConversation(
               model = gemmaModel,
               supportImage = images.isNotEmpty(),
-              supportAudio = false,
+              supportAudio = audioClips.isNotEmpty() && supportAudio,
               systemInstruction = Contents.of(systemPrompt),
               enableConversationConstrainedDecoding = false,
             )
@@ -152,6 +154,7 @@ class AgentRuntime(
                 if (cont.isActive) cont.resume(Unit)
               },
               images = images,
+              audioClips = audioClips,
             )
             // If the coroutine is cancelled (timeout fired), try to stop the
             // running inference so it doesn't keep occupying the engine.
@@ -173,18 +176,24 @@ class AgentRuntime(
       outcome = "error:${t::class.java.simpleName}"
     }
     val ms = (System.nanoTime() - t0) / 1_000_000
-    logEvent(finalLabel, ms, outcome, "chars=${sb.length} images=${images.size} dims=${imageDims(images)}")
+    logEvent(finalLabel, ms, outcome, "chars=${sb.length} images=${images.size} audio=${audioClips.size} dims=${imageDims(images)}")
     PowerPacer.afterAgentCall()
     return sb.toString()
   }
 
-  private fun writeLastAgentCall(label: String, userText: String, images: List<Bitmap>) {
+  private fun writeLastAgentCall(
+    label: String,
+    userText: String,
+    images: List<Bitmap>,
+    audioClips: List<ByteArray>,
+  ) {
     val text = buildString {
       append("t=").append(System.currentTimeMillis()).append('\n')
       append("label=").append(label).append('\n')
       append("model=").append(gemmaModel.name).append('\n')
       append("chars=").append(userText.length).append('\n')
       append("images=").append(images.size).append('\n')
+      append("audio=").append(audioClips.size).append('\n')
       append("dims=").append(imageDims(images)).append('\n')
     }
     try {
@@ -229,5 +238,13 @@ class AgentRuntime(
     const val TASK_ID = "vlog_pilot"
     private const val ASK_TIMEOUT_MS = 90_000L
     private val MODEL_CALL_MUTEX = Mutex()
+
+    fun supportsNativeAudioInput(model: Model): Boolean =
+      model.llmSupportAudio ||
+        model.name.contains("gemma-4", ignoreCase = true) ||
+        model.displayName.contains("gemma 4", ignoreCase = true) ||
+        model.displayName.contains("gemma-4", ignoreCase = true) ||
+        model.name.contains("audio", ignoreCase = true) ||
+        model.displayName.contains("audio", ignoreCase = true)
   }
 }

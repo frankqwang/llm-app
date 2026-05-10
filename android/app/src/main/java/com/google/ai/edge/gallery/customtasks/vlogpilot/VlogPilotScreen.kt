@@ -12,6 +12,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Build
 import android.widget.MediaController
+import android.widget.Toast
 import android.widget.VideoView
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -28,12 +29,13 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -72,6 +74,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -81,6 +84,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -90,6 +94,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.AgentRuntime
+import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.ChatPlannerAgent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.PromptStrings
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.EventScoutAgent
 import com.google.ai.edge.gallery.customtasks.vlogpilot.agents.VlmAnnotator
@@ -115,7 +121,15 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+private data class PendingChatPlan(
+  val plan: ChatPlannerAgent.Plan,
+  val originalText: String,
+  val currentEventId: String?,
+  val model: com.google.ai.edge.gallery.data.Model,
+)
 
 @Composable
 internal fun VlogPilotScreen(
@@ -125,6 +139,7 @@ internal fun VlogPilotScreen(
   bottomPadding: Dp,
   modelManagerViewModel: ModelManagerViewModel,
   onOpenGallery: () -> Unit,
+  onOpenModelManager: () -> Unit,
   modifier: Modifier = Modifier,
   viewModel: VlogPilotViewModel = hiltViewModel(),
 ) {
@@ -143,7 +158,9 @@ internal fun VlogPilotScreen(
   val albumError by viewModel.albumError.collectAsState()
   val assetUsage by viewModel.assetUsage.collectAsState()
   val operation by viewModel.operation.collectAsState()
+  val modelManagerUiState by modelManagerViewModel.uiState.collectAsState()
   val context = LocalContext.current
+  val chatAgentScope = rememberCoroutineScope()
   var selectedStoryCategory by remember { mutableStateOf(StoryBrowseCategory.Recommended) }
   var selectedStorySort by remember { mutableStateOf(StorySortMode.Recommended) }
   var selectedVideoCategory by remember { mutableStateOf(VideoBrowseCategory.All) }
@@ -260,7 +277,19 @@ internal fun VlogPilotScreen(
     }
   }
 
+  val downloadedModels = remember(
+    modelManagerUiState.modelDownloadStatus,
+    modelManagerUiState.modelImportingUpdateTrigger,
+    modelManagerUiState.tasks,
+  ) { modelManagerViewModel.getAllDownloadedModels() }
+  val preferredModel = remember(downloadedModels) {
+    downloadedModels.firstOrNull { it.name.contains("gemma-4", ignoreCase = true) }
+      ?: downloadedModels.firstOrNull()
+  }
+  val preferredModelName = preferredModel?.let { it.displayName.ifBlank { it.name } }
+
   val primaryPipelineRunning = operation.blocksPrimaryPipeline
+  var pendingPostRunPlan by remember { mutableStateOf<PendingChatPlan?>(null) }
   val chatFocusedCandidate = remember(chatFocusEventId, eventSelection, runConfig, primaryPipelineRunning) {
     val activeId = chatFocusEventId
       ?: if (primaryPipelineRunning) {
@@ -275,6 +304,173 @@ internal fun VlogPilotScreen(
       } else {
         null
       }
+  }
+
+  fun buildChatPlannerContext(currentEventId: String?): ChatPlannerAgent.ChatContext {
+    val activeId = currentEventId
+      ?: chatFocusEventId
+      ?: if (primaryPipelineRunning) {
+        runConfig.onlySelectedEventIds.firstOrNull()
+          ?: eventSelection?.selectedEventIds?.firstOrNull()
+      } else {
+        decisions.firstOrNull()?.eventId
+      }
+    val videos = decisions.take(6).map { d ->
+      val timeline = d.timelineFinal ?: d.timelineV1
+      ChatPlannerAgent.VideoSummary(
+        eventId = d.eventId,
+        title = storyTitle(d),
+        shotCount = timeline?.shots?.size ?: 0,
+        assetCount = d.inputAssets.size,
+        durationSec = timeline?.shots?.sumOf { it.durationSec.toDouble() }?.toFloat() ?: 0f,
+        versionCount = d.versionCount,
+      )
+    }
+    val candidates = eventSelection?.candidates.orEmpty().take(8).map { c ->
+      ChatPlannerAgent.CandidateSummary(
+        eventId = c.eventId,
+        title = storyTitle(c),
+        assetCount = c.assets.size,
+        videoCount = c.realVideoCount,
+        score = c.valueScore,
+        status = c.status.name.lowercase(Locale.ROOT),
+        summary = c.scoutSummary.ifBlank { c.reasons.joinToString("；") },
+      )
+    }
+    return ChatPlannerAgent.ChatContext(
+      modelReady = preferredModel != null,
+      albumCount = albumAssets.size,
+      pipelineRunning = primaryPipelineRunning,
+      activeEventId = activeId,
+      videos = videos,
+      candidates = candidates,
+    )
+  }
+
+  fun replyFromAgent(text: String) {
+    chatViewModel.appendAgentMessage(
+      com.google.ai.edge.gallery.customtasks.vlogpilot.chat.ChatRole.AGENT_STATUS,
+      text,
+    )
+  }
+
+  fun executeChatPlan(
+    plan: ChatPlannerAgent.Plan,
+    originalText: String,
+    currentEventId: String?,
+    model: com.google.ai.edge.gallery.data.Model?,
+  ) {
+    if (plan.reply.isNotBlank()) replyFromAgent(plan.reply)
+    when (plan.action) {
+      ChatPlannerAgent.Action.ANSWER,
+      ChatPlannerAgent.Action.SUGGEST_EDITS,
+      ChatPlannerAgent.Action.CLARIFY -> Unit
+
+      ChatPlannerAgent.Action.OPEN_MODELS -> onOpenModelManager()
+
+      ChatPlannerAgent.Action.OPEN_ALBUM -> requireAlbumPermission {
+        viewModel.loadAlbumAssets()
+        onTabChange(VlogPilotTab.Assets)
+      }
+
+      ChatPlannerAgent.Action.SCAN_ALBUM -> {
+        if (model == null) {
+          replyFromAgent("还没有可用模型。先导入本地 Gemma 模型，我才能扫描相册并推荐故事。")
+        } else {
+          requireAlbumPermission { viewModel.refreshCandidates(model) }
+        }
+      }
+
+      ChatPlannerAgent.Action.MAKE_CANDIDATE -> {
+        val target = plan.targetEventId
+          ?.let { id -> eventSelection?.candidates?.firstOrNull { it.eventId == id } }
+          ?: matchCandidateByTitle(originalText, eventSelection)
+        when {
+          target == null -> replyFromAgent("我需要先知道你想做哪一个候选故事。你可以点一个候选，或者说“做餐桌上的小日子”。")
+          model == null -> replyFromAgent("还没有可用模型。先导入本地 Gemma 模型，我才能开始制作。")
+          else -> {
+            chatFocusEventId = target.eventId
+            chatViewModel.bindActiveEvent(target.eventId)
+            requireAlbumPermission { viewModel.runOnlyEvent(target.eventId, model) }
+          }
+        }
+      }
+
+      ChatPlannerAgent.Action.ITERATE -> {
+        val targetEventId = plan.targetEventId
+          ?: currentEventId
+          ?: chatFocusEventId
+          ?: decisions.firstOrNull()?.eventId
+        val decision = targetEventId?.let { id -> decisions.firstOrNull { it.eventId == id } }
+        when {
+          targetEventId == null || decision == null -> {
+            replyFromAgent("现在还没有可修改的成片。你可以先让我扫描相册做一条，成片后我再继续改。")
+          }
+          model == null -> {
+            replyFromAgent("还没有可用模型。先导入本地 Gemma 模型，我才能理解你的修改要求。")
+          }
+          else -> {
+            chatFocusEventId = targetEventId
+            chatViewModel.bindActiveEvent(targetEventId)
+            val feedback = buildIterationFromText(
+              text = plan.feedbackText.ifBlank { originalText },
+              eventId = targetEventId,
+              baseVersion = decision.versionCount.coerceAtLeast(1),
+            )
+            viewModel.submitFeedback(targetEventId, feedback)
+          }
+        }
+      }
+    }
+  }
+
+  fun describeChatPlan(plan: ChatPlannerAgent.Plan): String = when (plan.action) {
+    ChatPlannerAgent.Action.ITERATE ->
+      plan.feedbackText.ifBlank { plan.reply }.ifBlank { "作为成片修改要求" }
+    ChatPlannerAgent.Action.MAKE_CANDIDATE ->
+      "制作候选故事${plan.targetEventId?.let { " $it" } ?: ""}"
+    ChatPlannerAgent.Action.SCAN_ALBUM -> "扫描相册并推荐候选故事"
+    ChatPlannerAgent.Action.OPEN_ALBUM -> "打开相册素材"
+    ChatPlannerAgent.Action.OPEN_MODELS -> "打开模型管理"
+    ChatPlannerAgent.Action.SUGGEST_EDITS -> "给当前成片提出可修改方向"
+    ChatPlannerAgent.Action.CLARIFY -> plan.reply
+    ChatPlannerAgent.Action.ANSWER -> plan.reply
+  }.take(120)
+
+  fun isMutatingAction(action: ChatPlannerAgent.Action): Boolean =
+    action == ChatPlannerAgent.Action.SCAN_ALBUM ||
+      action == ChatPlannerAgent.Action.MAKE_CANDIDATE ||
+      action == ChatPlannerAgent.Action.ITERATE
+
+  fun queueOrExecuteChatPlan(
+    plan: ChatPlannerAgent.Plan,
+    originalText: String,
+    currentEventId: String?,
+    model: com.google.ai.edge.gallery.data.Model,
+  ) {
+    if (primaryPipelineRunning && isMutatingAction(plan.action)) {
+      pendingPostRunPlan = PendingChatPlan(plan, originalText, currentEventId, model)
+      replyFromAgent("已加入当前任务后的下一步：${describeChatPlan(plan)}。当前制作继续跑，不会被这条指令打断。")
+    } else {
+      executeChatPlan(plan, originalText, currentEventId, model)
+    }
+  }
+
+  LaunchedEffect(primaryPipelineRunning, pendingPostRunPlan, decisions.size) {
+    val pending = pendingPostRunPlan ?: return@LaunchedEffect
+    if (primaryPipelineRunning) return@LaunchedEffect
+    if (pending.plan.action == ChatPlannerAgent.Action.ITERATE) {
+      val targetEventId = pending.plan.targetEventId
+        ?: pending.currentEventId
+        ?: chatFocusEventId
+        ?: decisions.firstOrNull()?.eventId
+      if (targetEventId == null || decisions.none { it.eventId == targetEventId }) {
+        return@LaunchedEffect
+      }
+    }
+    pendingPostRunPlan = null
+    replyFromAgent("当前任务结束，开始执行刚才排队的指令：${describeChatPlan(pending.plan)}。")
+    executeChatPlan(pending.plan, pending.originalText, pending.currentEventId, pending.model)
   }
 
   // Full-screen curator overlay — replaces the tabbed body when active. The
@@ -372,15 +568,15 @@ internal fun VlogPilotScreen(
   // Chat tab needs full-screen vertical space so its input bar can pin to the
   // bottom via Column weight(1f). LazyColumn items get unbounded vertical
   // constraints, which breaks weight — so we bypass the LazyColumn here.
-  // imePadding() lifts the input bar above the soft keyboard when it opens.
+  // ChatScreen owns IME avoidance so it can also compact the workbench while the keyboard is open.
   if (selectedTab == VlogPilotTab.Chat) {
+    val chatImeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     Box(
       modifier = modifier
         .fillMaxSize()
         .padding(horizontal = 16.dp)
-        .padding(bottom = bottomPadding)
-        .padding(top = 12.dp)
-        .imePadding(),
+        .padding(bottom = if (chatImeVisible) 0.dp else bottomPadding)
+        .padding(top = 12.dp),
     ) {
       com.google.ai.edge.gallery.customtasks.vlogpilot.ui.ChatScreen(
         viewModel = chatViewModel,
@@ -389,6 +585,12 @@ internal fun VlogPilotScreen(
         focusedCandidate = chatFocusedCandidate,
         progress = progress,
         pipelineRunning = primaryPipelineRunning,
+        hasModel = preferredModel != null,
+        modelName = preferredModelName,
+        albumCount = albumAssets.size,
+        albumLoading = albumLoading,
+        albumPreviewAssets = albumAssets.take(12),
+        supportsAudioInput = preferredModel?.let { AgentRuntime.supportsNativeAudioInput(it) } == true,
         pendingPrefill = chatPrefill,
         autoSendPrefill = chatAutoSend,
         onPrefillConsumed = {
@@ -397,60 +599,100 @@ internal fun VlogPilotScreen(
         },
         onOpenResult = { eventId -> detailEventId = eventId },
         onFocusEventChange = { chatFocusEventId = it },
-        onSend = { text, currentEventId ->
-          // Phase 3b keyword routing. Order matters: most specific first.
-          // The chat VM has already appended the user message; this
-          // callback's job is to KICK OFF the right pipeline action AND
-          // make sure something visible happens — never sit silent on a
-          // user-typed message, that's the worst chat UX failure mode.
+        onSend = onSend@ { text, currentEventId ->
           val normalized = text.trim()
-          val matchedCandidate = matchCandidateByTitle(normalized, eventSelection)
-          fun reply(text: String) = chatViewModel.appendAgentMessage(
-            com.google.ai.edge.gallery.customtasks.vlogpilot.chat.ChatRole.AGENT_STATUS,
-            text,
-          )
-          fun hasModel() = modelManagerViewModel.getAllDownloadedModels().isNotEmpty()
-          when {
-            matchedCandidate != null -> if (!hasModel()) {
-              reply("还没有可用模型。先去 Models 页导入一个本地 Gemma 模型，回来我就能开工。")
-            } else {
-              chatFocusEventId = matchedCandidate.eventId
-              chatViewModel.bindActiveEvent(matchedCandidate.eventId)
-              requireAlbumPermission {
-                selectedModelOrReport()?.let { viewModel.runOnlyEvent(matchedCandidate.eventId, it) }
-              }
-              reply("好的，开始制作「${storyTitle(matchedCandidate)}」——读素材、写分镜、剪一条出来，过程会实时显示在这里。")
-            }
-            isIterationCommand(normalized) -> {
-              val targetEventId = currentEventId ?: decisions.firstOrNull()?.eventId
-              when {
-                targetEventId == null -> reply("还没有可以改的成片。你可以先让我做一条，比如「帮我做一条这周的家庭日常」。")
-                !hasModel() -> reply("还没有可用模型，先去 Models 导入一个再来改。")
-                else -> {
-                  val feedback = buildIterationFromText(
-                    normalized,
-                    eventId = targetEventId,
-                    baseVersion = decisions.firstOrNull { it.eventId == targetEventId }?.versionCount ?: 1,
-                  )
-                  viewModel.submitFeedback(targetEventId, feedback)
-                  reply("收到，按你的反馈在改了。")
+          if (normalized.isBlank()) return@onSend
+          val model = preferredModel
+          val plannerContext = buildChatPlannerContext(currentEventId)
+          if (model == null) {
+            executeChatPlan(
+              plan = ChatPlannerAgent.Plan(
+                action = ChatPlannerAgent.Action.OPEN_MODELS,
+                reply = "我需要先有一个本地多模态模型，才能接管剪辑判断。先导入 Gemma 模型，回来我就能看素材、给建议并执行修改。",
+              ),
+              originalText = normalized,
+              currentEventId = currentEventId,
+              model = null,
+            )
+            return@onSend
+          }
+          replyFromAgent("我先看一下当前素材、候选故事和成片状态。")
+          chatAgentScope.launch {
+            val plan = try {
+              withContext(Dispatchers.IO) {
+                val runtime = AgentRuntime(context.applicationContext, model)
+                try {
+                  runtime.ensureInitialized()
+                  ChatPlannerAgent(runtime).plan(normalized, plannerContext)
+                } finally {
+                  runtime.close()
                 }
               }
+            } catch (t: Throwable) {
+              ChatPlannerAgent.Plan(
+                action = ChatPlannerAgent.Action.ANSWER,
+                reply = "模型这次没有稳定返回规划结果：${t.message ?: t::class.java.simpleName}。你可以继续说要改节奏、镜头、字幕、调色，或者让我重新扫描相册。",
+              )
             }
-            isGenerationCommand(normalized) -> if (!hasModel()) {
-              reply("还没有可用模型。先去 Models 导入一个本地 Gemma 模型再来。")
+            queueOrExecuteChatPlan(plan, normalized, currentEventId, model)
+          }
+        },
+        onSendAudio = onSendAudio@ { audioWav, currentEventId ->
+          val model = preferredModel
+          val plannerContext = buildChatPlannerContext(currentEventId)
+          if (model == null) {
+            executeChatPlan(
+              plan = ChatPlannerAgent.Plan(
+                action = ChatPlannerAgent.Action.OPEN_MODELS,
+                reply = "我需要先有一个本地多模态模型，才能直接理解语音剪辑指令。",
+              ),
+              originalText = "语音指令",
+              currentEventId = currentEventId,
+              model = null,
+            )
+            return@onSendAudio
+          }
+          if (!AgentRuntime.supportsNativeAudioInput(model)) {
+            replyFromAgent("这个模型没有登记出音频能力。我会用文字输入继续工作，或者你可以换一个支持音频的模型。")
+            return@onSendAudio
+          }
+          replyFromAgent(
+            if (primaryPipelineRunning) {
+              "收到语音了，我先解析成后续剪辑意图；当前制作不会被打断。"
             } else {
-              requireAlbumPermission {
-                selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
+              "收到语音了，正在让模型理解这段剪辑指令。"
+            },
+          )
+          chatAgentScope.launch {
+            val plan = try {
+              withContext(Dispatchers.IO) {
+                val runtime = AgentRuntime(context.applicationContext, model, supportAudio = AgentRuntime.supportsNativeAudioInput(model))
+                try {
+                  runtime.ensureInitialized()
+                  ChatPlannerAgent(runtime).planAudio(audioWav, plannerContext)
+                } finally {
+                  runtime.close()
+                }
               }
-              reply("好的，正在扫相册、挑事件，挑完会出几个候选给你看。")
+            } catch (t: Throwable) {
+              ChatPlannerAgent.Plan(
+                action = ChatPlannerAgent.Action.CLARIFY,
+                reply = "模型这次没有稳定理解这段语音：${t.message ?: t::class.java.simpleName}。你可以再说一遍，或直接输入文字要求。",
+              )
             }
-            else -> reply("我没太听明白。试试这样说：\n• 「帮我做一条这周的家庭日常」（让我先扫相册）\n• 「再快一点」（已有成片时调节奏）\n或者点上面的「重扫」按钮，让 AI 推几个故事。")
+            queueOrExecuteChatPlan(plan, "语音指令", currentEventId, model)
           }
         },
         onRescan = {
           requireAlbumPermission {
             selectedModelOrReport()?.let { viewModel.refreshCandidates(it) }
+          }
+        },
+        onOpenModels = onOpenModelManager,
+        onOpenAlbum = {
+          requireAlbumPermission {
+            viewModel.loadAlbumAssets()
+            onTabChange(VlogPilotTab.Assets)
           }
         },
         onOpenCurator = {
@@ -520,8 +762,8 @@ internal fun VlogPilotScreen(
             EmptyActionCard(
               state = state,
               title = "还没有作品",
-              message = "去对话页让 AI 帮你创作第一条 vlog。",
-              actionLabel = "开始对话",
+              message = "去创作工作台扫描相册、浏览素材，或手动选择素材开始。",
+              actionLabel = "去创作工作台",
               onAction = {
                 // Clearing here lets the user tap-through the error variant
                 // back to a clean state. The error itself is still in the
@@ -564,6 +806,7 @@ internal fun VlogPilotScreen(
             onIntentSelect = viewModel::setIntent,
             onPowerSelect = viewModel::setPowerProfile,
             onOpenGallery = onOpenGallery,
+            onOpenModelManager = onOpenModelManager,
           )
         }
         item { PromptDebugCard() }
@@ -577,6 +820,17 @@ internal fun VlogPilotScreen(
     usageByAssetId = assetUsage,
     decisions = decisions,
     manifest = eventSelection,
+    onAnnotateAsset = { asset ->
+      if (modelManagerViewModel.getAllDownloadedModels().isEmpty()) {
+        Toast.makeText(context, "先导入本地模型再标注素材", Toast.LENGTH_SHORT).show()
+        onOpenModelManager()
+        false
+      } else {
+        viewModel.indexAssets(assetIds = listOf(asset.id), replaceExisting = true)
+        Toast.makeText(context, "已加入后台标注：${asset.displayName.ifBlank { "素材" }}", Toast.LENGTH_SHORT).show()
+        true
+      }
+    },
     onOpenStory = { eventId ->
       selectedStoryId = eventId
       onTabChange(VlogPilotTab.Works)

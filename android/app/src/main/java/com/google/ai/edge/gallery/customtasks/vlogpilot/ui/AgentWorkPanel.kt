@@ -37,6 +37,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.Person
@@ -107,7 +109,7 @@ fun AgentWorkPanel(
   val running = if (live) activeStage(d) else null
   Column(
     modifier = modifier.fillMaxWidth(),
-    verticalArrangement = Arrangement.spacedBy(8.dp),
+    verticalArrangement = Arrangement.spacedBy(3.dp),
   ) {
     AgentCard(
       icon = Icons.Outlined.Search,
@@ -177,7 +179,7 @@ private fun AgentCard(
 
   Surface(
     modifier = Modifier.fillMaxWidth(),
-    shape = RoundedCornerShape(16.dp),
+    shape = RoundedCornerShape(10.dp),
     color = MaterialTheme.colorScheme.surface,
     tonalElevation = 0.dp,
   ) {
@@ -186,40 +188,32 @@ private fun AgentCard(
         modifier = Modifier
           .fillMaxWidth()
           .clickable(enabled = hasBody) { expanded = !expanded }
-          .padding(horizontal = 14.dp, vertical = 12.dp),
+          .padding(horizontal = 7.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
       ) {
         StageStatusDot(status = effectiveStatus, tint = tint)
         Box(
           modifier = Modifier
-            .size(32.dp)
-            .background(tint.copy(alpha = if (tokens.colors.isDark) 0.22f else 0.12f), RoundedCornerShape(10.dp)),
+            .size(22.dp)
+            .background(tint.copy(alpha = if (tokens.colors.isDark) 0.22f else 0.12f), RoundedCornerShape(7.dp)),
           contentAlignment = Alignment.Center,
         ) {
-          Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
+          Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(13.dp))
         }
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-          Text(
-            label,
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-          )
-          Text(
-            summary,
-            style = MaterialTheme.typography.bodyMedium,
-            color = tokens.colors.secondaryLabel,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-          )
-        }
+        Text(
+          if (effectiveStatus == StageStatus.DONE && summary.isNotBlank()) "$label · $summary" else label,
+          modifier = Modifier.weight(1f),
+          style = MaterialTheme.typography.bodyLarge,
+          fontWeight = FontWeight.SemiBold,
+          color = MaterialTheme.colorScheme.onSurface,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
         if (hasBody) {
           Icon(
-            imageVector = if (expanded) Icons.Outlined.AutoAwesome else Icons.Outlined.Edit,
-            contentDescription = if (expanded) "收起" else "展开",
+            imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+            contentDescription = if (expanded) "收起详情" else "展开详情",
             tint = tokens.colors.tertiaryLabel,
             modifier = Modifier.size(16.dp),
           )
@@ -227,11 +221,10 @@ private fun AgentCard(
       }
       AnimatedExpand(expanded = expanded && hasBody) {
         Column(
-          modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-          verticalArrangement = Arrangement.spacedBy(8.dp),
+          modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+          verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
           HairlineDivider(startInset = 0.dp)
-          Spacer(Modifier.size(2.dp))
           bodyContent()
         }
       }
@@ -255,7 +248,7 @@ private fun StageStatusDot(status: StageStatus, tint: Color) {
   )
   val resolvedSize = if (status == StageStatus.RUNNING) (8 * scale).dp else 8.dp
   Box(
-    modifier = Modifier.size(20.dp),
+    modifier = Modifier.size(16.dp),
     contentAlignment = Alignment.Center,
   ) {
     when (status) {
@@ -263,7 +256,7 @@ private fun StageStatusDot(status: StageStatus, tint: Color) {
         Icons.Outlined.CheckCircle,
         contentDescription = "已完成",
         tint = tint,
-        modifier = Modifier.size(18.dp),
+        modifier = Modifier.size(16.dp),
       )
       StageStatus.RUNNING -> Box(
         modifier = Modifier

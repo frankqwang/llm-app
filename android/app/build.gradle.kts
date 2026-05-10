@@ -30,14 +30,23 @@ plugins {
 
 import java.net.URL
 
+val bundlePerceptionModels =
+  providers.gradleProperty("bundlePerceptionModels").map { it.toBoolean() }.orElse(false)
+val bundleAllBgm =
+  providers.gradleProperty("bundleAllBgm").map { it.toBoolean() }.orElse(false)
+
 tasks.register("downloadPerceptionModels") {
   val modelsDir = file("src/main/assets/models")
-  modelsDir.mkdirs()
   val models = mapOf(
     "face_landmarker.task" to "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task",
     "nsfw_vit_int8.onnx" to "https://huggingface.co/AdamCodd/vit-base-nsfw-detector/resolve/main/onnx/model_int8.onnx",
   )
   doLast {
+    if (!bundlePerceptionModels.get()) {
+      println("Skipping bundled perception models. Pass -PbundlePerceptionModels=true to embed them in the APK.")
+      return@doLast
+    }
+    modelsDir.mkdirs()
     models.forEach { (name, url) ->
       val target = File(modelsDir, name)
       if (!target.exists() || target.length() < 1_000) {
@@ -59,11 +68,33 @@ tasks.register("downloadPerceptionModels") {
   }
 }
 
-// Ensure models are present before assets are merged into the APK.
-// Use afterEvaluate so Android Gradle Plugin has already created merge*Assets tasks.
+// Optional offline bundle: by default perception models are fetched/copied at
+// runtime into filesDir/models, which keeps the install APK much smaller.
 afterEvaluate {
-  tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
-    .configureEach { dependsOn("downloadPerceptionModels") }
+  if (bundlePerceptionModels.get()) {
+    tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
+      .configureEach { dependsOn("downloadPerceptionModels") }
+  }
+  if (!bundleAllBgm.get()) {
+    val excludedBgm = setOf(
+      "cinematic.mp3",
+      "cool.mp3",
+      "muted.mp3",
+      "vibrant.mp3",
+      "vintage.mp3",
+      "warm.mp3",
+    )
+    tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
+      .configureEach {
+        doLast {
+          fileTree(layout.buildDirectory.dir("intermediates/assets")) {
+            include("**/bgm/*.mp3")
+          }.matching {
+            include(excludedBgm.map { "**/bgm/$it" })
+          }.files.forEach { it.delete() }
+        }
+      }
+  }
 }
 
 android {
@@ -99,7 +130,8 @@ android {
 
   buildTypes {
     release {
-      isMinifyEnabled = false
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       signingConfig = signingConfigs.getByName("debug")
     }

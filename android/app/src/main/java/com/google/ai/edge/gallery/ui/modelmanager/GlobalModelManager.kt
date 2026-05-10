@@ -160,7 +160,8 @@ fun GlobalModelManager(
       }
     }
 
-  LaunchedEffect(uiState.modelImportingUpdateTrigger) {
+  val modelListVersion = uiState.tasks.sumOf { it.models.size }
+  LaunchedEffect(uiState.modelImportingUpdateTrigger, uiState.loadingModelAllowlist, modelListVersion) {
     val allowlistModels = viewModel.allowlistModels
     val allowlistOrderMap = allowlistModels.withIndex().associate { it.value.name to it.index }
 
@@ -195,19 +196,8 @@ fun GlobalModelManager(
     }
 
   val handleClickModel: (Model) -> Unit = { model ->
-    val tasks = viewModel.uiState.value.tasks
-    val tasksForModel = tasks.filter { task -> task.models.any { it.name == model.name } }
-    // If there is only one task for the model, navigate to the model directly.
-    if (tasksForModel.size == 1) {
-      onModelSelected(tasksForModel[0], model)
-    }
-    // If there are multiple tasks for the model, show a bottom sheet for the user to choose which
-    // task to use.
-    else if (tasksForModel.size > 1) {
-      taskCandidates.clear()
-      taskCandidates.addAll(tasksForModel)
-      modelForTaskCandidate = model
-      showTaskSelectorBottomSheet = true
+    scope.launch {
+      snackbarHostState.showSnackbar("${model.displayName.ifBlank { model.name }} 已可在 VlogPilot 中使用")
     }
   }
 
@@ -232,7 +222,7 @@ fun GlobalModelManager(
               )
               Text(
                 text =
-                  "${stringResource(R.string.drawer_models_label)} (${builtInModels.size + importedModels.size})",
+                  "VlogPilot 模型 (${builtInModels.size + importedModels.size})",
                 color = MaterialTheme.colorScheme.onSurface,
                 style = MaterialTheme.typography.titleMedium,
               )
@@ -291,22 +281,16 @@ fun GlobalModelManager(
           }
         }
 
-        items(builtInModels) { model ->
-          val expanded = modelItemExpandedStates.getOrDefault(model.name, true)
-          ModelItem(
-            model = model,
-            modelVariants = modelVariants.getOrDefault(model.name, listOf()),
-            task = null,
-            modelManagerViewModel = viewModel,
-            onModelClicked = handleClickModel,
-            onBenchmarkClicked = onBenchmarkClicked,
-            expanded = expanded,
-            showBenchmarkButton = model.runtimeType == RuntimeType.LITERT_LM,
-            onExpanded = { modelItemExpandedStates[model.name] = it },
+        item(key = "vlogpilot_model_hint") {
+          Text(
+            "导入本地 .litertlm 模型后，回到「对话」即可扫描相册和生成分镜。这个页面只管理模型，不会跳转到 Gallery 的任务页。",
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
           )
         }
 
-        // Imported models.
+        // Imported models. Keep them first so a successful local import is immediately visible.
         if (importedModels.isNotEmpty()) {
           item(key = "imported_models_label") {
             Text(
@@ -326,6 +310,21 @@ fun GlobalModelManager(
             onBenchmarkClicked = onBenchmarkClicked,
             expanded = true,
             showBenchmarkButton = model.runtimeType == RuntimeType.LITERT_LM,
+          )
+        }
+
+        items(builtInModels) { model ->
+          val expanded = modelItemExpandedStates.getOrDefault(model.name, true)
+          ModelItem(
+            model = model,
+            modelVariants = modelVariants.getOrDefault(model.name, listOf()),
+            task = null,
+            modelManagerViewModel = viewModel,
+            onModelClicked = handleClickModel,
+            onBenchmarkClicked = onBenchmarkClicked,
+            expanded = expanded,
+            showBenchmarkButton = model.runtimeType == RuntimeType.LITERT_LM,
+            onExpanded = { modelItemExpandedStates[model.name] = it },
           )
         }
       }
@@ -399,7 +398,7 @@ fun GlobalModelManager(
   if (showImportModelSheet) {
     ModalBottomSheet(onDismissRequest = { showImportModelSheet = false }, sheetState = sheetState) {
       Text(
-        "Import model",
+        "导入模型",
         style = MaterialTheme.typography.titleLarge,
         modifier = Modifier.padding(vertical = 4.dp, horizontal = 16.dp),
       )
@@ -434,7 +433,7 @@ fun GlobalModelManager(
           modifier = Modifier.fillMaxWidth().padding(16.dp),
         ) {
           Icon(Icons.AutoMirrored.Outlined.NoteAdd, contentDescription = null)
-          Text("From local model file", modifier = Modifier.clearAndSetSemantics {})
+          Text("从本地文件导入", modifier = Modifier.clearAndSetSemantics {})
         }
       }
     }
@@ -468,7 +467,7 @@ fun GlobalModelManager(
             showImportingDialog = false
 
             // Show a snack bar for successful import.
-            scope.launch { snackbarHostState.showSnackbar("Model imported successfully") }
+            scope.launch { snackbarHostState.showSnackbar("模型导入完成") }
           },
         )
       }
@@ -486,8 +485,8 @@ fun GlobalModelManager(
         )
       },
       onDismissRequest = { showUnsupportedFileTypeDialog = false },
-      title = { Text("Unsupported file type") },
-      text = { Text("Only \".task\" or \".litertlm\" file type is supported.") },
+      title = { Text("文件类型不支持") },
+      text = { Text("当前只支持 .task 或 .litertlm 文件。VlogPilot 推荐导入 .litertlm 本地模型。") },
       confirmButton = {
         Button(onClick = { showUnsupportedFileTypeDialog = false }) {
           Text(stringResource(R.string.ok))
@@ -507,8 +506,8 @@ fun GlobalModelManager(
         )
       },
       onDismissRequest = { showUnsupportedWebModelDialog = false },
-      title = { Text("Unsupported model type") },
-      text = { Text("Looks like the model is a web-only model and is not supported by the app.") },
+      title = { Text("模型类型不支持") },
+      text = { Text("这个文件看起来是 Web 版本模型，当前 Android 本地推理不可用。") },
       confirmButton = {
         Button(onClick = { showUnsupportedWebModelDialog = false }) {
           Text(stringResource(R.string.ok))

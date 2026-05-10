@@ -37,7 +37,19 @@ class VlmAnnotator(private val agent: AgentRuntime) {
     val videoInsight: VideoInsight = VideoInsight(),
   ) {
     fun hasSignal(): Boolean =
-      tags.scene.isNotBlank() || tags.action.isNotBlank() || tags.salient.isNotBlank() || videoInsight.summary.isNotBlank()
+      tags.scene.isNotBlank() ||
+        tags.subjects.isNotEmpty() ||
+        tags.action.isNotBlank() ||
+        tags.mood.isNotBlank() ||
+        tags.salient.isNotBlank() ||
+        tags.narrativeRoleHint.isNotBlank() ||
+        tags.composition.isNotBlank() ||
+        tags.lighting.isNotBlank() ||
+        tags.motionHint.isNotBlank() ||
+        tags.visualDescription.isNotBlank() ||
+        videoInsight.summary.isNotBlank() ||
+        videoInsight.actionArc.isNotBlank() ||
+        videoInsight.visualDescription.isNotBlank()
   }
 
   suspend fun annotate(thumbnail: Bitmap, hintMediaType: String = "image"): Annotation {

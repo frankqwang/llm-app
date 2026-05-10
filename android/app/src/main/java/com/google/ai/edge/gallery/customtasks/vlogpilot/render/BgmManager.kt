@@ -29,16 +29,21 @@ object BgmManager {
   fun pickFor(context: Context, tone: String): String? {
     val toneKey = toneKey(tone)
     val candidate = TONE_TO_FILE[toneKey] ?: FALLBACK
-    val cached = File(context.filesDir, "bgm/$candidate")
+    return copyAssetToCache(context, candidate)
+      ?: if (candidate != FALLBACK) copyAssetToCache(context, FALLBACK) else null
+  }
+
+  private fun copyAssetToCache(context: Context, fileName: String): String? {
+    val cached = File(context.filesDir, "bgm/$fileName")
     if (cached.isFile) return cached.absolutePath
     return try {
       cached.parentFile?.mkdirs()
-      context.assets.open("bgm/$candidate").use { input ->
+      context.assets.open("bgm/$fileName").use { input ->
         cached.outputStream().use { input.copyTo(it) }
       }
       cached.absolutePath
     } catch (e: Throwable) {
-      Log.w(TAG, "BGM not found: bgm/$candidate (${e.message})")
+      Log.w(TAG, "BGM not found: bgm/$fileName (${e.message})")
       null
     }
   }
