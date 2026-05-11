@@ -1,0 +1,638 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <title>AI Built On-device AI App</title>
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face {
+        font-family: "SourceHanVlog";
+        src: url("assets/fonts/SourceHanSansSC-Bold.otf") format("opentype");
+        font-weight: 800;
+      }
+      @font-face {
+        font-family: "NunitoFallback";
+        src: url("assets/fonts/nunito_regular.ttf") format("truetype");
+        font-weight: 400;
+      }
+      :root {
+        --canvas: #050506;
+        --surface: #1C1C1E;
+        --raised: #25262A;
+        --text: #F5F5F7;
+        --muted: #A1A1AA;
+        --line: #34343A;
+        --blue: #0A84FF;
+        --green: #34C759;
+        --orange: #FF9F0A;
+        --purple: #BF5AF2;
+        --pink: #FF375F;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: var(--canvas);
+        color: var(--text);
+        font-family: "NunitoFallback", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background:
+          radial-gradient(circle at 78% 18%, rgba(10, 132, 255, 0.16), rgba(10, 132, 255, 0) 28%),
+          radial-gradient(circle at 14% 86%, rgba(191, 90, 242, 0.12), rgba(191, 90, 242, 0) 30%),
+          #050506;
+      }
+      .scene {
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+        visibility: hidden;
+        overflow: hidden;
+        background:
+          radial-gradient(circle at 78% 18%, rgba(10, 132, 255, 0.12), rgba(10, 132, 255, 0) 30%),
+          radial-gradient(circle at 14% 86%, rgba(191, 90, 242, 0.08), rgba(191, 90, 242, 0) 32%),
+          #050506;
+      }
+      #scene-1 { opacity: 1; visibility: visible; }
+      .scene-content {
+        width: 100%;
+        height: 100%;
+        padding: 72px 96px 104px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 30px;
+      }
+      .split {
+        display: grid;
+        grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+        align-items: center;
+        gap: 70px;
+      }
+      .split-even {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        align-items: center;
+        gap: 58px;
+      }
+      .topline {
+        display: inline-flex;
+        width: max-content;
+        align-items: center;
+        gap: 12px;
+        min-height: 46px;
+        padding: 10px 18px;
+        border-radius: 999px;
+        background: rgba(10, 132, 255, 0.16);
+        color: #7CB8FF;
+        border: 1px solid rgba(10, 132, 255, 0.24);
+        font-size: 23px;
+        font-weight: 900;
+      }
+      .topline-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: currentColor;
+      }
+      h1, h2, h3 {
+        margin: 0;
+        font-family: "SourceHanVlog", "NunitoFallback", sans-serif;
+        letter-spacing: 0;
+      }
+      h1 { max-width: 920px; font-size: 82px; line-height: 1.08; }
+      h2 { max-width: 1040px; font-size: 66px; line-height: 1.08; }
+      h3 { font-size: 32px; line-height: 1.16; }
+      .headline-line { display: block; }
+      .body-copy {
+        max-width: 790px;
+        margin: 0;
+        color: var(--muted);
+        font-size: 31px;
+        line-height: 1.46;
+        font-weight: 800;
+      }
+      .caption {
+        position: absolute;
+        left: 96px;
+        right: 96px;
+        bottom: 38px;
+        z-index: 12;
+        min-height: 60px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 12px 32px;
+        border-radius: 999px;
+        background: rgba(28, 28, 30, 0.92);
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        color: #FFFFFF;
+        font-size: 28px;
+        line-height: 1.28;
+        font-weight: 900;
+        box-shadow: 0 22px 80px rgba(0, 0, 0, 0.36);
+      }
+      .chip-row, .proof-row { display: flex; flex-wrap: wrap; gap: 14px; }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+        min-height: 48px;
+        padding: 10px 18px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        color: #D7D9E0;
+        font-size: 22px;
+        font-weight: 900;
+      }
+      .chip.blue { color: #69ADFF; background: rgba(10, 132, 255, 0.16); border-color: rgba(10, 132, 255, 0.28); }
+      .chip.green { color: #71DE86; background: rgba(52, 199, 89, 0.14); border-color: rgba(52, 199, 89, 0.24); }
+      .chip.orange { color: #FFC066; background: rgba(255, 159, 10, 0.14); border-color: rgba(255, 159, 10, 0.24); }
+      .chip.purple { color: #D89AFF; background: rgba(191, 90, 242, 0.15); border-color: rgba(191, 90, 242, 0.26); }
+      .screen-stack {
+        position: relative;
+        min-height: 775px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .phone-shot {
+        position: relative;
+        width: 390px;
+        height: 868px;
+        border-radius: 50px;
+        background: #000;
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        box-shadow: 0 34px 110px rgba(0, 0, 0, 0.48);
+        overflow: hidden;
+      }
+      .phone-shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+      .phone-shot.large { width: 458px; height: 1018px; }
+      .phone-shot.rear {
+        position: absolute;
+        right: 44px;
+        top: 92px;
+        transform: scale(0.72) rotate(-4deg);
+        opacity: 0.78;
+      }
+      .phone-shot.front { z-index: 4; transform: rotate(2deg); }
+      .code-window {
+        width: 610px;
+        min-height: 472px;
+        border-radius: 28px;
+        background: #101114;
+        color: #E9ECF2;
+        box-shadow: 0 32px 110px rgba(0, 0, 0, 0.42);
+        border: 1px solid rgba(255, 255, 255, 0.09);
+        overflow: hidden;
+      }
+      .code-window.large { width: 790px; min-height: 640px; }
+      .window-bar {
+        height: 58px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 22px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        background: #17191F;
+      }
+      .traffic { width: 14px; height: 14px; border-radius: 50%; background: #FF5F57; }
+      .traffic:nth-child(2) { background: #FFBD2E; }
+      .traffic:nth-child(3) { background: #28C840; }
+      .window-title { margin-left: 12px; color: #9DA3B4; font-size: 18px; font-weight: 900; }
+      .code-body {
+        padding: 24px;
+        font-family: Consolas, "Cascadia Mono", monospace;
+        font-size: 21px;
+        line-height: 1.62;
+      }
+      .code-line { display: block; color: #CDD1DA; white-space: pre; }
+      .key { color: #8CC8FF; }
+      .fn { color: #D6A8FF; }
+      .str { color: #A7E3B4; }
+      .task-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 26px; }
+      .task {
+        display: grid;
+        grid-template-columns: 56px 1fr;
+        gap: 14px;
+        align-items: center;
+        padding: 18px;
+        border-radius: 24px;
+        background: rgba(255, 255, 255, 0.07);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      .icon-block, .agent-icon, .signal-icon {
+        width: 56px;
+        height: 56px;
+        border-radius: 17px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #FFFFFF;
+        font-size: 22px;
+        font-weight: 900;
+      }
+      .task strong { display: block; font-size: 24px; margin-bottom: 5px; }
+      .task span { color: var(--muted); font-size: 18px; line-height: 1.28; font-weight: 800; }
+      .signal-list { display: flex; flex-direction: column; gap: 15px; margin-top: 20px; }
+      .signal-row {
+        display: grid;
+        grid-template-columns: 58px 1fr auto;
+        gap: 18px;
+        align-items: center;
+        min-height: 96px;
+        padding: 17px;
+        border-radius: 24px;
+        background: rgba(255, 255, 255, 0.07);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      .signal-row strong { display: block; font-size: 25px; margin-bottom: 4px; }
+      .signal-row span { color: var(--muted); font-size: 19px; line-height: 1.28; font-weight: 800; }
+      .signal-tag { color: #69ADFF; font-size: 23px; font-weight: 900; }
+      .hardware-ladder { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; margin-top: 24px; }
+      .hardware-card {
+        min-height: 356px;
+        border-radius: 30px;
+        background: rgba(28, 28, 30, 0.96);
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        box-shadow: 0 24px 84px rgba(0, 0, 0, 0.28);
+        padding: 26px;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+      .device-visual {
+        height: 132px;
+        border-radius: 28px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(255, 255, 255, 0.06);
+      }
+      .phone-icon, .laptop-icon, .gpu-icon { position: relative; border: 5px solid currentColor; color: var(--blue); }
+      .phone-icon { width: 64px; height: 108px; border-radius: 20px; }
+      .laptop-icon { width: 150px; height: 92px; border-radius: 12px; color: var(--purple); }
+      .laptop-icon::after {
+        content: "";
+        position: absolute;
+        left: -22px;
+        right: -22px;
+        bottom: -24px;
+        height: 16px;
+        border-radius: 0 0 12px 12px;
+        background: currentColor;
+      }
+      .gpu-icon { width: 148px; height: 92px; border-radius: 18px; color: var(--orange); }
+      .gpu-icon::before, .gpu-icon::after {
+        content: "";
+        position: absolute;
+        width: 34px;
+        height: 34px;
+        border-radius: 50%;
+        border: 4px solid currentColor;
+        top: 24px;
+      }
+      .gpu-icon::before { left: 28px; }
+      .gpu-icon::after { right: 28px; }
+      .hardware-card h3 { font-size: 34px; }
+      .hardware-card p { color: var(--muted); font-size: 21px; line-height: 1.36; font-weight: 800; margin: 0; }
+      .scale-bar { height: 12px; border-radius: 999px; background: rgba(255, 255, 255, 0.10); overflow: hidden; margin-top: auto; }
+      .scale-fill { height: 100%; border-radius: inherit; background: var(--blue); }
+      .agent-flow {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 18px;
+        align-items: stretch;
+        position: relative;
+        margin-top: 20px;
+      }
+      .agent-flow::before {
+        content: "";
+        position: absolute;
+        left: 82px;
+        right: 82px;
+        top: 54px;
+        height: 5px;
+        border-radius: 999px;
+        background: rgba(10, 132, 255, 0.18);
+      }
+      .agent-card {
+        position: relative;
+        z-index: 2;
+        min-height: 286px;
+        padding: 22px;
+        border-radius: 28px;
+        background: rgba(28, 28, 30, 0.96);
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        box-shadow: 0 20px 72px rgba(0, 0, 0, 0.28);
+        display: flex;
+        flex-direction: column;
+        gap: 13px;
+      }
+      .agent-card h3 { font-size: 26px; }
+      .agent-card p { margin: 0; color: var(--muted); font-size: 19px; line-height: 1.32; font-weight: 800; }
+      .artifact {
+        margin-top: auto;
+        min-height: 64px;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.07);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 12px;
+        color: #D7D9E0;
+        font-size: 18px;
+        line-height: 1.22;
+        font-weight: 900;
+        text-align: center;
+      }
+      .final-card {
+        border-radius: 40px;
+        background: rgba(28, 28, 30, 0.96);
+        color: #FFFFFF;
+        padding: 34px;
+        min-height: 560px;
+        box-shadow: 0 36px 100px rgba(0, 0, 0, 0.42);
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 24px;
+      }
+      .final-card h3 { font-size: 48px; }
+      .final-card p { margin: 0; color: #CDD1DA; font-size: 26px; line-height: 1.42; font-weight: 800; }
+      .roadmap { display: grid; grid-template-columns: 1fr; gap: 13px; }
+      .roadmap-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 62px;
+        padding: 14px 18px;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.08);
+        font-size: 22px;
+        font-weight: 900;
+      }
+      .transition-cover {
+        position: absolute;
+        inset: 0;
+        z-index: 50;
+        pointer-events: none;
+        background:
+          linear-gradient(90deg, rgba(10, 132, 255, 0) 0%, rgba(10, 132, 255, 0.18) 22%, rgba(10, 132, 255, 0.98) 48%, rgba(5, 5, 6, 0.98) 100%);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="144" data-width="1920" data-height="1080">
+      <audio id="narration" data-start="0" data-track-index="20" src="narration.wav" data-volume="1"></audio>
+
+      <section id="scene-1" class="scene clip" data-start="0" data-duration="14" data-track-index="1">
+        <div class="scene-content split">
+          <div>
+            <div class="topline"><span class="topline-dot"></span> 这不是普通相册 App</div>
+            <h1 style="margin-top: 26px;"><span class="headline-line">我用 AI 做了一个</span><span class="headline-line">端侧 AI App</span></h1>
+            <p class="body-copy">重点不是“我做了一个工具”，而是 AI 参与开发产品，产品内部又运行端侧 AI。</p>
+            <div class="chip-row"><span class="chip blue">AI develops the App</span><span class="chip green">On-device AI runs inside</span><span class="chip orange">VlogPilot</span></div>
+          </div>
+          <div class="screen-stack">
+            <div class="phone-shot rear"><img src="assets/screenshots/workbench.jpg" alt="VlogPilot workbench"></div>
+            <div class="phone-shot front"><img src="assets/screenshots/works-hero.jpg" alt="VlogPilot works"></div>
+          </div>
+        </div>
+        <div class="caption">AI 参与开发软件，软件里的端侧 AI 再服务用户。</div>
+      </section>
+
+      <section id="scene-2" class="scene clip" data-start="14" data-duration="18" data-track-index="1">
+        <div class="scene-content split-even">
+          <div class="code-window large">
+            <div class="window-bar"><span class="traffic"></span><span class="traffic"></span><span class="traffic"></span><span class="window-title">android / customtasks / vlogpilot</span></div>
+            <div class="code-body">
+              <span class="code-line"><span class="key">class</span> VlogPilotScreen</span>
+              <span class="code-line">  <span class="fn">Album</span>().scanRecentMedia()</span>
+              <span class="code-line">  <span class="fn">PerceptionEngine</span>().understand()</span>
+              <span class="code-line">  <span class="fn">AgentRuntime</span>().planStory()</span>
+              <span class="code-line">  <span class="fn">VideoRenderer</span>().exportMp4()</span>
+              <span class="code-line"></span>
+              <span class="code-line"><span class="key">feedback</span> = <span class="str">"快一点，换镜头"</span></span>
+              <span class="code-line"><span class="key">result</span> = feedback.iterate()</span>
+            </div>
+          </div>
+          <div>
+            <div class="topline"><span class="topline-dot"></span> 开发阶段</div>
+            <h2 style="margin-top: 24px;">AI Agent 帮我把 App 做出来</h2>
+            <p class="body-copy">拆功能、写界面、接模型、改崩溃、补测试。它不是一句话变魔法，而是参与真实开发流程。</p>
+            <div class="task-grid">
+              <div class="task"><div class="icon-block" style="background:var(--blue);">01</div><div><strong>拆功能</strong><span>把想法拆成页面、数据和 pipeline</span></div></div>
+              <div class="task"><div class="icon-block" style="background:var(--purple);">02</div><div><strong>写界面</strong><span>贴近真实 Android 产品体验</span></div></div>
+              <div class="task"><div class="icon-block" style="background:var(--orange);">03</div><div><strong>改 Bug</strong><span>修模型导入、刷新和崩溃</span></div></div>
+              <div class="task"><div class="icon-block" style="background:var(--green);">04</div><div><strong>补验证</strong><span>让流程能完整跑通</span></div></div>
+            </div>
+          </div>
+        </div>
+        <div class="caption">开发阶段：AI Agent 帮我写 App，但产品判断仍然要清楚。</div>
+      </section>
+
+      <section id="scene-3" class="scene clip" data-start="32" data-duration="18" data-track-index="1">
+        <div class="scene-content split">
+          <div>
+            <div class="topline"><span class="topline-dot"></span> 产品本身</div>
+            <h2 style="margin-top: 24px;">它看起来像相册，核心是理解素材</h2>
+            <p class="body-copy">作品页里不是只有文件列表，而是 AI 候选、已生成、待制作、镜头数、素材数和版本状态。</p>
+            <div class="chip-row"><span class="chip blue">作品 13</span><span class="chip green">已生成 3</span><span class="chip orange">待制作 10</span><span class="chip purple">v2 -> v3</span></div>
+          </div>
+          <div class="screen-stack"><div class="phone-shot large front" style="transform:rotate(1deg) scale(0.82);"><img src="assets/screenshots/works.jpg" alt="works list"></div></div>
+        </div>
+        <div class="caption">不是整理图片，而是把相册变成可理解、可规划、可创作的素材库。</div>
+      </section>
+
+      <section id="scene-4" class="scene clip" data-start="50" data-duration="18" data-track-index="1">
+        <div class="scene-content split-even">
+          <div class="screen-stack"><div class="phone-shot large front" style="transform:scale(0.82);"><img src="assets/screenshots/detail.jpg" alt="generated work detail"></div></div>
+          <div>
+            <div class="topline"><span class="topline-dot"></span> 成片以后还能继续改</div>
+            <h2 style="margin-top: 24px;">生成不是终点，用户还能继续指挥</h2>
+            <p class="body-copy">保存、分享、改一改、换故事。你可以对已生成的结果继续提出目标，让 App 重新组织素材。</p>
+            <div class="signal-list">
+              <div class="signal-row"><div class="signal-icon" style="background:var(--blue);">S</div><div><strong>保存 / 分享</strong><span>成片可以直接进入真实使用流程。</span></div><div class="signal-tag">share</div></div>
+              <div class="signal-row"><div class="signal-icon" style="background:var(--purple);">E</div><div><strong>改一改</strong><span>局部换镜头、调节奏、减少字幕。</span></div><div class="signal-tag">v3</div></div>
+              <div class="signal-row"><div class="signal-icon" style="background:var(--orange);">R</div><div><strong>换故事</strong><span>同一批素材可以重新生成叙事。</span></div><div class="signal-tag">story</div></div>
+            </div>
+          </div>
+        </div>
+        <div class="caption">这就不是传统相册了，它更像本地运行的素材理解助手。</div>
+      </section>
+
+      <section id="scene-5" class="scene clip" data-start="68" data-duration="18" data-track-index="1">
+        <div class="scene-content split">
+          <div>
+            <div class="topline"><span class="topline-dot"></span> 端侧 AI 的价值</div>
+            <h2 style="margin-top: 24px;">相册很私人，数据尽量留在本地</h2>
+            <p class="body-copy">每一张照片、每一段视频都上传云端分析，很多人会有顾虑。端侧模型让理解和分析尽可能发生在设备里。</p>
+            <div class="chip-row"><span class="chip green">本地模型标注</span><span class="chip blue">No upload by default</span><span class="chip orange">照片和视频留在设备上</span></div>
+          </div>
+          <div class="screen-stack"><div class="phone-shot large front" style="transform:scale(0.82) rotate(-1deg);"><img src="assets/screenshots/vlm.jpg" alt="local VLM annotation"></div></div>
+        </div>
+        <div class="caption">端侧 AI 的价值，不只是省接口费，更是让私人素材更可控。</div>
+      </section>
+
+      <section id="scene-6" class="scene clip" data-start="86" data-duration="18" data-track-index="1">
+        <div class="scene-content">
+          <div>
+            <div class="topline"><span class="topline-dot"></span> 同一个思路，不同硬件</div>
+            <h2 style="margin-top: 24px;">手机跑轻量模型，PC 跑更强模型</h2>
+            <p class="body-copy">端侧不等于只能在手机上。安卓、iOS、PC 都可以做，只是模型大小和任务复杂度不同。</p>
+          </div>
+          <div class="hardware-ladder">
+            <div class="hardware-card"><div class="device-visual"><div class="phone-icon"></div></div><h3>Mobile</h3><p>轻量、私密、随身，适合快速理解相册和生成初版建议。</p><div class="scale-bar"><div class="scale-fill" style="width:38%;"></div></div></div>
+            <div class="hardware-card"><div class="device-visual"><div class="laptop-icon"></div></div><h3>Laptop</h3><p>更大的上下文，适合长视频整理、批量索引和素材筛选。</p><div class="scale-bar"><div class="scale-fill" style="width:68%; background:var(--purple);"></div></div></div>
+            <div class="hardware-card"><div class="device-visual"><div class="gpu-icon"></div></div><h3>PC GPU</h3><p>跑更强视觉模型，做复杂视频理解、风格生成和自动剪辑。</p><div class="scale-bar"><div class="scale-fill" style="width:92%; background:var(--orange);"></div></div></div>
+          </div>
+        </div>
+        <div class="caption">手机强调私密和轻量，PC 可以承担更重的视频理解和创作任务。</div>
+      </section>
+
+      <section id="scene-7" class="scene clip" data-start="104" data-duration="20" data-track-index="1">
+        <div class="scene-content">
+          <div>
+            <div class="topline"><span class="topline-dot"></span> Agent 模式</div>
+            <h2 style="margin-top: 24px;">关键不是识别，而是理解 + 规划 + 创作</h2>
+          </div>
+          <div class="agent-flow">
+            <div class="agent-card"><div class="agent-icon" style="background:var(--blue);">U</div><h3>User request</h3><p>帮我做一条旅行 Vlog，或者把这个故事重剪一版。</p><div class="artifact">目标</div></div>
+            <div class="agent-card"><div class="agent-icon" style="background:var(--purple);">M</div><h3>Understand media</h3><p>理解主题、人物、场景、动作、节奏和情绪。</p><div class="artifact">素材库信号</div></div>
+            <div class="agent-card"><div class="agent-icon" style="background:var(--orange);">P</div><h3>Plan editing</h3><p>决定开头、推进、转场、字幕和结尾。</p><div class="artifact">剪辑顺序</div></div>
+            <div class="agent-card"><div class="agent-icon" style="background:var(--pink);">S</div><h3>Suggest</h3><p>告诉你为什么选这些片段，以及哪里可以调整。</p><div class="artifact">可解释建议</div></div>
+            <div class="agent-card"><div class="agent-icon" style="background:var(--green);">C</div><h3>Create</h3><p>生成初版，并根据反馈继续迭代。</p><div class="artifact">vlog v3</div></div>
+          </div>
+        </div>
+        <div class="caption">Agent 不是给几个标签就结束，而是围绕你的目标组织素材。</div>
+      </section>
+
+      <section id="scene-8" class="scene clip" data-start="124" data-duration="20" data-track-index="1">
+        <div class="scene-content split">
+          <div>
+            <div class="topline"><span class="topline-dot"></span> 一个入口</div>
+            <h1 style="margin-top: 26px;"><span class="headline-line">个人内容 Agent</span><span class="headline-line">从相册开始</span></h1>
+            <p class="body-copy">我真正想验证的是：当 AI 可以帮助我们开发软件，软件里面又能运行本地 AI，产品形态会不会发生变化。</p>
+            <div class="chip-row"><span class="chip blue">AI-built App</span><span class="chip green">On-device AI</span><span class="chip orange">Personal Creative Agent</span></div>
+          </div>
+          <div class="final-card">
+            <h3>后续更新</h3>
+            <p>端侧模型怎么选、App 怎么做、Agent 流程怎么设计，以及手机和 PC 上的效果差异。</p>
+            <div class="roadmap">
+              <div class="roadmap-row"><span>端侧模型选择</span><span>01</span></div>
+              <div class="roadmap-row"><span>App 架构和体验</span><span>02</span></div>
+              <div class="roadmap-row"><span>Agent 工作流</span><span>03</span></div>
+              <div class="roadmap-row"><span>手机 vs PC</span><span>04</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="caption">VlogPilot 只是第一个实验，目标是每个人本地的个人内容 Agent。</div>
+      </section>
+
+      <div class="transition-cover" data-layout-ignore></div>
+    </div>
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      const sceneIds = ["#scene-1", "#scene-2", "#scene-3", "#scene-4", "#scene-5", "#scene-6", "#scene-7", "#scene-8"];
+      gsap.set(".transition-cover", { xPercent: -105 });
+      function setSceneVisible(id, visible, at) {
+        tl.set(id, { opacity: visible ? 1 : 0, visibility: visible ? "visible" : "hidden" }, at);
+      }
+      function coverTransition(fromId, toId, at) {
+        tl.fromTo(".transition-cover", { xPercent: -105 }, { xPercent: 0, duration: 0.32, ease: "power3.inOut", overwrite: "auto" }, at);
+        tl.set(fromId, { opacity: 0, visibility: "hidden" }, at + 0.34);
+        tl.set(toId, { opacity: 1, visibility: "visible" }, at + 0.34);
+        tl.to(".transition-cover", { xPercent: 105, duration: 0.40, ease: "power3.inOut", overwrite: "auto" }, at + 0.36);
+        tl.set(".transition-cover", { xPercent: -105 }, at + 0.78);
+      }
+      sceneIds.forEach((id, index) => setSceneVisible(id, index === 0, 0));
+
+      tl.from("#scene-1 .topline", { opacity: 0, y: 26, duration: 0.48, ease: "power3.out" }, 0.2);
+      tl.from("#scene-1 .headline-line", { opacity: 0, y: 54, duration: 0.66, stagger: 0.12, ease: "power3.out" }, 0.48);
+      tl.from("#scene-1 .body-copy", { opacity: 0, y: 30, duration: 0.50, ease: "power2.out" }, 1.12);
+      tl.from("#scene-1 .chip", { opacity: 0, y: 22, duration: 0.38, stagger: 0.08, ease: "power2.out" }, 1.58);
+      tl.from("#scene-1 .phone-shot.rear", { opacity: 0, x: 88, scale: 0.66, rotation: -8, duration: 0.7, ease: "power3.out" }, 0.68);
+      tl.from("#scene-1 .phone-shot.front", { opacity: 0, x: 72, y: 32, scale: 0.92, rotation: 7, duration: 0.72, ease: "power3.out" }, 0.98);
+      tl.from("#scene-1 .caption", { opacity: 0, y: 28, duration: 0.42, ease: "power2.out" }, 2.1);
+      tl.to("#scene-1 .screen-stack", { y: -14, duration: 2.3, repeat: 4, yoyo: true, ease: "sine.inOut" }, 3.0);
+      coverTransition("#scene-1", "#scene-2", 13.55);
+
+      tl.from("#scene-2 .code-window", { opacity: 0, x: -58, scale: 0.97, duration: 0.6, ease: "power3.out" }, 14.35);
+      tl.from("#scene-2 .code-line", { opacity: 0, x: -18, duration: 0.25, stagger: 0.06, ease: "power2.out" }, 14.75);
+      tl.from("#scene-2 .topline", { opacity: 0, y: 28, duration: 0.42, ease: "power2.out" }, 14.58);
+      tl.from("#scene-2 h2", { opacity: 0, y: 44, duration: 0.58, ease: "power3.out" }, 14.9);
+      tl.from("#scene-2 .body-copy", { opacity: 0, y: 30, duration: 0.48, ease: "power2.out" }, 15.5);
+      tl.from("#scene-2 .task", { opacity: 0, y: 34, scale: 0.96, duration: 0.42, stagger: 0.11, ease: "back.out(1.25)" }, 16.0);
+      tl.from("#scene-2 .caption", { opacity: 0, y: 28, duration: 0.4, ease: "power2.out" }, 16.8);
+      tl.to("#scene-2 .icon-block", { scale: 1.06, duration: 1.0, repeat: 6, yoyo: true, ease: "sine.inOut" }, 18.0);
+      coverTransition("#scene-2", "#scene-3", 31.55);
+
+      tl.from("#scene-3 .topline", { opacity: 0, y: 28, duration: 0.42, ease: "power2.out" }, 32.35);
+      tl.from("#scene-3 h2", { opacity: 0, y: 46, duration: 0.58, ease: "power3.out" }, 32.65);
+      tl.from("#scene-3 .body-copy", { opacity: 0, y: 30, duration: 0.48, ease: "power2.out" }, 33.28);
+      tl.from("#scene-3 .chip", { opacity: 0, y: 22, duration: 0.36, stagger: 0.08, ease: "power2.out" }, 33.75);
+      tl.from("#scene-3 .phone-shot", { opacity: 0, x: 80, scale: 0.74, rotation: 5, duration: 0.7, ease: "power3.out" }, 32.6);
+      tl.from("#scene-3 .caption", { opacity: 0, y: 28, duration: 0.4, ease: "power2.out" }, 34.7);
+      tl.to("#scene-3 .phone-shot", { y: -14, duration: 2.2, repeat: 5, yoyo: true, ease: "sine.inOut" }, 36.0);
+      coverTransition("#scene-3", "#scene-4", 49.55);
+
+      tl.from("#scene-4 .phone-shot", { opacity: 0, x: -78, scale: 0.76, duration: 0.68, ease: "power3.out" }, 50.35);
+      tl.from("#scene-4 .topline", { opacity: 0, y: 28, duration: 0.42, ease: "power2.out" }, 50.55);
+      tl.from("#scene-4 h2", { opacity: 0, y: 46, duration: 0.58, ease: "power3.out" }, 50.85);
+      tl.from("#scene-4 .body-copy", { opacity: 0, y: 30, duration: 0.48, ease: "power2.out" }, 51.48);
+      tl.from("#scene-4 .signal-row", { opacity: 0, x: 52, duration: 0.44, stagger: 0.16, ease: "power3.out" }, 52.0);
+      tl.from("#scene-4 .caption", { opacity: 0, y: 28, duration: 0.4, ease: "power2.out" }, 53.35);
+      tl.to("#scene-4 .signal-icon", { y: -5, duration: 0.95, repeat: 6, yoyo: true, ease: "sine.inOut" }, 55.0);
+      coverTransition("#scene-4", "#scene-5", 67.55);
+
+      tl.from("#scene-5 .topline", { opacity: 0, y: 28, duration: 0.42, ease: "power2.out" }, 68.35);
+      tl.from("#scene-5 h2", { opacity: 0, y: 46, duration: 0.58, ease: "power3.out" }, 68.65);
+      tl.from("#scene-5 .body-copy", { opacity: 0, y: 30, duration: 0.48, ease: "power2.out" }, 69.28);
+      tl.from("#scene-5 .chip", { opacity: 0, y: 22, duration: 0.36, stagger: 0.08, ease: "power2.out" }, 69.76);
+      tl.from("#scene-5 .phone-shot", { opacity: 0, x: 76, scale: 0.76, rotation: -5, duration: 0.7, ease: "power3.out" }, 68.65);
+      tl.from("#scene-5 .caption", { opacity: 0, y: 28, duration: 0.4, ease: "power2.out" }, 70.7);
+      tl.to("#scene-5 .phone-shot", { y: -12, duration: 2.0, repeat: 5, yoyo: true, ease: "sine.inOut" }, 72.0);
+      coverTransition("#scene-5", "#scene-6", 85.55);
+
+      tl.from("#scene-6 .topline", { opacity: 0, y: 28, duration: 0.42, ease: "power2.out" }, 86.35);
+      tl.from("#scene-6 h2", { opacity: 0, y: 46, duration: 0.58, ease: "power3.out" }, 86.65);
+      tl.from("#scene-6 .body-copy", { opacity: 0, y: 30, duration: 0.48, ease: "power2.out" }, 87.28);
+      tl.from("#scene-6 .hardware-card", { opacity: 0, y: 48, scale: 0.96, duration: 0.5, stagger: 0.14, ease: "back.out(1.2)" }, 87.85);
+      tl.from("#scene-6 .scale-fill", { scaleX: 0, transformOrigin: "left center", duration: 0.62, stagger: 0.14, ease: "power2.out" }, 88.55);
+      tl.from("#scene-6 .caption", { opacity: 0, y: 28, duration: 0.4, ease: "power2.out" }, 89.55);
+      tl.to("#scene-6 .device-visual", { y: -8, duration: 1.25, repeat: 5, yoyo: true, ease: "sine.inOut" }, 91.0);
+      coverTransition("#scene-6", "#scene-7", 103.55);
+
+      tl.from("#scene-7 .topline", { opacity: 0, y: 28, duration: 0.42, ease: "power2.out" }, 104.35);
+      tl.from("#scene-7 h2", { opacity: 0, y: 46, duration: 0.58, ease: "power3.out" }, 104.65);
+      tl.from("#scene-7 .agent-card", { opacity: 0, y: 48, scale: 0.96, duration: 0.48, stagger: 0.16, ease: "back.out(1.18)" }, 105.45);
+      tl.from("#scene-7 .agent-icon", { opacity: 0, scale: 0.58, duration: 0.32, stagger: 0.16, ease: "power2.out" }, 105.85);
+      tl.from("#scene-7 .caption", { opacity: 0, y: 28, duration: 0.4, ease: "power2.out" }, 107.45);
+      tl.to("#scene-7 .agent-icon", { y: -6, duration: 0.95, repeat: 7, yoyo: true, ease: "sine.inOut" }, 109.0);
+      coverTransition("#scene-7", "#scene-8", 123.55);
+
+      tl.from("#scene-8 .topline", { opacity: 0, y: 28, duration: 0.42, ease: "power2.out" }, 124.35);
+      tl.from("#scene-8 .headline-line", { opacity: 0, y: 52, duration: 0.62, stagger: 0.12, ease: "power3.out" }, 124.68);
+      tl.from("#scene-8 .body-copy", { opacity: 0, y: 30, duration: 0.48, ease: "power2.out" }, 125.48);
+      tl.from("#scene-8 .chip", { opacity: 0, y: 22, duration: 0.36, stagger: 0.08, ease: "power2.out" }, 125.95);
+      tl.from("#scene-8 .final-card", { opacity: 0, x: 68, scale: 0.96, duration: 0.64, ease: "power3.out" }, 124.9);
+      tl.from("#scene-8 .roadmap-row", { opacity: 0, x: 32, duration: 0.34, stagger: 0.1, ease: "power2.out" }, 126.2);
+      tl.from("#scene-8 .caption", { opacity: 0, y: 28, duration: 0.4, ease: "power2.out" }, 127.25);
+      tl.to("#scene-8 .final-card", { y: -8, duration: 1.5, repeat: 6, yoyo: true, ease: "sine.inOut" }, 130.0);
+      tl.to("#scene-8", { opacity: 0, duration: 0.6, ease: "power2.in" }, 143.1);
+
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>

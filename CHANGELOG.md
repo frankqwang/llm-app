@@ -4,6 +4,43 @@
 
 ---
 
+## v6.1 — 对话式 Agent UX + 标注流改造 (2026-05-10)
+
+聊天 Tab 从「关键词路由」升级为**模型驱动的规划智能体**：Gemma 读完整 App 状态后用自然语言回答，并返回一个结构化动作给 UI 执行。同时把语音输入接进对话（按住麦克风 → 系统识别 / 本地音频），并整理了模型管理和单素材标注的流程。
+
+**A. ChatPlannerAgent — 模型驱动的对话规划**
+- 新增 `agents/ChatPlannerAgent.kt`：将用户输入 + `ChatContext`（模型是否就绪、相册数、流水线状态、活跃 eventId、视频/候选摘要）打包后给 Gemma，要求输出一个 JSON `Plan`：`action ∈ {ANSWER, SUGGEST_EDITS, SCAN_ALBUM, MAKE_CANDIDATE, ITERATE, OPEN_ALBUM, OPEN_MODELS, CLARIFY}` + 自然语言回复 + 可选 `targetEventId` / `feedbackText` / `confidence`。
+- 解析失败时退化到关键词 fallback；模型未就绪时直接返回引导导入模型的固定 Plan。
+- `planAudio()` 直接吃 16 kHz PCM WAV，复用同一 SYSTEM_PROMPT —— 用户既可以打字也可以按住说话，对话上下文不分叉。
+- ChatViewModel / ChatStore / ChatModels 同步：Plan 结果驱动 UI 跳转（Album / Models 页）、`SUGGEST_EDITS` 自动把 `feedbackText` 投递到目标 vlog 的迭代面板。
+
+**B. 语音输入接入对话**
+- `HoldToDictateViewModel` 去掉硬编码 `en-US`，改读 `Locale.getDefault().toLanguageTag()`；新增 `recognitionAvailable` 探测，无识别器时不再无声失败，UI 拿到中文错误提示并直接回填空字符串。
+- `cancelSpeechRecognition()` 现在会真正调用 `speechRecognizer.cancel()`，避免回调泄漏。
+- ChatScreen 新增麦克风按钮 + 录音过程的实时波形 + Toast 错误兜底；录到的 WAV 走 `planAudio()` 直送 Gemma，跳过 STT。
+
+**C. 单素材标注流（VlogIndexWorker）**
+- 新增「按住相册某张图 → 手动重标」入口：`VlogIndexWorker` 新支持 `KEY_FORCE_ANNOTATION` 强制重跑 VLM；新增 `singleAssetWorkName(assetId)` 作为每素材独立 WORK_NAME，避免与全量后台索引互相取消。
+- 完成后通过新的 `vlog_pilot_asset_annotation` 通知通道弹一条「素材标注完成」系统通知，三种文案分支：无模型 / 拿到语义标签 / 仅完成基础检测无语义。
+- `PerceptionCache.get` 现在双键查找（asset 对象 + asset.id 字符串），允许从聊天/相册不同入口命中同一缓存条目。
+
+**D. `VlmAnnotator.hasSignal()` 覆盖完整 schema**
+- 旧实现只看 `scene` / `action` / `salient` / `video.summary` 四个字段，导致只产生 `subjects` / `mood` / `composition` / `lighting` / `narrativeRoleHint` / `actionArc` 等其他标签的样本被判为"无信号"白白重跑。新实现把 schema 里所有可能字段都纳入判断，节省一次 Gemma 调用。
+- `VlogIndexWorker.hasSemanticAnnotation()` 也升级到同样的覆盖面，决定「是否触发 VLM 标注」时不再过保守。
+
+**E. 模型管理瘦身（VlogPilot 视角）**
+- `GlobalModelManager` 抽屉标题从 gallery 通用 `drawer_models_label` 改为「VlogPilot 模型」；点击模型不再弹任务选择 bottom sheet（Gallery 残留），改为 snackbar 提示「<模型> 已可在 VlogPilot 中使用」。
+- 排序调整：**已导入模型在前**，内置模型在后 —— 用户刚成功导入的 `.litertlm` 立即可见，不再被内置占位条目挤到屏幕外。
+- 新增一行说明文案：「导入本地 .litertlm 模型后，回到对话即可扫描相册和生成分镜。这个页面只管理模型，不会跳转到 Gallery 的任务页。」
+- 列表重渲触发器从单一 `modelImportingUpdateTrigger` 扩展到 `(trigger, loadingAllowlist, modelListVersion)`，导入后 UI 不再需要手动下拉。
+
+**F. CLAUDE.md 重写**
+- 326 行 → 140 行，去掉冗长的"为什么这是地雷"叙述，保留可执行规则。把架构详解、调试观测、测试命令从 README 抽出到 `docs/` 后，CLAUDE.md 现在只列地雷、house rules 和 Windows/ADB 注意事项，新对话冷启动更快。
+
+**测试**：编译通过，vivo X200 Pro 真机验证语音输入 → ChatPlanner → 触发 SCAN_ALBUM / MAKE_CANDIDATE / OPEN_MODELS 三条路径，单素材重标弹通知。
+
+---
+
 ## v6.0 — 智能剪辑 + Apple 风格 UI + 导出闭环 (2026-05-09)
 
 流水线获得了更丰富的 **AI 剪辑语言**（逐镜头速度 / Ken Burns 缩放 / 剪辑理由），相册浏览器的滚动卡顿修复，结果页支持发布（保存到相册 + 分享至小红书/微信），整个 VlogPilot 模块进行了 iOS 风格视觉重塑，并新增了 Claude 风格的**工作进程时间线**，让用户实时观看智能体链的执行过程。

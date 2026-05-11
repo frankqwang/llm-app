@@ -19,11 +19,25 @@ models/
 # sessions goes under .debug/ (with subdirs runs/ logs/ ui/) — do NOT scatter
 # .run*, .ui*.xml, .screen.png, .sample_*.json at repo root.
 .debug/
+# Older debug scratch directory at repo root (UI dumps / crash logs / screenshots
+# captured during device testing). New scratch should go under .debug/.
+artifacts/
 
 # Maestro UI test outputs — flows are committed under .maestro/flows/, but
 # per-run video / screenshot / report artifacts are local-only.
 .maestro/output/
 .maestro/.cache/
+
+# Video composition projects under videos/ — commit the source (HTML, MD docs,
+# storyboard snapshots), skip the heavy generated/binary outputs and the
+# hyperframes CLI caches.
+videos/*/renders/*.mp4
+videos/*/narration.wav
+videos/*/preview.log
+videos/*/node_modules/
+videos/*/assets/fonts/
+videos/*/.thumbnails/
+videos/*/.waveform-cache/
 
 # Third-party repos cloned at root (not part of this project, see pc-pilot/README.md)
 ACE-Step-1.5/
