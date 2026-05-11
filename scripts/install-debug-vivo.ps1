@@ -107,8 +107,8 @@ if (-not $deviceLine) {
   throw "No adb device is connected"
 }
 
-$stdout = Join-Path $env:TEMP "vlogpilot-install-debug.out.log"
-$stderr = Join-Path $env:TEMP "vlogpilot-install-debug.err.log"
+$stdout = Join-Path $env:TEMP "vlogcopilot-install-debug.out.log"
+$stderr = Join-Path $env:TEMP "vlogcopilot-install-debug.err.log"
 Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
 
 Write-Host "Starting Gradle installDebug..."

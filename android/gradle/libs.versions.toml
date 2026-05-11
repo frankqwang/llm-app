@@ -40,7 +40,7 @@ kotlinReflect = "2.2.21"
 moshi = "1.15.2"
 ksp = "2.3.6"
 mlkit-genai-prompt = "1.0.0-beta2"  # Ref: https://developers.google.com/ml-kit/genai/prompt/android/get-started#configure-project
-# v3 vlogpilot deps (verified May 2026)
+# v3 vlogcopilot deps (verified May 2026)
 # M3 VLM: Gemma 4 E2B-it (text+img+audio, 2.59 GB int4) loaded by existing litertlm 0.11.0,
 #         downloaded first launch from HF litert-community/gemma-4-E2B-it-litert-lm.
 coroutines = "1.9.0"
@@ -103,7 +103,7 @@ androidx-exifinterface = { group = "androidx.exifinterface", name = "exifinterfa
 moshi-kotlin = { group = "com.squareup.moshi", name = "moshi-kotlin", version.ref = "moshi" }
 moshi-kotlin-codegen = { group = "com.squareup.moshi", name = "moshi-kotlin-codegen", version.ref = "moshi" }
 mlkit-genai-prompt = { group = "com.google.mlkit", name = "genai-prompt", version.ref = "mlkit-genai-prompt" }
-# v3 vlogpilot — verified May 2026
+# v3 vlogcopilot — verified May 2026
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 mediapipe-tasks-vision = { group = "com.google.mediapipe", name = "tasks-vision", version.ref = "mediapipeTasks" }
 onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxRuntime" }

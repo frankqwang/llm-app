@@ -202,7 +202,7 @@ dependencies {
   ksp(libs.moshi.kotlin.codegen)
   implementation(libs.mlkit.genai.prompt)
 
-  // v3 vlogpilot
+  // v3 vlogcopilot
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.mediapipe.tasks.vision)
   implementation(libs.onnxruntime.android)

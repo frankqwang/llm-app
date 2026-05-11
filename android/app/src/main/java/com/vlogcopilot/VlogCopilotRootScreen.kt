@@ -1,0 +1,130 @@
+/*
+ * Copyright 2026 The pc-pilot v3 authors
+ *
+ * App-launch landing for VlogCopilot. Wraps VlogCopilotScreen in a Scaffold with
+ * an iOS-style bottom NavigationBar with 4 tabs (Works / Chat / Album / Settings). Tab state is
+ * hoisted here so VlogCopilotScreen takes selectedTab as a parameter and
+ * doesn't have to manage its own internal tab routing.
+ *
+ * Ships an iOS-style aesthetic via VlogCopilotTheme — inset-grouped backgrounds,
+ * system blue accent, hairline separators, generous whitespace.
+ */
+package com.vlogcopilot
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import com.vlogcopilot.ui.theme.VlogCopilotTokens
+import com.vlogcopilot.ui.theme.VlogCopilotTheme
+import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
+
+@Composable
+fun VlogCopilotRootScreen(
+  modelManagerViewModel: ModelManagerViewModel,
+  onOpenGallery: () -> Unit,
+  onOpenModelManager: () -> Unit = onOpenGallery,
+) {
+  VlogCopilotTheme {
+    var selectedTab by remember { mutableStateOf(VlogCopilotTab.Works) }
+    // Hoisted here so the chat VM survives tab switches — otherwise
+    // PipelineEventBus events that fire while the user is on a non-Chat
+    // tab would be dropped (the bus uses replay=1, so a freshly recreated
+    // VM only sees the latest event, not the ones in between).
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val chatViewModel = remember {
+      com.vlogcopilot.chat.ChatViewModel(context.applicationContext)
+    }
+    androidx.compose.runtime.DisposableEffect(chatViewModel) {
+      onDispose { chatViewModel.close() }
+    }
+    Scaffold(
+      modifier = Modifier
+        .fillMaxSize()
+        .background(MaterialTheme.colorScheme.background),
+      containerColor = MaterialTheme.colorScheme.background,
+      bottomBar = {
+        VlogCopilotBottomBar(selected = selectedTab, onSelect = { selectedTab = it })
+      },
+    ) { innerPadding ->
+      VlogCopilotScreen(
+        selectedTab = selectedTab,
+        onTabChange = { selectedTab = it },
+        chatViewModel = chatViewModel,
+        bottomPadding = innerPadding.calculateBottomPadding(),
+        modelManagerViewModel = modelManagerViewModel,
+        onOpenGallery = onOpenGallery,
+        onOpenModelManager = onOpenModelManager,
+        modifier = Modifier.padding(top = innerPadding.calculateTopPadding()),
+      )
+    }
+  }
+}
+
+/** iOS-style bottom NavigationBar. Hairline separator on top, accent for the
+ *  selected item, secondaryLabel for inactive — keeps the bar visually quiet
+ *  so the content above it stays the focus. */
+@Composable
+private fun VlogCopilotBottomBar(
+  selected: VlogCopilotTab,
+  onSelect: (VlogCopilotTab) -> Unit,
+) {
+  val tokens = VlogCopilotTokens
+  // Hairline separator at the top edge — Apple Photos / Settings have this
+  // subtle line between content and tab bar so the bar doesn't bleed in.
+  androidx.compose.foundation.layout.Column {
+    Box(
+      modifier = Modifier
+        .fillMaxWidth()
+        .height(0.5.dp)
+        .background(tokens.colors.opaqueSeparator),
+    )
+    NavigationBar(
+      containerColor = MaterialTheme.colorScheme.background,
+      tonalElevation = 0.dp,
+    ) {
+      VlogCopilotTab.entries.forEach { tab ->
+        NavigationBarItem(
+          selected = tab == selected,
+          onClick = { onSelect(tab) },
+          icon = {
+            Icon(
+              imageVector = tab.icon,
+              contentDescription = null,
+            )
+          },
+          label = {
+            Text(
+              tab.label,
+              style = MaterialTheme.typography.labelSmall,
+            )
+          },
+          alwaysShowLabel = true,
+          colors = NavigationBarItemDefaults.colors(
+            selectedIconColor = tokens.colors.accent,
+            selectedTextColor = tokens.colors.accent,
+            unselectedIconColor = tokens.colors.secondaryLabel,
+            unselectedTextColor = tokens.colors.secondaryLabel,
+            indicatorColor = tokens.colors.accentTint,
+          ),
+        )
+      }
+    }
+  }
+}

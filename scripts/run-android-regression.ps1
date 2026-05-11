@@ -70,8 +70,8 @@ function Resolve-Device {
 
 function Save-DeviceArtifacts {
   param([string]$AdbPath, [string]$DeviceSerial, [string]$OutDir, [string]$Prefix)
-  $remotePng = "/sdcard/vlogpilot-$Prefix.png"
-  $remoteXml = "/sdcard/vlogpilot-$Prefix.xml"
+  $remotePng = "/sdcard/vlogcopilot-$Prefix.png"
+  $remoteXml = "/sdcard/vlogcopilot-$Prefix.xml"
   & $AdbPath -s $DeviceSerial shell screencap -p $remotePng | Out-Null
   & $AdbPath -s $DeviceSerial pull $remotePng (Join-Path $OutDir "$Prefix.png") | Out-Null
   & $AdbPath -s $DeviceSerial shell uiautomator dump $remoteXml | Out-Null

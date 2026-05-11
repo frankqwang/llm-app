@@ -48,7 +48,7 @@ Write-Host "  4. Pick Downloads -> gemma-4-E2B-it.litertlm"
 Write-Host "  5. In import dialog, BEFORE confirming, toggle ON:" -ForegroundColor Yellow
 Write-Host "       [x] Support speculative decoding   <-- REQUIRED for MTP" -ForegroundColor Yellow
 Write-Host "       [ ] Support thinking               <-- optional, off for raw decode bench"
-Write-Host "       [.] Support image                  <-- not required for VlogPilot (it asks for vision at runtime"
+Write-Host "       [.] Support image                  <-- not required for VlogCopilot (it asks for vision at runtime"
 Write-Host "                                              regardless), but ON keeps LLM Ask Image happy too"
 Write-Host "       [ ] Support audio                  <-- skip unless testing audio"
 Write-Host "       Compatible accelerators: GPU"

@@ -1,6 +1,6 @@
 # 相册挖掘-本地agent版 (AlnumCopilot)
 
-基于 [Google AI Edge Gallery](https://github.com/google-ai-edge/gallery) (Apache-2.0) 的分支。本仓库交付的应用是 **VlogPilot**：一键点击，Gemma 4 E2B-IT 通过 [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM) 在设备端本地运行，将相册最近 30 天的照片自动剪辑为 AI 策划的 vlog 候选——不上传、不上云、不需要账号。
+基于 [Google AI Edge Gallery](https://github.com/google-ai-edge/gallery) (Apache-2.0) 的分支。本仓库交付的应用是 **VlogCopilot**：一键点击，Gemma 4 E2B-IT 通过 [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM) 在设备端本地运行，将相册最近 30 天的照片自动剪辑为 AI 策划的 vlog 候选——不上传、不上云、不需要账号。
 
 5 智能体推理链（Browser → Audience → Director → Editor → Critic）移植自 [pc-pilot](pc-pilot/) Python 参考实现。渲染使用 ffmpeg-kit，在支持的 SoC 上启用硬件 H.264（h264_mediacodec）。
 
@@ -86,12 +86,12 @@ adb push C:\dev\llm-app\models\gemma-4-E2B-it.litertlm /sdcard/Download/
 llm-app/
   android/                    # Gradle 项目（Kotlin + Compose + Hilt）
     app/src/main/java/com/google/ai/edge/gallery/
-      customtasks/vlogpilot/  # VlogPilot 模块
+      com/vlogcopilot/  # VlogCopilot 模块
         agents/               # Browser/Audience/Director/Editor/Critic + VlmAnnotator
         perception/           # 轻量感知：人脸、清晰度、NSFW
         pipeline/             # EventSegmenter, EventSelector, Recall, MontageBuilder…
         render/               # ffmpeg-kit 镜头/合成渲染器
-        runtime/              # PowerPacer, VlogPilotModelRegistry
+        runtime/              # PowerPacer, VlogCopilotModelRegistry
         schemas/              # @Serializable Asset/Perception/VlmTags/Timeline/…
         worker/               # PipelineOrchestrator + WorkManager Worker + 面包屑日志
   pc-pilot/                   # Python 参考实现（服务端对照、调试）

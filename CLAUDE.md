@@ -4,7 +4,7 @@
 
 `llm-app` is an Android Kotlin/Compose app forked from
 [google-ai-edge/gallery](https://github.com/google-ai-edge/gallery). The product
-is **VlogPilot** — Gemma 4 E2B-IT runs fully on-device via LiteRT-LM, turning
+is **VlogCopilot** — Gemma 4 E2B-IT runs fully on-device via LiteRT-LM, turning
 the user's photo album into ~6 MB 1080×1920 MP4 vlogs. No cloud, no upload.
 
 Three pipeline entry points, all routed through `VlogPipelineWorker`:
@@ -132,7 +132,7 @@ opens AgentRuntime once; don't create two per iteration (Gemma init ≈ 15s).
 
 `adb` isn't on PATH: `ADB="$LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe"`.
 Test device: vivo X200 Pro (`PD2405A` / `V2405A`), package
-`com.google.aiedge.gallery`, worker name `vlog_pilot_pipeline`.
+`com.google.aiedge.gallery`, worker name `vlog_copilot_pipeline`.
 
 `adb pull` of `/data/data/.../files/` does NOT work (app uid). Use
 `exec-out run-as <pkg> cat <relative-path>` and redirect locally. Git Bash

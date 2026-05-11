@@ -197,7 +197,7 @@ fun GlobalModelManager(
 
   val handleClickModel: (Model) -> Unit = { model ->
     scope.launch {
-      snackbarHostState.showSnackbar("${model.displayName.ifBlank { model.name }} 已可在 VlogPilot 中使用")
+      snackbarHostState.showSnackbar("${model.displayName.ifBlank { model.name }} 已可在 VlogCopilot 中使用")
     }
   }
 
@@ -222,7 +222,7 @@ fun GlobalModelManager(
               )
               Text(
                 text =
-                  "VlogPilot 模型 (${builtInModels.size + importedModels.size})",
+                  "VlogCopilot 模型 (${builtInModels.size + importedModels.size})",
                 color = MaterialTheme.colorScheme.onSurface,
                 style = MaterialTheme.typography.titleMedium,
               )
@@ -281,7 +281,7 @@ fun GlobalModelManager(
           }
         }
 
-        item(key = "vlogpilot_model_hint") {
+        item(key = "vlogcopilot_model_hint") {
           Text(
             "导入本地 .litertlm 模型后，回到「对话」即可扫描相册和生成分镜。这个页面只管理模型，不会跳转到 Gallery 的任务页。",
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
@@ -486,7 +486,7 @@ fun GlobalModelManager(
       },
       onDismissRequest = { showUnsupportedFileTypeDialog = false },
       title = { Text("文件类型不支持") },
-      text = { Text("当前只支持 .task 或 .litertlm 文件。VlogPilot 推荐导入 .litertlm 本地模型。") },
+      text = { Text("当前只支持 .task 或 .litertlm 文件。VlogCopilot 推荐导入 .litertlm 本地模型。") },
       confirmButton = {
         Button(onClick = { showUnsupportedFileTypeDialog = false }) {
           Text(stringResource(R.string.ok))

@@ -96,7 +96,7 @@ private const val ROUTE_MODEL_LIST = "model_list"
 private const val ROUTE_MODEL = "route_model"
 private const val ROUTE_BENCHMARK = "benchmark"
 private const val ROUTE_MODEL_MANAGER = "model_manager"
-private const val ROUTE_VLOGPILOT = "vlogpilot_root"
+private const val ROUTE_VLOGCOPILOT = "vlogcopilot_root"
 private const val ENTER_ANIMATION_DURATION_MS = 500
 private val ENTER_ANIMATION_EASING = EaseOutExpo
 private const val ENTER_ANIMATION_DELAY_MS = 100
@@ -183,15 +183,15 @@ fun GalleryNavHost(
 
   NavHost(
     navController = navController,
-    startDestination = ROUTE_VLOGPILOT,
+    startDestination = ROUTE_VLOGCOPILOT,
     enterTransition = { EnterTransition.None },
     exitTransition = { ExitTransition.None },
   ) {
-    // VlogPilot direct landing — c-end users see the VlogPilot tabs on launch.
-    // The Gallery entry lives in VlogPilot settings so the main tabs keep
+    // VlogCopilot direct landing — c-end users see the VlogCopilot tabs on launch.
+    // The Gallery entry lives in VlogCopilot settings so the main tabs keep
     // their vertical space for product content.
-    composable(route = ROUTE_VLOGPILOT) {
-      com.google.ai.edge.gallery.customtasks.vlogpilot.VlogPilotRootScreen(
+    composable(route = ROUTE_VLOGCOPILOT) {
+      com.vlogcopilot.VlogCopilotRootScreen(
         modelManagerViewModel = modelManagerViewModel,
         onOpenGallery = { navController.navigate(ROUTE_HOMESCREEN) },
         onOpenModelManager = { navController.navigate(ROUTE_MODEL_MANAGER) },
@@ -211,9 +211,9 @@ fun GalleryNavHost(
             tosViewModel = hiltViewModel(),
             enableAnimation = enableHomeScreenAnimation,
             navigateToTaskScreen = { task ->
-              if (task.id == com.google.ai.edge.gallery.customtasks.vlogpilot.VlogPilotTask.TASK_ID) {
-                // VlogPilot has no model picker — go straight to the task screen.
-                navController.navigate(ROUTE_VLOGPILOT)
+              if (task.id == com.vlogcopilot.VlogCopilotTask.TASK_ID) {
+                // VlogCopilot has no model picker — go straight to the task screen.
+                navController.navigate(ROUTE_VLOGCOPILOT)
               } else {
                 pickedTask = task
                 enableModelListAnimation = true
